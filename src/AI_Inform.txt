@@ -59,6 +59,8 @@ You may explore external websites to find valid image URLs and copy the image ad
 pointImageConfig - this must be an array of objects, one for each label, with the following structure:
 { "type": "circle", "size": 20, "position": "center", "arrow": false }
 
-also include x and y axis names in respective place in the response (MUST Needed)
+also include x and y axis names in respective place in the response (MUST Needed for axis charts only like bar, line, area, scatter so on)
+
+VERY VERY IMPORTANTLY MAKE SURE YOU ARE PROVIDING THE MOST RECENT DATA AS OUTPUT
 
 Lastly, provide a message to the user about the chart under the user_message key (outside the data block).

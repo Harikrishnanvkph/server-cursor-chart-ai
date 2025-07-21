@@ -12,7 +12,9 @@ npm install
 2. Create a `.env` file in the root directory with the following variables:
 ```
 PORT=3001
-GOOGLE_API_KEY=your_google_api_key_here
+GEMINI_API_KEY=your_google_gemini_api_key_here
+PERPLEXITY_API_KEY=your_perplexity_api_key_here    # Optional: For Perplexity AI support
+OPENROUTER_API_KEY=your_openrouter_api_key_here    # Optional: For OpenRouter AI support
 ```
 
 3. Start the server:
