@@ -2,6 +2,11 @@
 
 This is the backend server for the Chart Generator application. It processes text input and generates structured chart data using Google's Gemini AI model.
 
+Auth additions:
+- Supabase-backed auth routes at `/auth/*`
+- HTTP-only cookies for session tokens (SameSite=Lax)
+- Helmet, CORS, cookie-parser, rate limiting on auth
+
 ## Setup
 
 1. Install dependencies:
@@ -15,6 +20,11 @@ PORT=3001
 GEMINI_API_KEY=your_google_gemini_api_key_here
 PERPLEXITY_API_KEY=your_perplexity_api_key_here    # Optional: For Perplexity AI support
 OPENROUTER_API_KEY=your_openrouter_api_key_here    # Optional: For OpenRouter AI support
+SUPABASE_URL=your_supabase_url
+SUPABASE_ANON_KEY=your_supabase_anon_key
+SUPABASE_SERVICE_ROLE_KEY=your_supabase_service_role_key
+APP_ORIGIN=http://localhost:3000
+SERVER_PUBLIC_URL=http://localhost:3001
 ```
 
 3. Start the server:

@@ -1,12 +1,16 @@
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
+import helmet from 'helmet';
+import cookieParser from 'cookie-parser';
+import rateLimit from 'express-rate-limit';
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import fs from 'node:fs/promises'
 import { generateChartDataWithPerplexity, modifyChartDataWithPerplexity } from './services/perplexityService.js';
 import { generateChartDataWithOpenRouter, modifyChartDataWithOpenRouter } from './services/openrouterService.js';
 import perplexityRoutes from './routes/perplexityRoutes.js';
 import openrouterRoutes from './routes/openrouterRoutes.js';
+import { requireAuth } from './middleware/authMiddleware.js'
 
 dotenv.config();
 
@@ -19,10 +23,27 @@ const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 // In-memory conversation store (in production, use a database)
 const conversationStore = new Map();
 
-app.use(cors());
+// Security & middleware
+app.use(helmet());
+app.use(cookieParser());
 app.use(express.json());
 
+// CORS with credentials
+const appOrigin = process.env.APP_ORIGIN || 'http://localhost:3000'
+app.use(
+  cors({
+    origin: appOrigin,
+    credentials: true,
+  })
+)
+
+// Basic rate limit on auth endpoints
+const authLimiter = rateLimit({ windowMs: 60 * 1000, max: 60 })
+
 // Mount routes
+import authRoutes from './routes/authRoutes.js'
+app.use('/auth', authLimiter, authRoutes)
+app.use('/api', requireAuth) // protect API endpoints
 app.use('/api/perplexity', perplexityRoutes);
 app.use('/api/openrouter', openrouterRoutes);
 

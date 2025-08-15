@@ -135,7 +135,7 @@ router.get('/validate', async (req, res) => {
 router.get('/status', (req, res) => {
   try {
     const hasApiKey = !!process.env.PERPLEXITY_API_KEY;
-    const models = getAvailablePerplexityModels();
+    const models = getAvailablePerplexityModels()
     
     res.json({
       service: 'perplexity',
