@@ -4,8 +4,15 @@ const supabaseUrl = process.env.SUPABASE_URL
 const supabaseAnonKey = process.env.SUPABASE_ANON_KEY
 const supabaseServiceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY
 
-if (!supabaseUrl || !supabaseAnonKey) {
-  console.warn('Supabase URL or ANON key is not set. Auth endpoints will fail until configured.')
+// Enhanced environment variable validation
+if (!supabaseUrl) {
+  console.error('❌ SUPABASE_URL is not set. Supabase client will not work properly.');
+}
+if (!supabaseAnonKey) {
+  console.error('❌ SUPABASE_ANON_KEY is not set. Supabase client will not work properly.');
+}
+if (!supabaseServiceRoleKey) {
+  console.warn('⚠️ SUPABASE_SERVICE_ROLE_KEY is not set. OAuth functionality will not work properly.');
 }
 
 export const supabaseUserClient = createClient(supabaseUrl || '', supabaseAnonKey || '', {

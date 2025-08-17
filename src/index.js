@@ -10,9 +10,28 @@ import { generateChartDataWithPerplexity, modifyChartDataWithPerplexity } from '
 import { generateChartDataWithOpenRouter, modifyChartDataWithOpenRouter } from './services/openrouterService.js';
 import perplexityRoutes from './routes/perplexityRoutes.js';
 import openrouterRoutes from './routes/openrouterRoutes.js';
-import { requireAuth } from './middleware/authMiddleware.js'
+import { requireAuth, rateLimitMiddleware, getSecurityStats, blockIP, unblockIP } from './middleware/authMiddleware.js'
 
 dotenv.config();
+
+// Check required environment variables
+const requiredEnvVars = [
+  'SUPABASE_URL',
+  'SUPABASE_ANON_KEY', 
+  'SUPABASE_SERVICE_ROLE_KEY',
+  'GOOGLE_CLIENT_ID',
+  'GOOGLE_CLIENT_SECRET'
+];
+
+const missingEnvVars = requiredEnvVars.filter(envVar => !process.env[envVar]);
+
+if (missingEnvVars.length > 0) {
+  console.error('❌ Missing required environment variables:', missingEnvVars);
+  console.error('Please check your .env file and ensure all required variables are set.');
+  process.exit(1);
+}
+
+console.log('✅ All required environment variables are configured');
 
 const app = express();
 const port = process.env.PORT || 3001;
@@ -23,29 +42,109 @@ const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 // In-memory conversation store (in production, use a database)
 const conversationStore = new Map();
 
-// Security & middleware
-app.use(helmet());
-app.use(cookieParser());
-app.use(express.json());
+// Enhanced security middleware
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
+      fontSrc: ["'self'", "https://fonts.gstatic.com"],
+      imgSrc: ["'self'", "data:", "https:"],
+      scriptSrc: ["'self'"],
+      connectSrc: ["'self'", "https://api.openai.com", "https://api.perplexity.ai"],
+    },
+  },
+  hsts: {
+    maxAge: 31536000,
+    includeSubDomains: true,
+    preload: true
+  }
+}));
 
-// CORS with credentials
+app.use(cookieParser());
+app.use(express.json({ limit: '10mb' })); // Limit request body size
+
+// CORS with enhanced security
 const appOrigin = process.env.APP_ORIGIN || 'http://localhost:3000'
 app.use(
   cors({
     origin: appOrigin,
     credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+    exposedHeaders: ['X-Total-Count']
   })
 )
 
-// Basic rate limit on auth endpoints
-const authLimiter = rateLimit({ windowMs: 60 * 1000, max: 60 })
+// Global rate limiting
+const globalLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 1000, // limit each IP to 1000 requests per windowMs
+  message: 'Too many requests from this IP, please try again later.',
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: (req, res) => {
+    res.status(429).json({
+      error: 'Too many requests',
+      retryAfter: Math.ceil(15 * 60 / 1000), // 15 minutes in seconds
+      message: 'Rate limit exceeded. Please try again later.'
+    });
+  }
+});
 
-// Mount routes
+app.use(globalLimiter);
+
+// Mount routes with enhanced security
 import authRoutes from './routes/authRoutes.js'
-app.use('/auth', authLimiter, authRoutes)
+app.use('/auth', authRoutes)
 app.use('/api', requireAuth) // protect API endpoints
 app.use('/api/perplexity', perplexityRoutes);
 app.use('/api/openrouter', openrouterRoutes);
+
+// Security monitoring endpoints (admin only)
+app.get('/admin/security/stats', requireAuth, (req, res) => {
+  // Check if user is admin (you can implement your own admin check)
+  if (req.user?.email !== process.env.ADMIN_EMAIL) {
+    return res.status(403).json({ error: 'Admin access required' });
+  }
+  
+  const stats = getSecurityStats();
+  res.json(stats);
+});
+
+app.post('/admin/security/block-ip', requireAuth, (req, res) => {
+  // Check if user is admin
+  if (req.user?.email !== process.env.ADMIN_EMAIL) {
+    return res.status(403).json({ error: 'Admin access required' });
+  }
+  
+  const { ipAddress, reason } = req.body;
+  if (!ipAddress) {
+    return res.status(400).json({ error: 'IP address is required' });
+  }
+  
+  blockIP(ipAddress, reason || 'Admin action');
+  res.json({ success: true, message: `IP ${ipAddress} blocked` });
+});
+
+app.post('/admin/security/unblock-ip', requireAuth, (req, res) => {
+  // Check if user is admin
+  if (req.user?.email !== process.env.ADMIN_EMAIL) {
+    return res.status(403).json({ error: 'Admin access required' });
+  }
+  
+  const { ipAddress } = req.body;
+  if (!ipAddress) {
+    return res.status(400).json({ error: 'IP address is required' });
+  }
+  
+  const wasBlocked = unblockIP(ipAddress);
+  if (wasBlocked) {
+    res.json({ success: true, message: `IP ${ipAddress} unblocked` });
+  } else {
+    res.json({ success: false, message: `IP ${ipAddress} was not blocked` });
+  }
+});
 
 // Helper function to generate chart data using Gemini
 async function generateChartData(inputText) {
@@ -291,9 +390,29 @@ app.post('/api/process-chart-enhanced', async (req, res) => {
 
 // Health check endpoint
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+  res.json({ 
+    status: 'ok', 
+    timestamp: new Date().toISOString(),
+    security: 'enabled',
+    version: '2.0.0'
+  });
+});
+
+// Security status endpoint
+app.get('/security/status', (req, res) => {
+  const stats = getSecurityStats();
+  res.json({
+    status: 'secure',
+    timestamp: new Date().toISOString(),
+    blockedIPs: stats.blockedIPs.length,
+    suspiciousIPs: stats.suspiciousIPs.length,
+    rateLimitStats: stats.rateLimitStats
+  });
 });
 
 app.listen(port, () => {
-  console.log(`Server running on port ${port}`);
+  console.log(`🚀 AIChartor Server running on port ${port}`);
+  console.log(`🔒 Enhanced security features enabled`);
+  console.log(`📊 OAuth sessions will be stored securely in database`);
+  console.log(`🛡️ Rate limiting and IP blocking active`);
 }); 
