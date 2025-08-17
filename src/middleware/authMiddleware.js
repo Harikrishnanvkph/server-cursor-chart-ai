@@ -156,6 +156,7 @@ export async function requireAuth(req, res, next) {
 
 // Enhanced authentication middleware with additional security checks
 export async function requireAuthEnhanced(req, res, next) {
+  console.log('inside auth/me')
   try {
     const accessToken = req.cookies?.access_token;
     const clientIP = getClientIP(req);

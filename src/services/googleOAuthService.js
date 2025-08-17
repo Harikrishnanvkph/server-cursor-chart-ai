@@ -35,7 +35,8 @@ class GoogleOAuthService {
       redirect_uri: this.redirectUri,
       response_type: 'code',
       scope: 'openid email profile',
-      access_type: 'offline'
+      access_type: 'offline',
+      prompt : 'select_account'
       // Removed 'prompt: consent' - users will only see consent screen once
       // prompt : 'select_account'  = Shows account selector only when multiple accounts
       // No prompt parameter = Only shows consent on first authorization
