@@ -51,7 +51,7 @@ class SecureSessionStore {
   async createSession(accessToken, userData, provider) {
     try {
       const tokenHash = this.hashToken(accessToken);
-      const expiresAt = new Date(Date.now() + 3600 * 1000); // 1 hour
+      const expiresAt = new Date(Date.now() + 15 * 24 * 60 * 60 * 1000); // 15 days
 
       // First, ensure user exists in profiles table
       let user = await this.getUserByEmail(userData.email);

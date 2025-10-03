@@ -32,20 +32,15 @@ router.post('/process-chart', async (req, res) => {
     }
     
     if (!process.env.OPENROUTER_API_KEY) {
-      console.log('dfs');
       return res.status(500).json({ error: 'OpenRouter API key not configured' });
     }
 
-    console.log(`Processing chart request with OpenRouter (${model}):`, input.substring(0, 100) + '...');
-    
     let aiResponse;
     
     // Determine if this is a modification or new chart
     if (currentChartState && conversationId) {
-      console.log('Processing chart modification with OpenRouter for conversation:', conversationId);
       aiResponse = await modifyChartDataWithOpenRouter(input, currentChartState, messageHistory || [], model);
     } else {
-      console.log('Processing new chart creation with OpenRouter');
       aiResponse = await generateChartDataWithOpenRouter(input, model);
     }
     
@@ -62,7 +57,6 @@ router.post('/process-chart', async (req, res) => {
       _metadata: aiResponse._metadata
     };
     
-    console.log('OpenRouter response generated successfully:', result.chartType);
     res.json(result);
     
   } catch (error) {

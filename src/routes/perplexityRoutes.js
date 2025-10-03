@@ -27,29 +27,24 @@ router.post('/process-chart', async (req, res) => {
     if (!input) {
       return res.status(400).json({ error: 'Input text is required' });
     }
-    console.log(process.env.PERPLEXITY_API_KEY)
     if (!process.env.PERPLEXITY_API_KEY) {
       return res.status(500).json({ error: 'Perplexity API key not configured' });
     }
-
-    console.log(`Processing chart request with Perplexity (${model}):`, input.substring(0, 100) + '...');
     
     let aiResponse;
     
     // Determine if this is a modification or new chart
     if (currentChartState && conversationId) {
-      console.log('Processing chart modification with Perplexity for conversation:', conversationId);
       aiResponse = await modifyChartDataWithPerplexity(input, currentChartState, messageHistory || [], model);
     } else {
-      console.log('Processing new chart creation with Perplexity');
       aiResponse = await generateChartDataWithPerplexity(input, model);
     }
-    
+
     // Format response to match frontend expectations
     const result = {
       chartType: aiResponse.chartType,
-      chartData: aiResponse.data || aiResponse.chartData,
-      chartConfig: aiResponse.options || aiResponse.chartConfig,
+      chartData: aiResponse.chartData || aiResponse.data,
+      chartConfig: aiResponse.chartConfig || aiResponse.options,
       user_message: aiResponse.user_message || `Chart ${currentChartState ? 'modified' : 'generated'} using Perplexity AI (${model})`,
       action: aiResponse.action || (currentChartState ? 'modify' : 'create'),
       changes: aiResponse.changes || [],
@@ -57,15 +52,65 @@ router.post('/process-chart', async (req, res) => {
       service: 'perplexity',
       _metadata: aiResponse._metadata
     };
+
+    // Validate that we have the minimum required data
+    if (!result.chartType || !result.chartData) {
+      console.error('Validation failed:', {
+        chartType: result.chartType,
+        hasChartData: !!result.chartData,
+        chartDataKeys: result.chartData ? Object.keys(result.chartData) : 'null'
+      });
+      throw new Error('AI response missing required chart data - please try a different request');
+    }
     
-    console.log('Perplexity response generated successfully:', result.chartType);
     res.json(result);
     
   } catch (error) {
-    console.error('Error processing Perplexity chart request:', error);
-    res.status(500).json({ 
-      error: 'Failed to process chart request with Perplexity',
-      details: error.message 
+    console.error('Error processing Perplexity chart request:', {
+      message: error.message,
+      stack: error.stack,
+      input: req.body.input?.substring(0, 100) + '...',  // Log first 100 chars of input for debugging
+      model: req.body.model || 'sonar-pro',
+      timestamp: new Date().toISOString()
+    });
+    
+    // Provide more specific error messages based on error type
+    let errorMessage = 'Failed to process chart request with Perplexity';
+    let details = error.message;
+    let statusCode = 500;
+    
+    if (error.message?.includes('Empty response')) {
+      errorMessage = 'Perplexity AI returned empty response';
+      details = 'This might be due to rate limiting or service issues. Try using Google Gemini instead.';
+      statusCode = 503; // Service Unavailable
+    } else if (error.message?.includes('timeout')) {
+      errorMessage = 'Request timed out';
+      details = 'The Perplexity AI service took too long to respond. Try using Google Gemini instead.';
+      statusCode = 504; // Gateway Timeout
+    } else if (error.message?.includes('API key')) {
+      errorMessage = 'Perplexity API configuration error';
+      details = 'Please contact support if this persists.';
+      statusCode = 401; // Unauthorized
+    } else if (error.message?.includes('rate limit')) {
+      errorMessage = 'Perplexity API rate limit exceeded';
+      details = 'Please wait a moment before trying again, or use Google Gemini instead.';
+      statusCode = 429; // Too Many Requests
+    } else if (error.message?.includes('JSON')) {
+      errorMessage = 'Perplexity AI returned invalid response format';
+      details = 'The AI service returned malformed data. Try rephrasing your request or use Google Gemini instead.';
+      statusCode = 422; // Unprocessable Entity
+    } else if (error.message?.includes('truncated') || error.message?.includes('length limits')) {
+      errorMessage = 'Perplexity response was truncated';
+      details = 'The response exceeded token limits. Try a simpler request or use Google Gemini instead.';
+      statusCode = 413; // Payload Too Large
+    }
+    
+    res.status(statusCode).json({ 
+      error: errorMessage,
+      details: details,
+      service: 'perplexity',
+      fallback_suggestion: 'Try using Google Gemini AI service instead',
+      timestamp: new Date().toISOString()
     });
   }
 });
@@ -183,7 +228,7 @@ router.post('/test', async (req, res) => {
     // Simple test query (not for chart generation)
     const testResponse = await generateChartDataWithPerplexity(
       `Create a simple bar chart showing: ${query}`, 
-      'sonar-small'
+      'sonar-pro'
     );
     
     res.json({

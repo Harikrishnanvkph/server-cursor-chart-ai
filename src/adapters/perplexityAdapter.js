@@ -13,6 +13,7 @@ export class PerplexityAdapter {
     this.client = new OpenAI({
       apiKey: process.env.PERPLEXITY_API_KEY,
       baseURL: "https://api.perplexity.ai"
+      // No timeout - let frontend handle it
     });
   }
 
@@ -34,19 +35,82 @@ export class PerplexityAdapter {
     // Add user message
     messages.push({ role: "user", content: userPrompt });
 
-    const response = await this.client.chat.completions.create({
-      model: model || 'sonar-pro',
-      messages: messages,
-      max_tokens: maxTokens || 2000,
-      temperature: temperature || 0.3,
-      top_p: topP || 0.9
-    });
+    try {
+      // Determine optimal max_tokens based on request type and model
+      let optimalMaxTokens = maxTokens;
+      if (!optimalMaxTokens) {
+        // Check if this is likely a modification request (contains "current chart" or similar)
+        const isModification = userPrompt?.includes('Current Chart State') || 
+                              userPrompt?.includes('modification request') ||
+                              userPrompt?.includes('change') ||
+                              userPrompt?.includes('modify');
+        
+        // Use higher limits for modifications and certain models
+        if (isModification) {
+          optimalMaxTokens = 6000; // Increased for modifications with conversation history
+        } else if (model?.includes('mistral')) {
+          optimalMaxTokens = 5000; // Mistral has larger context window
+        } else {
+          optimalMaxTokens = 4000; // Increased default for new charts
+        }
+      }
 
-    return {
-      content: response.choices[0].message.content,
-      tokensUsed: response.usage?.total_tokens || null,
-      rawResponse: response
-    };
+      const response = await this.client.chat.completions.create({
+        model: model || 'sonar-pro',
+        messages: messages,
+        max_tokens: optimalMaxTokens,
+        temperature: temperature || 0.3,
+        top_p: topP || 0.9,
+        stream: false  // Ensure we get complete responses
+      });
+
+      const content = response.choices[0]?.message?.content;
+      
+      // Handle empty or null responses from Perplexity
+      if (!content || content.trim() === '') {
+        console.warn('Perplexity returned empty content');
+        throw new Error('Empty response from Perplexity AI service');
+      }
+
+      // Check if response appears to be truncated (common with incomplete JSON)
+      const trimmedContent = content.trim();
+      if (trimmedContent.includes('{') && !trimmedContent.endsWith('}') && !trimmedContent.endsWith('```')) {
+        console.warn('Perplexity response appears to be truncated');
+        // Check if it was truncated due to length limits
+        if (response.choices[0]?.finish_reason === 'length') {
+          throw new Error('Response was truncated due to length limits. Try a simpler request or increase max_tokens.');
+        }
+      }
+
+      // Check if response contains non-JSON content
+      if (!trimmedContent.includes('{') && !trimmedContent.includes('"chartType"')) {
+        console.warn('Perplexity response does not appear to contain JSON chart data');
+        throw new Error('AI service returned explanatory text instead of chart data. Please try rephrasing your request to be more specific about wanting chart data.');
+      }
+
+      return {
+        content: content,
+        tokensUsed: response.usage?.total_tokens || null,
+        rawResponse: response
+      };
+      
+    } catch (error) {
+      // Handle API errors
+      if (error.status === 401) {
+        throw new Error('Invalid Perplexity API key');
+      } else if (error.status === 429) {
+        throw new Error('Perplexity API rate limit exceeded. Please try again in a moment.');
+      } else if (error.status >= 500) {
+        throw new Error('Perplexity API server error. Please try again later.');
+      } else if (error.message?.includes('timeout')) {
+        throw new Error('Request to Perplexity API timed out. Please try again.');
+      } else if (error.message && !error.message.includes('fetch')) {
+        // Re-throw our custom errors
+        throw error;
+      } else {
+        throw new Error(`Perplexity API error: ${error.message}`);
+      }
+    }
   }
 
   /**
@@ -60,7 +124,7 @@ export class PerplexityAdapter {
       }
 
       const response = await this.client.chat.completions.create({
-        model: 'sonar-small',
+        model: 'sonar-pro',
         messages: [{ role: 'user', content: 'Test connection' }],
         max_tokens: 10
       });
@@ -114,42 +178,40 @@ export class PerplexityAdapter {
         name: 'Sonar Pro',
         description: 'Advanced search with grounding for complex queries',
         context_length: 4096,
-        cost_tier: 'premium'
-      },
-      {
-        id: 'sonar-small',
-        name: 'Sonar Small',
-        description: 'Efficient model for simpler tasks',
-        context_length: 4096,
-        cost_tier: 'basic'
+        cost_tier: 'premium',
+        recommended_max_tokens: 6000
       },
       {
         id: 'sonar-medium',
         name: 'Sonar Medium',
         description: 'Balanced performance and cost',
         context_length: 4096,
-        cost_tier: 'standard'
+        cost_tier: 'standard',
+        recommended_max_tokens: 5000
       },
       {
         id: 'mistral-7b',
         name: 'Mistral 7B',
         description: 'Open-source model with good performance',
         context_length: 8192,
-        cost_tier: 'standard'
+        cost_tier: 'standard',
+        recommended_max_tokens: 7000
       },
       {
         id: 'codellama-34b',
         name: 'CodeLlama 34B',
         description: 'Specialized for programming assistance',
         context_length: 4096,
-        cost_tier: 'premium'
+        cost_tier: 'premium',
+        recommended_max_tokens: 5000
       },
       {
         id: 'llama-2-70b',
         name: 'Llama 2 70B',
         description: 'Large model with broad capabilities',
         context_length: 4096,
-        cost_tier: 'premium'
+        cost_tier: 'premium',
+        recommended_max_tokens: 5000
       }
     ];
   }

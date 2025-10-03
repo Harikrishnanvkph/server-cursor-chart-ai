@@ -31,14 +31,28 @@ export class ChartProcessor {
         systemPrompt,
         userPrompt,
         model,
-        maxTokens: 2000,
-        temperature: 0.3,
-        topP: 0.9
+        maxTokens: 4000,  // Increased to 4000 for complex charts
+        temperature: 0.2,
+        topP: 0.85
       });
       
       // Process response
       const cleanedResponse = this.cleanResponse(response.content);
       const chartData = this.parseJSON(cleanedResponse, this.adapter.serviceName);
+      
+      // Validate required fields in chart data
+      if (!chartData.chartType) {
+        throw new Error('AI response missing chartType field');
+      }
+      
+      if (!chartData.data && !chartData.chartData) {
+        throw new Error('AI response missing chart data');
+      }
+      
+      // Ensure user_message exists
+      if (!chartData.user_message) {
+        chartData.user_message = `Chart generated successfully using ${this.adapter.serviceName}`;
+      }
       
       // Add metadata
       chartData._metadata = this.buildMetadata(response, model);
@@ -72,12 +86,12 @@ export class ChartProcessor {
         inputText
       );
       
-      // Make service-specific API call
+      // Make service-specific API call with higher tokens for modifications
       const response = await this.adapter.generateContent({
         userPrompt: contextPrompt,
         model,
-        maxTokens: 2000,
-        temperature: 0.3
+        maxTokens: 5000,  // Increased to 5000 for complex chart modifications with history
+        temperature: 0.2
       });
       
       // Process response
@@ -165,15 +179,26 @@ Please generate chart data in valid JSON format.`;
    * @returns {string} - Modification prompt
    */
   buildModificationPrompt(modificationContext, currentChartState, messageHistory, inputText) {
+    // Limit history to last 2 messages to reduce token usage
+    const recentHistory = messageHistory.slice(-2).map(msg => {
+      // Truncate long messages to first 150 characters
+      const content = msg.content?.length > 150 ? msg.content.substring(0, 150) + '...' : msg.content;
+      return `${msg.role}: ${content}`;
+    }).join('\n');
+
+    // Create a compact summary of chart state (remove formatting, reduce token usage by ~70%)
+    const compactData = JSON.stringify(currentChartState.chartData);
+    const compactConfig = JSON.stringify(currentChartState.chartConfig);
+
     return `${modificationContext}
 
 Current Chart State:
 - Chart Type: ${currentChartState.chartType}
-- Current Data: ${JSON.stringify(currentChartState.chartData, null, 2)}
-- Current Config: ${JSON.stringify(currentChartState.chartConfig, null, 2)}
+- Current Data: ${compactData}
+- Current Config: ${compactConfig}
 
-Recent conversation context (last 3 messages):
-${messageHistory.slice(-3).map(msg => `${msg.role}: ${msg.content}`).join('\n')}
+Recent conversation context (last 2 messages):
+${recentHistory}
 
 User's modification request: ${inputText}
 
@@ -203,6 +228,12 @@ Response format:
 
     let cleaned = responseText.trim();
     
+    // Check if response is just a fallback message (not JSON)
+    if (cleaned.includes("I apologize, but I couldn't generate") || 
+        cleaned.includes("Please try rephrasing your request")) {
+      throw new Error('AI service could not generate chart data - please try rephrasing your request');
+    }
+    
     // Remove ```json and ``` if they exist
     if (cleaned.startsWith('```json')) {
       cleaned = cleaned.replace(/^```json\s*/, '').replace(/\s*```$/, '');
@@ -217,7 +248,7 @@ Response format:
   }
 
   /**
-   * Parse JSON with enhanced error handling
+   * Parse JSON with enhanced error handling and auto-repair
    * @param {string} jsonText - JSON text to parse
    * @param {string} serviceName - Service name for error context
    * @returns {Object} - Parsed JSON object
@@ -227,8 +258,184 @@ Response format:
       return JSON.parse(jsonText);
     } catch (parseError) {
       console.error(`JSON Parse Error from ${serviceName}:`, parseError.message);
-      console.error('Raw response:', jsonText.substring(0, 500));
-      throw new Error(`Failed to parse ${serviceName} response as valid JSON: ${parseError.message}`);
+      console.error('Raw response length:', jsonText.length);
+      console.error('Raw response preview:', jsonText.substring(0, 500) + (jsonText.length > 500 ? '...' : ''));
+      
+      // Try to repair common JSON issues
+      let repairedJson = this.attemptJSONRepair(jsonText);
+      if (repairedJson) {
+        try {
+          console.log('Attempting to parse repaired JSON...');
+          console.log('Repaired JSON preview:', repairedJson.substring(0, 300) + (repairedJson.length > 300 ? '...' : ''));
+          return JSON.parse(repairedJson);
+        } catch (repairError) {
+          console.error('Repaired JSON still invalid:', repairError.message);
+        }
+      }
+      
+      // If all repair attempts fail, provide a more helpful error message
+      let errorDetails = parseError.message;
+      if (jsonText.length === 0) {
+        errorDetails = 'Response was empty';
+      } else if (!jsonText.trim().startsWith('{')) {
+        errorDetails = 'Response does not appear to be JSON (missing opening brace)';
+      } else if (!jsonText.trim().endsWith('}')) {
+        errorDetails = 'Response appears to be truncated (missing closing brace)';
+      }
+      
+      throw new Error(`Failed to parse ${serviceName} response as valid JSON: ${errorDetails}`);
+    }
+  }
+
+  /**
+   * Attempt to repair common JSON issues
+   * @param {string} jsonText - Malformed JSON text
+   * @returns {string|null} - Repaired JSON or null if can't repair
+   */
+  attemptJSONRepair(jsonText) {
+    try {
+      let repaired = jsonText.trim();
+      
+      // Find the last complete object by looking for the last complete closing brace
+      let braceCount = 0;
+      let lastValidIndex = -1;
+      let inString = false;
+      let escapeNext = false;
+      
+      for (let i = 0; i < repaired.length; i++) {
+        const char = repaired[i];
+        
+        if (escapeNext) {
+          escapeNext = false;
+          continue;
+        }
+        
+        if (char === '\\') {
+          escapeNext = true;
+          continue;
+        }
+        
+        if (char === '"') {
+          inString = !inString;
+          continue;
+        }
+        
+        if (!inString) {
+          if (char === '{') {
+            braceCount++;
+          } else if (char === '}') {
+            braceCount--;
+            if (braceCount === 0) {
+              lastValidIndex = i;
+            }
+          }
+        }
+      }
+      
+      if (lastValidIndex > 0 && lastValidIndex < repaired.length - 1) {
+        // Truncate to the last valid closing brace
+        repaired = repaired.substring(0, lastValidIndex + 1);
+        console.log('Truncated JSON to last valid closing brace');
+        return repaired;
+      }
+      
+      // Handle the specific case from the error where arrays are incomplete
+      // Look for patterns like: "rgba(54, 162, 235, 1)",\n"rgba(255, 99, 132, 1)",\n
+      // and try to close them properly
+      if (repaired.includes('borderColor') && repaired.includes('rgba(')) {
+        // Find the last complete rgba value
+        const rgbaMatches = [...repaired.matchAll(/"rgba\([^"]+\)"/g)];
+        if (rgbaMatches.length > 0) {
+          const lastMatch = rgbaMatches[rgbaMatches.length - 1];
+          const lastMatchEnd = lastMatch.index + lastMatch[0].length;
+          
+          // Check if there's incomplete content after the last rgba
+          const afterLastRgba = repaired.substring(lastMatchEnd);
+          if (afterLastRgba.trim() && !afterLastRgba.includes(']')) {
+            // Close the array and complete the JSON structure
+            repaired = repaired.substring(0, lastMatchEnd) + '\n        ]\n      }\n    ]\n  }\n}';
+            console.log('Attempted to close incomplete rgba array');
+            return repaired;
+          }
+        }
+      }
+      
+      // Try to fix unterminated strings
+      if (inString) {
+        // Find the last opening quote without a closing quote
+        let quoteCount = 0;
+        let lastOpenQuoteIndex = -1;
+        
+        for (let i = 0; i < repaired.length; i++) {
+          if (repaired[i] === '"' && (i === 0 || repaired[i-1] !== '\\')) {
+            quoteCount++;
+            if (quoteCount % 2 === 1) {
+              lastOpenQuoteIndex = i;
+            }
+          }
+        }
+        
+        if (lastOpenQuoteIndex > -1) {
+          // Close the unterminated string and try to complete the structure
+          repaired = repaired.substring(0, lastOpenQuoteIndex + 1) + '"]}}';
+          console.log('Attempted to close unterminated string');
+          return repaired;
+        }
+      }
+      
+      // Try to close unclosed arrays and objects
+      let arrayCount = 0;
+      let objectCount = 0;
+      inString = false;
+      escapeNext = false;
+      
+      for (let i = 0; i < repaired.length; i++) {
+        const char = repaired[i];
+        
+        if (escapeNext) {
+          escapeNext = false;
+          continue;
+        }
+        
+        if (char === '\\') {
+          escapeNext = true;
+          continue;
+        }
+        
+        if (char === '"') {
+          inString = !inString;
+          continue;
+        }
+        
+        if (!inString) {
+          if (char === '[') arrayCount++;
+          else if (char === ']') arrayCount--;
+          else if (char === '{') objectCount++;
+          else if (char === '}') objectCount--;
+        }
+      }
+      
+      // Add missing closing brackets
+      while (arrayCount > 0) {
+        repaired += ']';
+        arrayCount--;
+      }
+      while (objectCount > 0) {
+        repaired += '}';
+        objectCount--;
+      }
+      
+      if (arrayCount < 0 || objectCount < 0) {
+        console.log('Could not repair JSON: too many closing brackets');
+        return null;
+      }
+      
+      console.log('Attempted to close unclosed brackets');
+      return repaired;
+      
+    } catch (error) {
+      console.error('Error during JSON repair attempt:', error);
+      return null;
     }
   }
 

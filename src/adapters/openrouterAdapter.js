@@ -17,6 +17,7 @@ export class OpenRouterAdapter {
         "HTTP-Referer": process.env.OPENROUTER_SITE_URL || "http://localhost:3001",
         "X-Title": process.env.OPENROUTER_SITE_NAME || "Chart Generator",
       }
+      // No timeout - let frontend handle it
     });
   }
 

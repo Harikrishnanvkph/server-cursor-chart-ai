@@ -1,4 +1,5 @@
 import express from 'express';
+import compression from 'compression';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import helmet from 'helmet';
@@ -62,6 +63,7 @@ app.use(helmet({
 }));
 
 app.use(cookieParser());
+app.use(compression());
 app.use(express.json({ limit: '10mb' })); // Limit request body size
 
 // CORS with enhanced security
@@ -189,16 +191,23 @@ async function modifyChartData(inputText, currentChartState, messageHistory) {
     
     const modificationInstructions = await fs.readFile('./src/AI_Modification_Inform.txt', 'utf-8');
     
+    // Create compact chart state summary (remove formatting to reduce tokens by ~70%)
+    const compactData = JSON.stringify(currentChartState.chartData);
+    const compactConfig = JSON.stringify(currentChartState.chartConfig);
+    
     const contextPrompt = `
     ${modificationInstructions}
 
     Current Chart State:
     - Chart Type: ${currentChartState.chartType}
-    - Current Data: ${JSON.stringify(currentChartState.chartData, null, 2)}
-    - Current Config: ${JSON.stringify(currentChartState.chartConfig, null, 2)}
+    - Current Data: ${compactData}
+    - Current Config: ${compactConfig}
 
-    Recent conversation context (last 3 messages):
-    ${messageHistory.slice(-3).map(msg => `${msg.role}: ${msg.content}`).join('\n')}
+    Recent conversation context (last 2 messages):
+    ${messageHistory.slice(-2).map(msg => {
+      const content = msg.content?.length > 150 ? msg.content.substring(0, 150) + '...' : msg.content;
+      return `${msg.role}: ${content}`;
+    }).join('\n')}
 
     User's modification request: ${inputText}
 
@@ -251,10 +260,8 @@ app.post('/api/process-chart', async (req, res) => {
     
     // Determine if this is a modification or new chart
     if (currentChartState && conversationId) {
-      // console.log('Processing chart modification for conversation:', conversationId);
       aiResponse = await modifyChartData(input, currentChartState, messageHistory || []);
     } else {
-      console.log('Processing new chart creation');
       aiResponse = await generateChartData(input);
     }
 
@@ -267,8 +274,7 @@ app.post('/api/process-chart', async (req, res) => {
       chartConfig: aiResponse.chartConfig || aiResponse.options,
       user_message: aiResponse.user_message,
       action: aiResponse.action || 'create',
-      changes: aiResponse.changes || [],
-      suggestions: aiResponse.suggestions || []
+      changes: aiResponse.changes || []
     };
     
     res.json(result);
@@ -329,10 +335,8 @@ app.post('/api/process-chart-enhanced', async (req, res) => {
       }
       
       if (currentChartState && conversationId) {
-        console.log('Processing chart modification with Perplexity for conversation:', conversationId);
         aiResponse = await modifyChartDataWithPerplexity(input, currentChartState, messageHistory || [], model);
       } else {
-        console.log(`Processing new chart creation with Perplexity (${model || 'sonar-pro'})`);
         aiResponse = await generateChartDataWithPerplexity(input, model);
       }
       
@@ -342,10 +346,8 @@ app.post('/api/process-chart-enhanced', async (req, res) => {
       }
       
       if (currentChartState && conversationId) {
-        console.log('Processing chart modification with OpenRouter for conversation:', conversationId);
         aiResponse = await modifyChartDataWithOpenRouter(input, currentChartState, messageHistory || [], model);
       } else {
-        console.log(`Processing new chart creation with OpenRouter (${model || 'deepseek/deepseek-chat-v3-0324:free'})`);
         aiResponse = await generateChartDataWithOpenRouter(input, model);
       }
       
@@ -356,10 +358,8 @@ app.post('/api/process-chart-enhanced', async (req, res) => {
       }
       
       if (currentChartState && conversationId) {
-        console.log('Processing chart modification with Google for conversation:', conversationId);
         aiResponse = await modifyChartData(input, currentChartState, messageHistory || []);
       } else {
-        console.log('Processing new chart creation with Google');
         aiResponse = await generateChartData(input);
       }
     }
@@ -372,7 +372,6 @@ app.post('/api/process-chart-enhanced', async (req, res) => {
       user_message: aiResponse.user_message,
       action: aiResponse.action || 'create',
       changes: aiResponse.changes || [],
-      suggestions: aiResponse.suggestions || [],
       service: service,
       _metadata: aiResponse._metadata
     };
@@ -411,8 +410,5 @@ app.get('/security/status', (req, res) => {
 });
 
 app.listen(port, () => {
-  console.log(`🚀 AIChartor Server running on port ${port}`);
-  console.log(`🔒 Enhanced security features enabled`);
-  console.log(`📊 OAuth sessions will be stored securely in database`);
-  console.log(`🛡️ Rate limiting and IP blocking active`);
-}); 
+  console.log(`Server running on port ${port}`);
+});

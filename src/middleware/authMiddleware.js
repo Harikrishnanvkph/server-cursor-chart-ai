@@ -1,6 +1,26 @@
 import { supabaseAdminClient } from '../supabase/client.js';
 import secureSessionStore from '../services/sessionStore.js';
 
+// Simple in-memory auth cache (token -> { user, expiresAt })
+const authCache = new Map();
+const AUTH_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
+function getCachedUser(token) {
+  if (!token) return null;
+  const entry = authCache.get(token);
+  if (!entry) return null;
+  if (Date.now() > entry.expiresAt) {
+    authCache.delete(token);
+    return null;
+  }
+  return entry.user;
+}
+
+function setCachedUser(token, user) {
+  if (!token || !user) return;
+  authCache.set(token, { user, expiresAt: Date.now() + AUTH_CACHE_TTL_MS });
+}
+
 // Rate limiting configuration
 const RATE_LIMIT_WINDOW = 15 * 60 * 1000; // 15 minutes
 const MAX_REQUESTS_PER_WINDOW = 100; // Max requests per IP per window
@@ -25,14 +45,14 @@ function rateLimitMiddleware(req, res, next) {
   
   // Check if IP is permanently blocked
   if (BLOCKED_IPS.has(clientIP)) {
-    console.log(`Blocked request from permanently blocked IP: ${clientIP}`);
+    console.warn(`Blocked request from permanently blocked IP: ${clientIP}`);
     return res.status(403).json({ error: 'Access denied' });
   }
   
   // Check if IP is temporarily blocked due to suspicious activity
   const suspiciousInfo = SUSPICIOUS_IPS.get(clientIP);
   if (suspiciousInfo && Date.now() < suspiciousInfo.blockedUntil) {
-    console.log(`Blocked request from temporarily blocked IP: ${clientIP}`);
+    console.warn(`Blocked request from temporarily blocked IP: ${clientIP}`);
     return res.status(429).json({ 
       error: 'Too many requests', 
       retryAfter: Math.ceil((suspiciousInfo.blockedUntil - Date.now()) / 1000)
@@ -61,7 +81,7 @@ function rateLimitMiddleware(req, res, next) {
       reason: 'Rate limit exceeded'
     });
     
-    console.log(`Rate limit exceeded for IP: ${clientIP}, blocking for 30 minutes`);
+    console.warn(`Rate limit exceeded for IP: ${clientIP}, blocking for 30 minutes`);
     return res.status(429).json({ 
       error: 'Too many requests', 
       retryAfter: 1800 // 30 minutes in seconds
@@ -103,13 +123,20 @@ export async function requireAuth(req, res, next) {
     const clientIP = getClientIP(req);
     
     if (!accessToken) {
-      console.log('No access token provided');
+      console.warn('No access token provided');
       return res.status(401).json({ error: 'Authentication required' });
+    }
+
+    // Cache short-circuit
+    const cached = getCachedUser(accessToken);
+    if (cached) {
+      req.user = cached;
+      return next();
     }
     
     // Check if IP is blocked
     if (BLOCKED_IPS.has(clientIP)) {
-      console.log(`Blocked request from blocked IP: ${clientIP}`);
+      console.warn(`Blocked request from blocked IP: ${clientIP}`);
       return res.status(403).json({ error: 'Access denied' });
     }
     
@@ -125,11 +152,12 @@ export async function requireAuth(req, res, next) {
       
       if (response.ok) {
         const user = await response.json();
+        setCachedUser(accessToken, user);
         req.user = user;
         return next();
       }
     } catch (supabaseError) {
-      console.log('Supabase token validation failed, checking OAuth session...');
+      // Fallback to OAuth session validation when Supabase validation fails
     }
     
     // If Supabase validation failed, check OAuth session
@@ -137,6 +165,7 @@ export async function requireAuth(req, res, next) {
       const oauthUser = await secureSessionStore.validateSession(accessToken);
       
       if (oauthUser) {
+        setCachedUser(accessToken, oauthUser);
         req.user = oauthUser;
         return next();
       }
@@ -145,7 +174,7 @@ export async function requireAuth(req, res, next) {
     }
     
     // No valid authentication found
-    console.log('No valid authentication found');
+    console.warn('No valid authentication found');
     return res.status(401).json({ error: 'Invalid or expired token' });
     
   } catch (error) {
@@ -156,13 +185,12 @@ export async function requireAuth(req, res, next) {
 
 // Enhanced authentication middleware with additional security checks
 export async function requireAuthEnhanced(req, res, next) {
-  console.log('inside auth/me')
   try {
     const accessToken = req.cookies?.access_token;
     const clientIP = getClientIP(req);
     
     if (!accessToken) {
-      console.log('No access token provided');
+      console.warn('No access token provided');
       return res.status(401).json({ error: 'Authentication required' });
     }
     
@@ -177,13 +205,13 @@ export async function requireAuthEnhanced(req, res, next) {
       userAgent.includes('spider') ||
       userAgent === 'Mozilla/5.0 (compatible; MSIE 9.0; Windows NT 6.1; Trident/5.0)' // Known malicious UA
     )) {
-      console.log(`Suspicious user agent detected: ${userAgent}`);
+      console.warn(`Suspicious user agent detected: ${userAgent}`);
       // Don't block immediately, but log for monitoring
     }
     
     // Check for missing or suspicious referer (for certain endpoints)
     if (req.method === 'POST' && !referer) {
-      console.log('Missing referer header for POST request');
+      console.warn('Missing referer header for POST request');
       // This could be a CSRF attempt, but don't block immediately
     }
     
@@ -222,14 +250,14 @@ export async function requireAdmin(req, res, next) {
 // Block IP address (for security purposes)
 export function blockIP(ipAddress, reason = 'Security violation') {
   BLOCKED_IPS.add(ipAddress);
-  console.log(`IP ${ipAddress} blocked permanently. Reason: ${reason}`);
+  console.warn(`IP ${ipAddress} blocked permanently. Reason: ${reason}`);
 }
 
 // Unblock IP address
 export function unblockIP(ipAddress) {
   const wasBlocked = BLOCKED_IPS.delete(ipAddress);
   if (wasBlocked) {
-    console.log(`IP ${ipAddress} unblocked`);
+    console.warn(`IP ${ipAddress} unblocked`);
   }
   return wasBlocked;
 }

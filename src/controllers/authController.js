@@ -169,7 +169,7 @@ export async function googleCallback(req, res) {
       secure: isProd,
       sameSite: 'lax',
       path: '/',
-      maxAge: 3600 * 1000 // 1 hour
+      maxAge: 15 * 24 * 60 * 60 * 1000 // 15 days
     }
     
     res.cookie('access_token', tokens.access_token, cookieOptions)

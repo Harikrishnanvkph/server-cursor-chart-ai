@@ -6,11 +6,6 @@ class GoogleOAuthService {
     this.clientSecret = process.env.GOOGLE_CLIENT_SECRET;
     this.redirectUri = process.env.GOOGLE_REDIRECT_URI || `${process.env.SERVER_PUBLIC_URL}/auth/google/callback`;
     
-    console.log('GoogleOAuthService initialized with:');
-    console.log('- Client ID:', this.clientId ? '✓ Set' : '❌ Missing');
-    console.log('- Client Secret:', this.clientSecret ? '✓ Set' : '❌ Missing');
-    console.log('- Redirect URI:', this.redirectUri);
-    
     if (!this.clientId || !this.clientSecret) {
       console.warn('Google OAuth credentials not configured. Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET in environment variables.');
     }
@@ -49,10 +44,6 @@ class GoogleOAuthService {
     }
 
     const authUrl = `https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`;
-    
-    console.log('Generated OAuth URL:', authUrl);
-    console.log('OAuth Parameters:', Object.fromEntries(params.entries()));
-    
     return authUrl;
   }
 
@@ -66,9 +57,7 @@ class GoogleOAuthService {
       throw new Error('Google OAuth not configured');
     }
 
-    console.log('Exchanging code for token...');
-    console.log('Code length:', code?.length || 0);
-    console.log('Redirect URI:', this.redirectUri);
+    // Exchange code for token
 
     const tokenResponse = await fetch('https://oauth2.googleapis.com/token', {
       method: 'POST',
@@ -95,12 +84,6 @@ class GoogleOAuthService {
     }
 
     const tokenData = await tokenResponse.json();
-    console.log('Token exchange successful:', {
-      hasAccessToken: !!tokenData.access_token,
-      hasRefreshToken: !!tokenData.refresh_token,
-      expiresIn: tokenData.expires_in
-    });
-
     return tokenData;
   }
 
@@ -110,8 +93,6 @@ class GoogleOAuthService {
    * @returns {Promise<Object>} User profile information
    */
   async getUserInfo(accessToken) {
-    console.log('Fetching user info from Google...');
-    
     const userInfoResponse = await fetch('https://www.googleapis.com/oauth2/v2/userinfo', {
       headers: {
         'Authorization': `Bearer ${accessToken}`,
@@ -129,13 +110,6 @@ class GoogleOAuthService {
     }
 
     const userInfo = await userInfoResponse.json();
-    console.log('User info fetched successfully:', {
-      id: userInfo.id,
-      email: userInfo.email,
-      name: userInfo.name,
-      picture: userInfo.picture
-    });
-
     return userInfo;
   }
 
@@ -146,8 +120,6 @@ class GoogleOAuthService {
    */
   async completeOAuthFlow(code) {
     try {
-      console.log('Starting OAuth flow completion...');
-      
       // Exchange code for tokens
       const tokens = await this.exchangeCodeForToken(code);
       
@@ -170,7 +142,6 @@ class GoogleOAuthService {
         }
       };
 
-      console.log('OAuth flow completed successfully');
       return result;
     } catch (error) {
       console.error('Google OAuth flow error:', error);
