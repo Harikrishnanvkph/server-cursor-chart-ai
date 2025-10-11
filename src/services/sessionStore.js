@@ -53,28 +53,40 @@ class SecureSessionStore {
       const tokenHash = this.hashToken(accessToken);
       const expiresAt = new Date(Date.now() + 15 * 24 * 60 * 60 * 1000); // 15 days
 
-      // First, ensure user exists in profiles table
+      // First, create or get user via Supabase Auth (this triggers profile creation via trigger)
       let user = await this.getUserByEmail(userData.email);
       
       if (!user) {
-        // Create new user profile
-        const { data: newUser, error: createError } = await supabaseAdminClient
-          .from('profiles')
-          .insert({
-            email: userData.email,
+        // Create user in Supabase Auth first (this will auto-create profile via trigger)
+        const { data: authData, error: authError } = await supabaseAdminClient.auth.admin.createUser({
+          email: userData.email,
+          email_confirm: true, // Auto-confirm email for OAuth users
+          user_metadata: {
             full_name: userData.name || userData.full_name,
+            name: userData.name || userData.full_name,
             avatar_url: userData.picture,
-            provider: provider,
             provider_id: userData.sub || userData.id
-          })
-          .select()
-          .single();
+          },
+          app_metadata: {
+            provider: provider
+          }
+        });
 
-        if (createError) {
-          console.error('Error creating user profile:', createError);
+        if (authError) {
+          console.error('Error creating Supabase auth user:', authError);
+          throw new Error('Failed to create user account');
+        }
+
+        // Wait a moment for trigger to create profile
+        await new Promise(resolve => setTimeout(resolve, 100));
+
+        // Get the newly created profile
+        user = await this.getUserByEmail(userData.email);
+        
+        if (!user) {
+          console.error('Profile not created by trigger for user:', authData.user.id);
           throw new Error('Failed to create user profile');
         }
-        user = newUser;
       } else {
         // Update existing user profile with latest data from OAuth provider
         const { data: updatedUser, error: updateError } = await supabaseAdminClient

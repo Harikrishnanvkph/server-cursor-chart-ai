@@ -1,6 +1,65 @@
 import { supabaseAdminClient } from '../supabase/client.js';
 import secureSessionStore from '../services/sessionStore.js';
 
+// Helper function to ensure user profile exists
+async function ensureUserProfile(userId, userEmail = null, userName = null, userAvatar = null) {
+  try {
+    // Check if profile exists
+    const { data: existingProfile, error: profileCheckError } = await supabaseAdminClient
+      .from('profiles')
+      .select('id')
+      .eq('id', userId)
+      .single();
+
+    if (existingProfile && !profileCheckError) {
+      // Profile already exists, no need to create
+      return existingProfile;
+    }
+
+    console.log('Profile not found for user:', userId, 'Attempting to create profile...');
+    
+    // Try to get user info from auth.users first
+    let authUser = null;
+    try {
+      const { data, error: authError } = await supabaseAdminClient.auth.admin.getUserById(userId);
+      if (!authError && data.user) {
+        authUser = data.user;
+      }
+    } catch (err) {
+      // User might not exist in auth.users (OAuth users stored differently)
+      console.log('User not found in auth.users, will use provided user data');
+    }
+
+    // Prepare profile data
+    const profileData = {
+      id: userId,
+      email: userEmail || authUser?.email || 'unknown@example.com',
+      full_name: userName || authUser?.user_metadata?.full_name || authUser?.user_metadata?.name || null,
+      avatar_url: userAvatar || authUser?.user_metadata?.avatar_url || null,
+      provider: authUser?.app_metadata?.provider || 'google',
+      provider_id: authUser?.user_metadata?.provider_id || null,
+    };
+
+    // Create profile
+    const { data: newProfile, error: profileError } = await supabaseAdminClient
+      .from('profiles')
+      .insert([profileData])
+      .select()
+      .single();
+
+    if (profileError) {
+      console.error('Error creating profile:', profileError);
+      return null;
+    } else {
+      console.log('✅ Profile created for user:', userId);
+      return newProfile;
+    }
+  } catch (error) {
+    console.error('Error ensuring user profile:', error);
+    return null;
+  }
+}
+
 // Simple in-memory auth cache (token -> { user, expiresAt })
 const authCache = new Map();
 const AUTH_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
@@ -152,6 +211,10 @@ export async function requireAuth(req, res, next) {
       
       if (response.ok) {
         const user = await response.json();
+        
+        // Ensure user has a profile
+        await ensureUserProfile(user.id, user.email, user.user_metadata?.name, user.user_metadata?.avatar_url);
+        
         setCachedUser(accessToken, user);
         req.user = user;
         return next();
@@ -165,8 +228,29 @@ export async function requireAuth(req, res, next) {
       const oauthUser = await secureSessionStore.validateSession(accessToken);
       
       if (oauthUser) {
-        setCachedUser(accessToken, oauthUser);
-        req.user = oauthUser;
+        console.log('OAuth user validated:', {
+          userId: oauthUser.user_id || oauthUser.id,
+          email: oauthUser.email,
+          provider: oauthUser.provider
+        });
+        
+        // Use user_id if available (from validateSession), otherwise fall back to id
+        const userId = oauthUser.user_id || oauthUser.id;
+        
+        // Ensure user has a profile (OAuth users have email, full_name, avatar_url directly)
+        await ensureUserProfile(userId, oauthUser.email, oauthUser.full_name, oauthUser.avatar_url);
+        
+        // Create a normalized user object with consistent ID field
+        const normalizedUser = {
+          id: userId,
+          email: oauthUser.email,
+          full_name: oauthUser.full_name,
+          avatar_url: oauthUser.avatar_url,
+          provider: oauthUser.provider
+        };
+        
+        setCachedUser(accessToken, normalizedUser);
+        req.user = normalizedUser;
         return next();
       }
     } catch (sessionError) {

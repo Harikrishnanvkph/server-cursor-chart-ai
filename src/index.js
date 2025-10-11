@@ -98,10 +98,15 @@ app.use(globalLimiter);
 
 // Mount routes with enhanced security
 import authRoutes from './routes/authRoutes.js'
+import dataRoutes from './routes/dataRoutes.js'
 app.use('/auth', authRoutes)
-app.use('/api', requireAuth) // protect API endpoints
+
+// Chart processing endpoints (public - no auth required)
 app.use('/api/perplexity', perplexityRoutes);
 app.use('/api/openrouter', openrouterRoutes);
+
+// Protected API endpoints (require authentication)
+app.use('/api/data', requireAuth, dataRoutes);
 
 // Security monitoring endpoints (admin only)
 app.get('/admin/security/stats', requireAuth, (req, res) => {
@@ -313,15 +318,17 @@ app.delete('/api/conversation/:id', (req, res) => {
 
 // Enhanced main endpoint that supports both Google and Perplexity
 app.post('/api/process-chart-enhanced', async (req, res) => {
+  // Extract service outside try block so it's accessible in catch
+  const { 
+    input, 
+    service = 'google', // 'google' or 'perplexity'
+    model,
+    conversationId, 
+    currentChartState, 
+    messageHistory 
+  } = req.body;
+  
   try {
-    const { 
-      input, 
-      service = 'google', // 'google' or 'perplexity'
-      model,
-      conversationId, 
-      currentChartState, 
-      messageHistory 
-    } = req.body;
     
     if (!input) {
       return res.status(400).json({ error: 'Input text is required' });
