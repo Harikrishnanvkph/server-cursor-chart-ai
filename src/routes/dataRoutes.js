@@ -87,6 +87,19 @@ router.delete('/conversations/:id', async (req, res) => {
   }
 });
 
+// Delete all conversations for a user
+router.delete('/conversations', async (req, res) => {
+  try {
+    const userId = req.user.id;
+    
+    await chartDataService.deleteAllConversations(userId);
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error deleting all conversations:', error);
+    res.status(500).json({ error: 'Failed to delete all conversations' });
+  }
+});
+
 // Get conversation messages
 router.get('/conversations/:id/messages', async (req, res) => {
   try {

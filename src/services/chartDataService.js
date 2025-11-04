@@ -123,6 +123,23 @@ class ChartDataService {
       throw error;
     }
   }
+
+  async deleteAllConversations(userId) {
+    try {
+      // Delete all conversations for the user
+      // This will cascade delete related chart_snapshots and chat_messages due to foreign key constraints
+      const { error } = await supabaseAdminClient
+        .from('conversations')
+        .delete()
+        .eq('user_id', userId);
+      
+      if (error) throw error;
+      return { success: true };
+    } catch (error) {
+      console.error('Error deleting all conversations:', error);
+      throw error;
+    }
+  }
   
   // =============================================
   // CHART SNAPSHOT MANAGEMENT
