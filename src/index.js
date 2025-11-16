@@ -9,8 +9,10 @@ import { GoogleGenerativeAI } from "@google/generative-ai";
 import fs from 'node:fs/promises'
 import { generateChartDataWithPerplexity, modifyChartDataWithPerplexity } from './services/perplexityService.js';
 import { generateChartDataWithOpenRouter, modifyChartDataWithOpenRouter } from './services/openrouterService.js';
+import { generateChartDataWithDeepSeek, modifyChartDataWithDeepSeek } from './services/deepseekService.js';
 import perplexityRoutes from './routes/perplexityRoutes.js';
 import openrouterRoutes from './routes/openrouterRoutes.js';
+import deepseekRoutes from './routes/deepseekRoutes.js';
 import { requireAuth, rateLimitMiddleware, getSecurityStats, blockIP, unblockIP } from './middleware/authMiddleware.js'
 
 dotenv.config();
@@ -104,6 +106,7 @@ app.use('/auth', authRoutes)
 // Chart processing endpoints (public - no auth required)
 app.use('/api/perplexity', perplexityRoutes);
 app.use('/api/openrouter', openrouterRoutes);
+app.use('/api/deepseek', deepseekRoutes);
 
 // Protected API endpoints (require authentication)
 app.use('/api/data', requireAuth, dataRoutes);
@@ -319,14 +322,14 @@ app.delete('/api/conversation/:id', (req, res) => {
 // Enhanced main endpoint that supports both Google and Perplexity
 app.post('/api/process-chart-enhanced', async (req, res) => {
   // Extract service outside try block so it's accessible in catch
-  const { 
-    input, 
-    service = 'google', // 'google' or 'perplexity'
-    model,
-    conversationId, 
-    currentChartState, 
-    messageHistory 
-  } = req.body;
+    const { 
+      input, 
+      service = 'perplexity', // 'google' or 'perplexity'
+      model,
+      conversationId, 
+      currentChartState, 
+      messageHistory 
+    } = req.body;
   
   try {
     
@@ -356,6 +359,18 @@ app.post('/api/process-chart-enhanced', async (req, res) => {
         aiResponse = await modifyChartDataWithOpenRouter(input, currentChartState, messageHistory || [], model);
       } else {
         aiResponse = await generateChartDataWithOpenRouter(input, model);
+      }
+      
+    } else if (service === 'deepseek') {
+      // DeepSeek integration scaffold - respond with informative message until fully wired
+      if (!process.env.DEEPSEEK_API_KEY) {
+        return res.status(500).json({ error: 'DeepSeek API key not configured' });
+      }
+
+      if (currentChartState && conversationId) {
+        aiResponse = await modifyChartDataWithDeepSeek(input, currentChartState, messageHistory || [], model);
+      } else {
+        aiResponse = await generateChartDataWithDeepSeek(input, model);
       }
       
     } else {
