@@ -328,7 +328,8 @@ app.post('/api/process-chart-enhanced', async (req, res) => {
       model,
       conversationId, 
       currentChartState, 
-      messageHistory 
+      messageHistory,
+      templateStructure // NEW: Template structure metadata for generating template text content
     } = req.body;
   
   try {
@@ -345,9 +346,9 @@ app.post('/api/process-chart-enhanced', async (req, res) => {
       }
       
       if (currentChartState && conversationId) {
-        aiResponse = await modifyChartDataWithPerplexity(input, currentChartState, messageHistory || [], model);
+        aiResponse = await modifyChartDataWithPerplexity(input, currentChartState, messageHistory || [], model, templateStructure);
       } else {
-        aiResponse = await generateChartDataWithPerplexity(input, model);
+        aiResponse = await generateChartDataWithPerplexity(input, model, templateStructure);
       }
       
     } else if (service === 'openrouter') {
@@ -356,9 +357,9 @@ app.post('/api/process-chart-enhanced', async (req, res) => {
       }
       
       if (currentChartState && conversationId) {
-        aiResponse = await modifyChartDataWithOpenRouter(input, currentChartState, messageHistory || [], model);
+        aiResponse = await modifyChartDataWithOpenRouter(input, currentChartState, messageHistory || [], model, templateStructure);
       } else {
-        aiResponse = await generateChartDataWithOpenRouter(input, model);
+        aiResponse = await generateChartDataWithOpenRouter(input, model, templateStructure);
       }
       
     } else if (service === 'deepseek') {
@@ -368,9 +369,9 @@ app.post('/api/process-chart-enhanced', async (req, res) => {
       }
 
       if (currentChartState && conversationId) {
-        aiResponse = await modifyChartDataWithDeepSeek(input, currentChartState, messageHistory || [], model);
+        aiResponse = await modifyChartDataWithDeepSeek(input, currentChartState, messageHistory || [], model, templateStructure);
       } else {
-        aiResponse = await generateChartDataWithDeepSeek(input, model);
+        aiResponse = await generateChartDataWithDeepSeek(input, model, templateStructure);
       }
       
     } else {
@@ -395,7 +396,9 @@ app.post('/api/process-chart-enhanced', async (req, res) => {
       action: aiResponse.action || 'create',
       changes: aiResponse.changes || [],
       service: service,
-      _metadata: aiResponse._metadata
+      _metadata: aiResponse._metadata,
+      // Include template content if generated
+      templateContent: aiResponse.templateContent || null
     };
     
     res.json(result);

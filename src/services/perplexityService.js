@@ -8,10 +8,11 @@ const perplexityProcessor = createChartProcessor(createPerplexityAdapter());
  * Generate chart data using Perplexity AI
  * @param {string} inputText - User's chart request
  * @param {string} model - Perplexity model to use (default: sonar-pro)
+ * @param {Object} templateStructure - Template structure metadata for generating template text content
  * @returns {Promise<Object>} - Generated chart configuration
  */
-export async function generateChartDataWithPerplexity(inputText, model = 'sonar-pro') {
-  return await perplexityProcessor.generateChart(inputText, model);
+export async function generateChartDataWithPerplexity(inputText, model = 'sonar-pro', templateStructure = null) {
+  return await perplexityProcessor.generateChart(inputText, model, templateStructure);
 }
 
 /**
@@ -20,10 +21,11 @@ export async function generateChartDataWithPerplexity(inputText, model = 'sonar-
  * @param {Object} currentChartState - Current chart state
  * @param {Array} messageHistory - Conversation history
  * @param {string} model - Perplexity model to use
+ * @param {Object} templateStructure - Template structure metadata for generating template text content
  * @returns {Promise<Object>} - Modified chart configuration
  */
-export async function modifyChartDataWithPerplexity(inputText, currentChartState, messageHistory = [], model = 'sonar-pro') {
-  return await perplexityProcessor.modifyChart(inputText, currentChartState, messageHistory, model);
+export async function modifyChartDataWithPerplexity(inputText, currentChartState, messageHistory = [], model = 'sonar-pro', templateStructure = null) {
+  return await perplexityProcessor.modifyChart(inputText, currentChartState, messageHistory, model, templateStructure);
 }
 
 /**

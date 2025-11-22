@@ -15,16 +15,17 @@ export class ChartProcessor {
    * Generate new chart data
    * @param {string} inputText - User's chart request
    * @param {string} model - Model to use
+   * @param {Object} templateStructure - Template structure metadata for generating template text content
    * @returns {Promise<Object>} - Generated chart configuration
    */
-  async generateChart(inputText, model) {
+  async generateChart(inputText, model, templateStructure = null) {
     try {
       // Get AI context (with caching)
       const aiContext = await this.getAIContext();
       
       // Construct prompts
-      const systemPrompt = this.buildSystemPrompt(aiContext);
-      const userPrompt = this.buildUserPrompt(inputText);
+      const systemPrompt = this.buildSystemPrompt(aiContext, templateStructure);
+      const userPrompt = this.buildUserPrompt(inputText, templateStructure);
       
       // Make service-specific API call
       const response = await this.adapter.generateContent({
@@ -71,9 +72,10 @@ export class ChartProcessor {
    * @param {Object} currentChartState - Current chart state
    * @param {Array} messageHistory - Conversation history
    * @param {string} model - Model to use
+   * @param {Object} templateStructure - Template structure metadata for generating template text content
    * @returns {Promise<Object>} - Modified chart configuration
    */
-  async modifyChart(inputText, currentChartState, messageHistory = [], model) {
+  async modifyChart(inputText, currentChartState, messageHistory = [], model, templateStructure = null) {
     try {
       // Get modification context (with caching)
       const modificationContext = await this.getModificationContext();
@@ -83,7 +85,8 @@ export class ChartProcessor {
         modificationContext, 
         currentChartState, 
         messageHistory, 
-        inputText
+        inputText,
+        templateStructure
       );
       
       // Make service-specific API call with higher tokens for modifications
@@ -149,25 +152,63 @@ export class ChartProcessor {
   /**
    * Build system prompt for chart generation
    * @param {string} aiContext - AI context from file
+   * @param {Object} templateStructure - Template structure metadata
    * @returns {string} - System prompt
    */
-  buildSystemPrompt(aiContext) {
-    return `${aiContext}
+  buildSystemPrompt(aiContext, templateStructure = null) {
+    let prompt = `${aiContext}
 
 You are an expert chart data generator. Always respond with valid JSON that follows Chart.js format. 
 Focus on creating accurate, well-structured data that can be immediately used to render charts.
 Include proper labels, datasets, colors, and configuration options.`;
+
+    if (templateStructure) {
+      prompt += `
+
+IMPORTANT: The user has selected a template layout. You MUST also generate relevant text content for each template text area based on the chart topic.
+The response must include a "templateContent" object with text for each area type (title, heading, custom, main).`;
+    }
+
+    return prompt;
   }
 
   /**
    * Build user prompt for chart generation
    * @param {string} inputText - User's request
+   * @param {Object} templateStructure - Template structure metadata
    * @returns {string} - User prompt
    */
-  buildUserPrompt(inputText) {
-    return `User request: ${inputText}
+  buildUserPrompt(inputText, templateStructure = null) {
+    let prompt = `User request: ${inputText}
 
 Please generate chart data in valid JSON format.`;
+
+    if (templateStructure) {
+      const sectionsInfo = templateStructure.sections
+        .filter(s => s.type !== 'chart')
+        .map(s => `- ${s.name} (${s.type}): Generate appropriate ${s.type} text related to the chart`)
+        .join('\n');
+
+      prompt += `
+
+Template Structure:
+- Dimensions: ${templateStructure.width}px × ${templateStructure.height}px
+- Chart Area: ${templateStructure.chartArea.width}px × ${templateStructure.chartArea.height}px
+- Text Sections to populate:
+${sectionsInfo}
+
+Your response MUST include a "templateContent" object with text for each section type:
+{
+  "title": "A concise, descriptive title for the chart",
+  "heading": "A brief subtitle or heading that provides context",
+  "custom": "Additional context or custom information (if applicable)",
+  "main": "A comprehensive explanation or analysis related to the chart data"
+}
+
+Generate contextually relevant text for each section based on the chart topic and data.`;
+    }
+
+    return prompt;
   }
 
   /**
@@ -176,9 +217,10 @@ Please generate chart data in valid JSON format.`;
    * @param {Object} currentChartState - Current chart state
    * @param {Array} messageHistory - Conversation history
    * @param {string} inputText - User's modification request
+   * @param {Object} templateStructure - Template structure metadata
    * @returns {string} - Modification prompt
    */
-  buildModificationPrompt(modificationContext, currentChartState, messageHistory, inputText) {
+  buildModificationPrompt(modificationContext, currentChartState, messageHistory, inputText, templateStructure = null) {
     // Limit history to last 2 messages to reduce token usage
     const recentHistory = messageHistory.slice(-2).map(msg => {
       // Truncate long messages to first 150 characters
@@ -190,7 +232,7 @@ Please generate chart data in valid JSON format.`;
     const compactData = JSON.stringify(currentChartState.chartData);
     const compactConfig = JSON.stringify(currentChartState.chartConfig);
 
-    return `${modificationContext}
+    let prompt = `${modificationContext}
 
 Current Chart State:
 - Chart Type: ${currentChartState.chartType}
@@ -212,8 +254,19 @@ Response format:
   "chartData": { /* modified data */ },
   "chartConfig": { /* modified config */ },
   "user_message": "Explanation of changes made",
-  "changes": ["list of specific changes made"]
-}`;
+  "changes": ["list of specific changes made"]`;
+
+    if (templateStructure) {
+      prompt += ',\n  "templateContent": { /* updated text for template areas if template is active */ }';
+    }
+
+    prompt += `\n}`;
+
+    if (templateStructure) {
+      prompt += `\n\nNote: If a template is active, also update the "templateContent" object with relevant text for each template area based on the chart modifications.`;
+    }
+
+    return prompt;
   }
 
   /**
