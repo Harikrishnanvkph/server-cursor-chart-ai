@@ -58,10 +58,34 @@ class ChartDataService {
           limit_count: limit
         });
       
-      if (error) throw error;
-      return data;
+      if (error) {
+        console.error('RPC error, trying direct query:', error);
+        // Fallback to direct query if RPC doesn't exist
+        const { data: directData, error: directError } = await supabaseAdminClient
+          .from('conversations')
+          .select('*')
+          .eq('user_id', userId)
+          .eq('is_active', true)
+          .order('updated_at', { ascending: false })
+          .limit(limit);
+        
+        if (directError) {
+          console.error('Direct query also failed:', directError);
+          throw directError;
+        }
+        
+        return directData || [];
+      }
+      
+      return data || [];
     } catch (error) {
       console.error('Error fetching conversations:', error);
+      console.error('Error details:', {
+        message: error.message,
+        code: error.code,
+        details: error.details,
+        hint: error.hint
+      });
       throw error;
     }
   }
@@ -145,14 +169,17 @@ class ChartDataService {
   // CHART SNAPSHOT MANAGEMENT
   // =============================================
   
-  async saveChartSnapshot(conversationId, chartType, chartData, chartConfig) {
+  async saveChartSnapshot(conversationId, chartType, chartData, chartConfig, templateStructure = null, templateContent = null) {
     try {
       const { data, error } = await supabaseAdminClient
         .rpc('save_chart_snapshot', {
           conv_id: conversationId,
           chart_type_val: chartType,
           chart_data_val: chartData,
-          chart_config_val: chartConfig
+          chart_config_val: chartConfig,
+          version_val: null,
+          template_structure_val: templateStructure,
+          template_content_val: templateContent
         });
       
       if (error) throw error;
@@ -245,6 +272,7 @@ class ChartDataService {
   
   async getConversationMessages(conversationId, limit = 100) {
     try {
+      // Try with chart_snapshots join first
       const { data, error } = await supabaseAdminClient
         .from('chat_messages')
         .select(`
@@ -252,13 +280,37 @@ class ChartDataService {
           chart_snapshots(*)
         `)
         .eq('conversation_id', conversationId)
-        .order('message_order', { ascending: true })
+        .order('created_at', { ascending: true })
         .limit(limit);
       
-      if (error) throw error;
-      return data;
+      if (error) {
+        // If join fails, try without chart_snapshots
+        console.warn('Error fetching messages with chart_snapshots join, trying without:', error.message);
+        const { data: simpleData, error: simpleError } = await supabaseAdminClient
+          .from('chat_messages')
+          .select('*')
+          .eq('conversation_id', conversationId)
+          .order('created_at', { ascending: true })
+          .limit(limit);
+        
+        if (simpleError) {
+          console.error('Error fetching messages (simple query):', simpleError);
+          throw simpleError;
+        }
+        
+        return simpleData || [];
+      }
+      
+      return data || [];
     } catch (error) {
       console.error('Error fetching messages:', error);
+      console.error('Error details:', {
+        message: error.message,
+        code: error.code,
+        details: error.details,
+        hint: error.hint,
+        conversationId
+      });
       throw error;
     }
   }

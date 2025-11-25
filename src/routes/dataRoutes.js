@@ -105,12 +105,32 @@ router.get('/conversations/:id/messages', async (req, res) => {
   try {
     const { id } = req.params;
     const { limit = 100 } = req.query;
+    const userId = req.user?.id;
+    
+    console.log('📥 GET /conversations/:id/messages request:', { 
+      conversationId: id, 
+      limit, 
+      userId 
+    });
     
     const messages = await chartDataService.getConversationMessages(id, parseInt(limit));
-    res.json(messages);
+    
+    console.log('✅ Messages fetched:', messages?.length || 0);
+    res.json(messages || []);
   } catch (error) {
-    console.error('Error fetching messages:', error);
-    res.status(500).json({ error: 'Failed to fetch messages' });
+    console.error('❌ Error fetching messages:', error);
+    console.error('Error details:', {
+      message: error.message,
+      code: error.code,
+      details: error.details,
+      hint: error.hint,
+      stack: error.stack
+    });
+    res.status(500).json({ 
+      error: 'Failed to fetch messages',
+      details: error.message,
+      code: error.code
+    });
   }
 });
 
@@ -121,7 +141,7 @@ router.get('/conversations/:id/messages', async (req, res) => {
 // Save chart snapshot
 router.post('/chart-snapshots', async (req, res) => {
   try {
-    const { conversationId, chartType, chartData, chartConfig } = req.body;
+    const { conversationId, chartType, chartData, chartConfig, templateStructure, templateContent } = req.body;
     
     if (!conversationId || !chartType || !chartData) {
       return res.status(400).json({ error: 'Missing required fields' });
@@ -131,7 +151,9 @@ router.post('/chart-snapshots', async (req, res) => {
       conversationId,
       chartType,
       chartData,
-      chartConfig
+      chartConfig,
+      templateStructure || null,
+      templateContent || null
     );
     
     res.status(201).json({ id: snapshotId });

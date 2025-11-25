@@ -101,6 +101,7 @@ app.use(globalLimiter);
 // Mount routes with enhanced security
 import authRoutes from './routes/authRoutes.js'
 import dataRoutes from './routes/dataRoutes.js'
+import templateRoutes from './routes/templateRoutes.js'
 app.use('/auth', authRoutes)
 
 // Chart processing endpoints (public - no auth required)
@@ -110,6 +111,7 @@ app.use('/api/deepseek', deepseekRoutes);
 
 // Protected API endpoints (require authentication)
 app.use('/api/data', requireAuth, dataRoutes);
+app.use('/api/data', requireAuth, templateRoutes);
 
 // Security monitoring endpoints (admin only)
 app.get('/admin/security/stats', requireAuth, (req, res) => {

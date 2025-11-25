@@ -203,39 +203,60 @@ CREATE OR REPLACE FUNCTION save_chart_snapshot(
     chart_type_val TEXT,
     chart_data_val JSONB,
     chart_config_val JSONB,
-    version_val INTEGER DEFAULT NULL
+    version_val INTEGER DEFAULT NULL,
+    template_structure_val JSONB DEFAULT NULL,
+    template_content_val JSONB DEFAULT NULL
 )
 RETURNS UUID AS $$
 DECLARE
     new_snapshot_id UUID;
     next_version INTEGER;
+    is_template BOOLEAN;
 BEGIN
-    -- Get next version number
-    SELECT COALESCE(MAX(version), 0) + 1 INTO next_version
-    FROM public.chart_snapshots 
+    -- Determine if this is a template mode snapshot
+    is_template := (template_structure_val IS NOT NULL OR template_content_val IS NOT NULL);
+    
+    -- Validate conversation exists
+    IF NOT EXISTS (SELECT 1 FROM public.conversations WHERE id = conv_id) THEN
+        RAISE EXCEPTION 'Conversation with id % does not exist', conv_id;
+    END IF;
+    
+    -- Get next version number if not provided
+    IF version_val IS NULL THEN
+        SELECT COALESCE(MAX(version), 0) + 1 INTO next_version
+        FROM public.chart_snapshots
+        WHERE conversation_id = conv_id;
+    ELSE
+        next_version := version_val;
+    END IF;
+    
+    -- Mark all existing snapshots for this conversation as not current
+    UPDATE public.chart_snapshots
+    SET is_current = false
     WHERE conversation_id = conv_id;
     
-    -- Set all existing snapshots as not current
-    UPDATE public.chart_snapshots 
-    SET is_current = false 
-    WHERE conversation_id = conv_id;
-    
-    -- Create new snapshot
+    -- Insert new snapshot
     INSERT INTO public.chart_snapshots (
-        conversation_id, 
-        chart_type, 
-        chart_data, 
-        chart_config, 
+        conversation_id,
+        chart_type,
+        chart_data,
+        chart_config,
         version,
-        is_current
+        is_current,
+        template_structure,
+        template_content,
+        is_template_mode
     )
     VALUES (
-        conv_id, 
-        chart_type_val, 
-        chart_data_val, 
-        chart_config_val, 
-        COALESCE(version_val, next_version),
-        true
+        conv_id,
+        chart_type_val,
+        chart_data_val,
+        chart_config_val,
+        next_version,
+        true,
+        template_structure_val,
+        template_content_val,
+        is_template
     )
     RETURNING id INTO new_snapshot_id;
     
@@ -251,7 +272,7 @@ $$ LANGUAGE plpgsql SECURITY DEFINER;
 -- Grant execute permissions
 GRANT EXECUTE ON FUNCTION get_user_conversations(UUID, INTEGER) TO authenticated;
 GRANT EXECUTE ON FUNCTION create_conversation_with_message(UUID, TEXT, TEXT) TO authenticated;
-GRANT EXECUTE ON FUNCTION save_chart_snapshot(UUID, TEXT, JSONB, JSONB, INTEGER) TO authenticated;
+GRANT EXECUTE ON FUNCTION save_chart_snapshot(UUID, TEXT, JSONB, JSONB, INTEGER, JSONB, JSONB) TO authenticated;
 
 -- Final verification
 DO $$
