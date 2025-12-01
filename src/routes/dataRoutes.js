@@ -138,28 +138,64 @@ router.get('/conversations/:id/messages', async (req, res) => {
 // CHART SNAPSHOT ROUTES
 // =============================================
 
-// Save chart snapshot
+// Save chart snapshot (POST for create, PUT for update)
 router.post('/chart-snapshots', async (req, res) => {
   try {
-    const { conversationId, chartType, chartData, chartConfig, templateStructure, templateContent } = req.body;
+    const { conversationId, chartType, chartData, chartConfig, templateStructure, templateContent, snapshotId } = req.body;
     
     if (!conversationId || !chartType || !chartData) {
       return res.status(400).json({ error: 'Missing required fields' });
     }
     
-    const snapshotId = await chartDataService.saveChartSnapshot(
+    const resultId = await chartDataService.saveChartSnapshot(
       conversationId,
       chartType,
       chartData,
       chartConfig,
       templateStructure || null,
-      templateContent || null
+      templateContent || null,
+      snapshotId || null
     );
     
-    res.status(201).json({ id: snapshotId });
+    res.status(snapshotId ? 200 : 201).json({ id: resultId });
   } catch (error) {
     console.error('Error saving chart snapshot:', error);
-    res.status(500).json({ error: 'Failed to save chart snapshot' });
+    const errorMessage = error.message || error.error || 'Failed to save chart snapshot';
+    res.status(500).json({ 
+      error: errorMessage,
+      details: error.details || error.hint || null
+    });
+  }
+});
+
+// Update chart snapshot
+router.put('/chart-snapshots/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { conversationId, chartType, chartData, chartConfig, templateStructure, templateContent } = req.body;
+
+    if (!id || !conversationId || !chartType || !chartData) {
+      return res.status(400).json({ error: 'Missing required fields' });
+    }
+
+    const updatedSnapshotId = await chartDataService.saveChartSnapshot(
+      conversationId,
+      chartType,
+      chartData,
+      chartConfig,
+      templateStructure || null,
+      templateContent || null,
+      id
+    );
+
+    res.json({ id: updatedSnapshotId });
+  } catch (error) {
+    console.error('Error updating chart snapshot:', error);
+    const errorMessage = error.message || error.error || 'Failed to update chart snapshot';
+    res.status(500).json({ 
+      error: errorMessage,
+      details: error.details || error.hint || null
+    });
   }
 });
 

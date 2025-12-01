@@ -169,8 +169,10 @@ class ChartDataService {
   // CHART SNAPSHOT MANAGEMENT
   // =============================================
   
-  async saveChartSnapshot(conversationId, chartType, chartData, chartConfig, templateStructure = null, templateContent = null) {
+  async saveChartSnapshot(conversationId, chartType, chartData, chartConfig, templateStructure = null, templateContent = null, snapshotId = null) {
     try {
+      // Always pass all parameters including snapshot_id_val (even if null)
+      // This avoids function overload ambiguity
       const { data, error } = await supabaseAdminClient
         .rpc('save_chart_snapshot', {
           conv_id: conversationId,
@@ -179,10 +181,15 @@ class ChartDataService {
           chart_config_val: chartConfig,
           version_val: null,
           template_structure_val: templateStructure,
-          template_content_val: templateContent
+          template_content_val: templateContent,
+          snapshot_id_val: snapshotId // Always pass, even if null
         });
       
-      if (error) throw error;
+      if (error) {
+        console.error('Error saving chart snapshot:', error);
+        throw error;
+      }
+      
       return data;
     } catch (error) {
       console.error('Error saving chart snapshot:', error);

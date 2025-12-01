@@ -37,7 +37,7 @@ if (missingEnvVars.length > 0) {
 console.log('✅ All required environment variables are configured');
 
 const app = express();
-const port = process.env.PORT || 3001;
+const port = process.env.PORT || 3001 ;
 
 // Initialize Gemini API
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);

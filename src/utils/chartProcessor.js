@@ -163,10 +163,25 @@ Focus on creating accurate, well-structured data that can be immediately used to
 Include proper labels, datasets, colors, and configuration options.`;
 
     if (templateStructure) {
+      // Check if any sections require HTML
+      const hasHtmlSections = templateStructure.sections?.some(s => s.contentType === 'html');
+      
       prompt += `
 
 IMPORTANT: The user has selected a template layout. You MUST also generate relevant text content for each template text area based on the chart topic.
-The response must include a "templateContent" object with text for each area type (title, heading, custom, main).`;
+The response must include a "templateContent" object with content for each area type (title, heading, custom, main).`;
+
+      if (hasHtmlSections) {
+        prompt += `
+
+Some sections require HTML formatted content. For those sections, generate well-structured HTML with semantic tags like <p>, <strong>, <em>, <ul>, <li>, <h3>, <h4>, etc.
+
+CRITICAL JSON FORMATTING RULE FOR HTML:
+- All HTML content MUST be on a SINGLE LINE within the JSON string
+- Do NOT include actual newlines inside HTML strings - they break JSON parsing
+- Use inline HTML: "<h3>Title</h3><p>Content here</p><ul><li>Item</li></ul>"
+- NEVER format HTML with line breaks inside the JSON string value`;
+      }
     }
 
     return prompt;
@@ -175,7 +190,7 @@ The response must include a "templateContent" object with text for each area typ
   /**
    * Build user prompt for chart generation
    * @param {string} inputText - User's request
-   * @param {Object} templateStructure - Template structure metadata
+   * @param {Object} templateStructure - Template structure metadata (includes contentType for each section)
    * @returns {string} - User prompt
    */
   buildUserPrompt(inputText, templateStructure = null) {
@@ -184,10 +199,26 @@ The response must include a "templateContent" object with text for each area typ
 Please generate chart data in valid JSON format.`;
 
     if (templateStructure) {
+      // Group sections by content type for clearer instructions
+      const textSections = templateStructure.sections.filter(s => s.type !== 'chart' && s.contentType !== 'html');
+      const htmlSections = templateStructure.sections.filter(s => s.type !== 'chart' && s.contentType === 'html');
+      
+      // Build sections info with notes for enhanced guidance
       const sectionsInfo = templateStructure.sections
         .filter(s => s.type !== 'chart')
-        .map(s => `- ${s.name} (${s.type}): Generate appropriate ${s.type} text related to the chart`)
+        .map(s => {
+          const formatType = s.contentType === 'html' ? 'HTML formatted' : 'plain text';
+          let info = `- ${s.name} (${s.type}): Generate ${formatType} content`;
+          // Include the note if provided by user for more specific guidance
+          if (s.note && s.note.trim()) {
+            info += `\n  → USER NOTE: "${s.note}"`;
+          }
+          return info;
+        })
         .join('\n');
+      
+      // Collect sections with notes for special emphasis
+      const sectionsWithNotes = templateStructure.sections.filter(s => s.type !== 'chart' && s.note && s.note.trim());
 
       prompt += `
 
@@ -197,7 +228,55 @@ Template Structure:
 - Text Sections to populate:
 ${sectionsInfo}
 
-Your response MUST include a "templateContent" object with text for each section type:
+Your response MUST include a "templateContent" object with content for each section type.`;
+
+      // Add emphasis on user notes if any exist
+      if (sectionsWithNotes.length > 0) {
+        prompt += `
+
+IMPORTANT - User-Specified Instructions:
+The user has provided specific notes for some sections. Please follow these instructions carefully:`;
+        sectionsWithNotes.forEach(s => {
+          prompt += `
+- ${s.name}: ${s.note}`;
+        });
+      }
+
+      // Add format-specific instructions
+      if (htmlSections.length > 0) {
+        const htmlTypes = [...new Set(htmlSections.map(s => s.type))];
+        prompt += `
+
+HTML FORMAT REQUIRED for these sections: ${htmlTypes.join(', ')}
+For HTML sections, generate well-structured HTML with appropriate tags like <p>, <strong>, <em>, <ul>, <li>, <h3>, <h4>, <br>, etc.
+Make the HTML visually appealing with proper semantic markup.
+
+CRITICAL: When including HTML in JSON strings, you MUST:
+1. Keep HTML on a SINGLE LINE (no actual newlines inside the string)
+2. Use \\n for line breaks if needed
+3. Escape all double quotes inside HTML as \\"
+
+CORRECT example in JSON:
+"main": "<h3>Key Insights</h3><ul><li><strong>Trend:</strong> Growth</li></ul><p>Details here.</p>"
+
+WRONG (will break JSON):
+"main": "<h3>Key Insights</h3>
+<ul>
+  <li>Item</li>
+</ul>"`;
+      }
+
+      if (textSections.length > 0) {
+        const textTypes = [...new Set(textSections.map(s => s.type))];
+        prompt += `
+
+PLAIN TEXT FORMAT for these sections: ${textTypes.join(', ')}
+For plain text sections, generate clean, readable text without HTML tags.`;
+      }
+
+      prompt += `
+
+Response format for templateContent:
 {
   "title": "A concise, descriptive title for the chart",
   "heading": "A brief subtitle or heading that provides context",
@@ -205,7 +284,7 @@ Your response MUST include a "templateContent" object with text for each section
   "main": "A comprehensive explanation or analysis related to the chart data"
 }
 
-Generate contextually relevant text for each section based on the chart topic and data.`;
+Generate contextually relevant content for each section based on the chart topic and data, using the specified format (HTML or plain text) for each.`;
     }
 
     return prompt;
@@ -263,7 +342,19 @@ Response format:
     prompt += `\n}`;
 
     if (templateStructure) {
+      // Collect sections with notes for guidance
+      const sectionsWithNotes = templateStructure.sections.filter(s => s.type !== 'chart' && s.note && s.note.trim());
+      
       prompt += `\n\nNote: If a template is active, also update the "templateContent" object with relevant text for each template area based on the chart modifications.`;
+      
+      // Include user notes for template sections if any exist
+      if (sectionsWithNotes.length > 0) {
+        prompt += `\n\nUser-specified instructions for template content:`;
+        sectionsWithNotes.forEach(s => {
+          const formatType = s.contentType === 'html' ? 'HTML' : 'plain text';
+          prompt += `\n- ${s.name} (${formatType}): ${s.note}`;
+        });
+      }
     }
 
     return prompt;
@@ -348,6 +439,18 @@ Response format:
   attemptJSONRepair(jsonText) {
     try {
       let repaired = jsonText.trim();
+      
+      // FIRST: Fix HTML content issues - newlines and unescaped characters inside strings
+      repaired = this.fixHTMLInJSON(repaired);
+      
+      // Try parsing after HTML fix
+      try {
+        JSON.parse(repaired);
+        console.log('JSON fixed by HTML content repair');
+        return repaired;
+      } catch (e) {
+        // Continue with other repair attempts
+      }
       
       // Find the last complete object by looking for the last complete closing brace
       let braceCount = 0;
@@ -490,6 +593,75 @@ Response format:
       console.error('Error during JSON repair attempt:', error);
       return null;
     }
+  }
+
+  /**
+   * Fix HTML content inside JSON strings
+   * Handles common issues like unescaped newlines and quotes in HTML content
+   * @param {string} jsonText - JSON text potentially containing HTML with issues
+   * @returns {string} - Fixed JSON text
+   */
+  fixHTMLInJSON(jsonText) {
+    let result = jsonText;
+    
+    // Find all string values in JSON (simplified approach)
+    // This regex finds strings that look like they contain HTML tags
+    const htmlStringPattern = /"([^"]*<[^>]+>[^"]*)"/g;
+    
+    // More robust approach: process the JSON character by character
+    // to properly escape newlines and tabs within string values
+    let inString = false;
+    let escapeNext = false;
+    let fixed = '';
+    
+    for (let i = 0; i < result.length; i++) {
+      const char = result[i];
+      const nextChar = result[i + 1];
+      
+      if (escapeNext) {
+        escapeNext = false;
+        fixed += char;
+        continue;
+      }
+      
+      if (char === '\\') {
+        escapeNext = true;
+        fixed += char;
+        continue;
+      }
+      
+      if (char === '"') {
+        inString = !inString;
+        fixed += char;
+        continue;
+      }
+      
+      if (inString) {
+        // Inside a string, escape problematic characters
+        if (char === '\n') {
+          fixed += '\\n';
+          continue;
+        }
+        if (char === '\r') {
+          fixed += '\\r';
+          continue;
+        }
+        if (char === '\t') {
+          fixed += '\\t';
+          continue;
+        }
+      }
+      
+      fixed += char;
+    }
+    
+    // If we ended up inside a string, something is still wrong
+    // but at least we tried to fix the newline issues
+    if (fixed !== result) {
+      console.log('Fixed newlines/tabs in JSON strings');
+    }
+    
+    return fixed;
   }
 
   /**
