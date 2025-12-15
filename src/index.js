@@ -20,7 +20,7 @@ dotenv.config();
 // Check required environment variables
 const requiredEnvVars = [
   'SUPABASE_URL',
-  'SUPABASE_ANON_KEY', 
+  'SUPABASE_ANON_KEY',
   'SUPABASE_SERVICE_ROLE_KEY',
   'GOOGLE_CLIENT_ID',
   'GOOGLE_CLIENT_SECRET'
@@ -37,7 +37,7 @@ if (missingEnvVars.length > 0) {
 console.log('✅ All required environment variables are configured');
 
 const app = express();
-const port = process.env.PORT || 3001 ;
+const port = process.env.PORT || 3001;
 
 // Initialize Gemini API
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
@@ -74,7 +74,7 @@ app.use(
   cors({
     origin: appOrigin,
     credentials: true,
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
     exposedHeaders: ['X-Total-Count']
   })
@@ -119,7 +119,7 @@ app.get('/admin/security/stats', requireAuth, (req, res) => {
   if (req.user?.email !== process.env.ADMIN_EMAIL) {
     return res.status(403).json({ error: 'Admin access required' });
   }
-  
+
   const stats = getSecurityStats();
   res.json(stats);
 });
@@ -129,12 +129,12 @@ app.post('/admin/security/block-ip', requireAuth, (req, res) => {
   if (req.user?.email !== process.env.ADMIN_EMAIL) {
     return res.status(403).json({ error: 'Admin access required' });
   }
-  
+
   const { ipAddress, reason } = req.body;
   if (!ipAddress) {
     return res.status(400).json({ error: 'IP address is required' });
   }
-  
+
   blockIP(ipAddress, reason || 'Admin action');
   res.json({ success: true, message: `IP ${ipAddress} blocked` });
 });
@@ -144,12 +144,12 @@ app.post('/admin/security/unblock-ip', requireAuth, (req, res) => {
   if (req.user?.email !== process.env.ADMIN_EMAIL) {
     return res.status(403).json({ error: 'Admin access required' });
   }
-  
+
   const { ipAddress } = req.body;
   if (!ipAddress) {
     return res.status(400).json({ error: 'IP address is required' });
   }
-  
+
   const wasBlocked = unblockIP(ipAddress);
   if (wasBlocked) {
     res.json({ success: true, message: `IP ${ipAddress} unblocked` });
@@ -171,20 +171,20 @@ async function generateChartData(inputText) {
     const result = await model.generateContent(prompt);
     const response = await result.response;
     let responseText = response.text()
-   
+
     // Clean the response text - remove markdown code blocks if present
     responseText = responseText.trim();
-    
+
     // Remove ```json and ``` if they exist
     if (responseText.startsWith('```json')) {
       responseText = responseText.replace(/^```json\s*/, '').replace(/\s*```$/, '');
     } else if (responseText.startsWith('```')) {
       responseText = responseText.replace(/^```\s*/, '').replace(/\s*```$/, '');
     }
-    
+
     // Additional cleanup - remove any remaining backticks at start/end
     responseText = responseText.replace(/^`+|`+$/g, '').trim()
-   
+
     // Parse the cleaned response text as JSON
     const chartData = JSON.parse(responseText);
     return chartData;
@@ -198,13 +198,13 @@ async function generateChartData(inputText) {
 async function modifyChartData(inputText, currentChartState, messageHistory) {
   try {
     const model = genAI.getGenerativeModel({ model: "gemini-2.5-pro" });
-    
+
     const modificationInstructions = await fs.readFile('./src/AI_Modification_Inform.txt', 'utf-8');
-    
+
     // Create compact chart state summary (remove formatting to reduce tokens by ~70%)
     const compactData = JSON.stringify(currentChartState.chartData);
     const compactConfig = JSON.stringify(currentChartState.chartConfig);
-    
+
     const contextPrompt = `
     ${modificationInstructions}
 
@@ -240,7 +240,7 @@ async function modifyChartData(inputText, currentChartState, messageHistory) {
     const result = await model.generateContent(contextPrompt);
     const response = await result.response;
     let responseText = response.text().trim();
-    
+
     // Clean the response text
     if (responseText.startsWith('```json')) {
       responseText = responseText.replace(/^```json\s*/, '').replace(/\s*```$/, '');
@@ -248,7 +248,7 @@ async function modifyChartData(inputText, currentChartState, messageHistory) {
       responseText = responseText.replace(/^```\s*/, '').replace(/\s*```$/, '');
     }
     responseText = responseText.replace(/^`+|`+$/g, '').trim();
-    
+
     const chartData = JSON.parse(responseText);
     return chartData;
   } catch (error) {
@@ -261,13 +261,13 @@ async function modifyChartData(inputText, currentChartState, messageHistory) {
 app.post('/api/process-chart', async (req, res) => {
   try {
     const { input, conversationId, currentChartState, messageHistory } = req.body;
-    
+
     if (!input) {
       return res.status(400).json({ error: 'Input text is required' });
     }
 
     let aiResponse;
-    
+
     // Determine if this is a modification or new chart
     if (currentChartState && conversationId) {
       aiResponse = await modifyChartData(input, currentChartState, messageHistory || []);
@@ -276,7 +276,7 @@ app.post('/api/process-chart', async (req, res) => {
     }
 
     // console.log('AI Response:', aiResponse);
-    
+
     // Compose the correct format for the frontend
     const result = {
       chartType: aiResponse.chartType,
@@ -286,13 +286,13 @@ app.post('/api/process-chart', async (req, res) => {
       action: aiResponse.action || 'create',
       changes: aiResponse.changes || []
     };
-    
+
     res.json(result);
   } catch (error) {
     console.error('Error processing chart request:', error);
-    res.status(500).json({ 
+    res.status(500).json({
       error: 'Failed to process chart request',
-      details: error.message 
+      details: error.message
     });
   }
 });
@@ -301,11 +301,11 @@ app.post('/api/process-chart', async (req, res) => {
 app.get('/api/conversation/:id', (req, res) => {
   const { id } = req.params;
   const conversation = conversationStore.get(id);
-  
+
   if (!conversation) {
     return res.status(404).json({ error: 'Conversation not found' });
   }
-  
+
   res.json(conversation);
 });
 
@@ -313,57 +313,57 @@ app.get('/api/conversation/:id', (req, res) => {
 app.delete('/api/conversation/:id', (req, res) => {
   const { id } = req.params;
   const deleted = conversationStore.delete(id);
-  
+
   if (!deleted) {
     return res.status(404).json({ error: 'Conversation not found' });
   }
-  
+
   res.json({ message: 'Conversation deleted successfully' });
 });
 
 // Enhanced main endpoint that supports both Google and Perplexity
 app.post('/api/process-chart-enhanced', async (req, res) => {
   // Extract service outside try block so it's accessible in catch
-    const { 
-      input, 
-      service = 'perplexity', // 'google' or 'perplexity'
-      model,
-      conversationId, 
-      currentChartState, 
-      messageHistory,
-      templateStructure // NEW: Template structure metadata for generating template text content
-    } = req.body;
-  
+  const {
+    input,
+    service = 'perplexity', // 'google' or 'perplexity'
+    model,
+    conversationId,
+    currentChartState,
+    messageHistory,
+    templateStructure // NEW: Template structure metadata for generating template text content
+  } = req.body;
+
   try {
-    
+
     if (!input) {
       return res.status(400).json({ error: 'Input text is required' });
     }
 
     let aiResponse;
-    
+
     if (service === 'perplexity') {
       if (!process.env.PERPLEXITY_API_KEY) {
         return res.status(500).json({ error: 'Perplexity API key not configured' });
       }
-      
+
       if (currentChartState && conversationId) {
         aiResponse = await modifyChartDataWithPerplexity(input, currentChartState, messageHistory || [], model, templateStructure);
       } else {
         aiResponse = await generateChartDataWithPerplexity(input, model, templateStructure);
       }
-      
+
     } else if (service === 'openrouter') {
       if (!process.env.OPENROUTER_API_KEY) {
         return res.status(500).json({ error: 'OpenRouter API key not configured' });
       }
-      
+
       if (currentChartState && conversationId) {
         aiResponse = await modifyChartDataWithOpenRouter(input, currentChartState, messageHistory || [], model, templateStructure);
       } else {
         aiResponse = await generateChartDataWithOpenRouter(input, model, templateStructure);
       }
-      
+
     } else if (service === 'deepseek') {
       // DeepSeek integration scaffold - respond with informative message until fully wired
       if (!process.env.DEEPSEEK_API_KEY) {
@@ -375,13 +375,13 @@ app.post('/api/process-chart-enhanced', async (req, res) => {
       } else {
         aiResponse = await generateChartDataWithDeepSeek(input, model, templateStructure);
       }
-      
+
     } else {
       // Default to Google (existing logic)
       if (!process.env.GEMINI_API_KEY) {
         return res.status(500).json({ error: 'Google API key not configured' });
       }
-      
+
       if (currentChartState && conversationId) {
         aiResponse = await modifyChartData(input, currentChartState, messageHistory || []);
       } else {
@@ -402,22 +402,22 @@ app.post('/api/process-chart-enhanced', async (req, res) => {
       // Include template content if generated
       templateContent: aiResponse.templateContent || null
     };
-    
+
     res.json(result);
-    
+
   } catch (error) {
     console.error(`Error processing chart request with ${service || 'google'}:`, error);
-    res.status(500).json({ 
+    res.status(500).json({
       error: `Failed to process chart request with ${service || 'google'}`,
-      details: error.message 
+      details: error.message
     });
   }
 });
 
 // Health check endpoint
 app.get('/health', (req, res) => {
-  res.json({ 
-    status: 'ok', 
+  res.json({
+    status: 'ok',
     timestamp: new Date().toISOString(),
     security: 'enabled',
     version: '2.0.0'
