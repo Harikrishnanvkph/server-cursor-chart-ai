@@ -22,11 +22,11 @@ export class ChartProcessor {
     try {
       // Get AI context (with caching)
       const aiContext = await this.getAIContext();
-      
+
       // Construct prompts
       const systemPrompt = this.buildSystemPrompt(aiContext, templateStructure);
       const userPrompt = this.buildUserPrompt(inputText, templateStructure);
-      
+
       // Make service-specific API call
       const response = await this.adapter.generateContent({
         systemPrompt,
@@ -36,30 +36,30 @@ export class ChartProcessor {
         temperature: 0.2,
         topP: 0.85
       });
-      
+
       // Process response
       const cleanedResponse = this.cleanResponse(response.content);
       const chartData = this.parseJSON(cleanedResponse, this.adapter.serviceName);
-      
+
       // Validate required fields in chart data
       if (!chartData.chartType) {
         throw new Error('AI response missing chartType field');
       }
-      
+
       if (!chartData.data && !chartData.chartData) {
         throw new Error('AI response missing chart data');
       }
-      
+
       // Ensure user_message exists
       if (!chartData.user_message) {
         chartData.user_message = `Chart generated successfully using ${this.adapter.serviceName}`;
       }
-      
+
       // Add metadata
       chartData._metadata = this.buildMetadata(response, model);
-      
+
       return chartData;
-      
+
     } catch (error) {
       console.error(`Error generating chart with ${this.adapter.serviceName}:`, error);
       throw this.enhanceError(error);
@@ -79,16 +79,16 @@ export class ChartProcessor {
     try {
       // Get modification context (with caching)
       const modificationContext = await this.getModificationContext();
-      
+
       // Build modification prompt
       const contextPrompt = this.buildModificationPrompt(
-        modificationContext, 
-        currentChartState, 
-        messageHistory, 
+        modificationContext,
+        currentChartState,
+        messageHistory,
         inputText,
         templateStructure
       );
-      
+
       // Make service-specific API call with higher tokens for modifications
       const response = await this.adapter.generateContent({
         userPrompt: contextPrompt,
@@ -96,16 +96,16 @@ export class ChartProcessor {
         maxTokens: 5000,  // Increased to 5000 for complex chart modifications with history
         temperature: 0.2
       });
-      
+
       // Process response
       const cleanedResponse = this.cleanResponse(response.content);
       const chartData = this.parseJSON(cleanedResponse, this.adapter.serviceName);
-      
+
       // Add metadata
       chartData._metadata = this.buildMetadata(response, model);
-      
+
       return chartData;
-      
+
     } catch (error) {
       console.error(`Error modifying chart with ${this.adapter.serviceName}:`, error);
       throw this.enhanceError(error);
@@ -165,7 +165,7 @@ Include proper labels, datasets, colors, and configuration options.`;
     if (templateStructure) {
       // Check if any sections require HTML
       const hasHtmlSections = templateStructure.sections?.some(s => s.contentType === 'html');
-      
+
       prompt += `
 
 IMPORTANT: The user has selected a template layout. You MUST also generate relevant text content for each template text area based on the chart topic.
@@ -202,7 +202,7 @@ Please generate chart data in valid JSON format.`;
       // Group sections by content type for clearer instructions
       const textSections = templateStructure.sections.filter(s => s.type !== 'chart' && s.contentType !== 'html');
       const htmlSections = templateStructure.sections.filter(s => s.type !== 'chart' && s.contentType === 'html');
-      
+
       // Build sections info with notes for enhanced guidance
       const sectionsInfo = templateStructure.sections
         .filter(s => s.type !== 'chart')
@@ -216,7 +216,7 @@ Please generate chart data in valid JSON format.`;
           return info;
         })
         .join('\n');
-      
+
       // Collect sections with notes for special emphasis
       const sectionsWithNotes = templateStructure.sections.filter(s => s.type !== 'chart' && s.note && s.note.trim());
 
@@ -300,39 +300,47 @@ Generate contextually relevant content for each section based on the chart topic
    * @returns {string} - Modification prompt
    */
   buildModificationPrompt(modificationContext, currentChartState, messageHistory, inputText, templateStructure = null) {
-    // Limit history to last 2 messages to reduce token usage
-    const recentHistory = messageHistory.slice(-2).map(msg => {
-      // Truncate long messages to first 150 characters
-      const content = msg.content?.length > 150 ? msg.content.substring(0, 150) + '...' : msg.content;
+    // Increased from 2→5 messages and 150→300 chars for better AI context
+    const recentHistory = messageHistory.slice(-5).map(msg => {
+      // Truncate long messages to first 300 characters
+      const content = msg.content?.length > 300 ? msg.content.substring(0, 300) + '...' : msg.content;
       return `${msg.role}: ${content}`;
     }).join('\n');
 
-    // Create a compact summary of chart state (remove formatting, reduce token usage by ~70%)
+    // Build human-readable chart summary for AI to understand context
+    const chartSummary = this.buildChartSummary(currentChartState);
+
+    // Create compact chart state for exact data reference
     const compactData = JSON.stringify(currentChartState.chartData);
     const compactConfig = JSON.stringify(currentChartState.chartConfig);
 
     let prompt = `${modificationContext}
 
-Current Chart State:
-- Chart Type: ${currentChartState.chartType}
-- Current Data: ${compactData}
-- Current Config: ${compactConfig}
+CURRENT CHART SUMMARY (for your understanding):
+${chartSummary}
 
-Recent conversation context (last 2 messages):
+CURRENT CHART STATE (exact data):
+- Chart Type: ${currentChartState.chartType}
+- Data: ${compactData}
+- Config: ${compactConfig}
+
+CONVERSATION HISTORY (last 5 messages):
 ${recentHistory}
 
-User's modification request: ${inputText}
+USER'S CURRENT REQUEST: ${inputText}
 
-Respond with ONLY a JSON object containing the modified chart configuration.
-Keep all existing data and settings unless specifically requested to change.
+IMPORTANT INSTRUCTIONS:
+1. If user wants to MODIFY this chart → preserve existing structure, apply only requested changes
+2. If user wants a COMPLETELY NEW chart on a DIFFERENT TOPIC → create fresh data from scratch
+3. Read the conversation history to understand the full context
 
-Response format:
+Respond with ONLY a JSON object:
 {
   "action": "modify",
   "chartType": "same or new type",
-  "chartData": { /* modified data */ },
-  "chartConfig": { /* modified config */ },
-  "user_message": "Explanation of changes made",
+  "chartData": { /* modified or new data */ },
+  "chartConfig": { /* modified or new config */ },
+  "user_message": "Clear explanation of what you did",
   "changes": ["list of specific changes made"]`;
 
     if (templateStructure) {
@@ -344,9 +352,9 @@ Response format:
     if (templateStructure) {
       // Collect sections with notes for guidance
       const sectionsWithNotes = templateStructure.sections.filter(s => s.type !== 'chart' && s.note && s.note.trim());
-      
+
       prompt += `\n\nNote: If a template is active, also update the "templateContent" object with relevant text for each template area based on the chart modifications.`;
-      
+
       // Include user notes for template sections if any exist
       if (sectionsWithNotes.length > 0) {
         prompt += `\n\nUser-specified instructions for template content:`;
@@ -371,23 +379,23 @@ Response format:
     }
 
     let cleaned = responseText.trim();
-    
+
     // Check if response is just a fallback message (not JSON)
-    if (cleaned.includes("I apologize, but I couldn't generate") || 
-        cleaned.includes("Please try rephrasing your request")) {
+    if (cleaned.includes("I apologize, but I couldn't generate") ||
+      cleaned.includes("Please try rephrasing your request")) {
       throw new Error('AI service could not generate chart data - please try rephrasing your request');
     }
-    
+
     // Remove ```json and ``` if they exist
     if (cleaned.startsWith('```json')) {
       cleaned = cleaned.replace(/^```json\s*/, '').replace(/\s*```$/, '');
     } else if (cleaned.startsWith('```')) {
       cleaned = cleaned.replace(/^```\s*/, '').replace(/\s*```$/, '');
     }
-    
+
     // Additional cleanup - remove any remaining backticks at start/end
     cleaned = cleaned.replace(/^`+|`+$/g, '').trim();
-    
+
     return cleaned;
   }
 
@@ -404,7 +412,7 @@ Response format:
       console.error(`JSON Parse Error from ${serviceName}:`, parseError.message);
       console.error('Raw response length:', jsonText.length);
       console.error('Raw response preview:', jsonText.substring(0, 500) + (jsonText.length > 500 ? '...' : ''));
-      
+
       // Try to repair common JSON issues
       let repairedJson = this.attemptJSONRepair(jsonText);
       if (repairedJson) {
@@ -416,7 +424,7 @@ Response format:
           console.error('Repaired JSON still invalid:', repairError.message);
         }
       }
-      
+
       // If all repair attempts fail, provide a more helpful error message
       let errorDetails = parseError.message;
       if (jsonText.length === 0) {
@@ -426,7 +434,7 @@ Response format:
       } else if (!jsonText.trim().endsWith('}')) {
         errorDetails = 'Response appears to be truncated (missing closing brace)';
       }
-      
+
       throw new Error(`Failed to parse ${serviceName} response as valid JSON: ${errorDetails}`);
     }
   }
@@ -439,10 +447,10 @@ Response format:
   attemptJSONRepair(jsonText) {
     try {
       let repaired = jsonText.trim();
-      
+
       // FIRST: Fix HTML content issues - newlines and unescaped characters inside strings
       repaired = this.fixHTMLInJSON(repaired);
-      
+
       // Try parsing after HTML fix
       try {
         JSON.parse(repaired);
@@ -451,31 +459,31 @@ Response format:
       } catch (e) {
         // Continue with other repair attempts
       }
-      
+
       // Find the last complete object by looking for the last complete closing brace
       let braceCount = 0;
       let lastValidIndex = -1;
       let inString = false;
       let escapeNext = false;
-      
+
       for (let i = 0; i < repaired.length; i++) {
         const char = repaired[i];
-        
+
         if (escapeNext) {
           escapeNext = false;
           continue;
         }
-        
+
         if (char === '\\') {
           escapeNext = true;
           continue;
         }
-        
+
         if (char === '"') {
           inString = !inString;
           continue;
         }
-        
+
         if (!inString) {
           if (char === '{') {
             braceCount++;
@@ -487,14 +495,14 @@ Response format:
           }
         }
       }
-      
+
       if (lastValidIndex > 0 && lastValidIndex < repaired.length - 1) {
         // Truncate to the last valid closing brace
         repaired = repaired.substring(0, lastValidIndex + 1);
         console.log('Truncated JSON to last valid closing brace');
         return repaired;
       }
-      
+
       // Handle the specific case from the error where arrays are incomplete
       // Look for patterns like: "rgba(54, 162, 235, 1)",\n"rgba(255, 99, 132, 1)",\n
       // and try to close them properly
@@ -504,7 +512,7 @@ Response format:
         if (rgbaMatches.length > 0) {
           const lastMatch = rgbaMatches[rgbaMatches.length - 1];
           const lastMatchEnd = lastMatch.index + lastMatch[0].length;
-          
+
           // Check if there's incomplete content after the last rgba
           const afterLastRgba = repaired.substring(lastMatchEnd);
           if (afterLastRgba.trim() && !afterLastRgba.includes(']')) {
@@ -515,22 +523,22 @@ Response format:
           }
         }
       }
-      
+
       // Try to fix unterminated strings
       if (inString) {
         // Find the last opening quote without a closing quote
         let quoteCount = 0;
         let lastOpenQuoteIndex = -1;
-        
+
         for (let i = 0; i < repaired.length; i++) {
-          if (repaired[i] === '"' && (i === 0 || repaired[i-1] !== '\\')) {
+          if (repaired[i] === '"' && (i === 0 || repaired[i - 1] !== '\\')) {
             quoteCount++;
             if (quoteCount % 2 === 1) {
               lastOpenQuoteIndex = i;
             }
           }
         }
-        
+
         if (lastOpenQuoteIndex > -1) {
           // Close the unterminated string and try to complete the structure
           repaired = repaired.substring(0, lastOpenQuoteIndex + 1) + '"]}}';
@@ -538,31 +546,31 @@ Response format:
           return repaired;
         }
       }
-      
+
       // Try to close unclosed arrays and objects
       let arrayCount = 0;
       let objectCount = 0;
       inString = false;
       escapeNext = false;
-      
+
       for (let i = 0; i < repaired.length; i++) {
         const char = repaired[i];
-        
+
         if (escapeNext) {
           escapeNext = false;
           continue;
         }
-        
+
         if (char === '\\') {
           escapeNext = true;
           continue;
         }
-        
+
         if (char === '"') {
           inString = !inString;
           continue;
         }
-        
+
         if (!inString) {
           if (char === '[') arrayCount++;
           else if (char === ']') arrayCount--;
@@ -570,7 +578,7 @@ Response format:
           else if (char === '}') objectCount--;
         }
       }
-      
+
       // Add missing closing brackets
       while (arrayCount > 0) {
         repaired += ']';
@@ -580,15 +588,15 @@ Response format:
         repaired += '}';
         objectCount--;
       }
-      
+
       if (arrayCount < 0 || objectCount < 0) {
         console.log('Could not repair JSON: too many closing brackets');
         return null;
       }
-      
+
       console.log('Attempted to close unclosed brackets');
       return repaired;
-      
+
     } catch (error) {
       console.error('Error during JSON repair attempt:', error);
       return null;
@@ -603,39 +611,39 @@ Response format:
    */
   fixHTMLInJSON(jsonText) {
     let result = jsonText;
-    
+
     // Find all string values in JSON (simplified approach)
     // This regex finds strings that look like they contain HTML tags
     const htmlStringPattern = /"([^"]*<[^>]+>[^"]*)"/g;
-    
+
     // More robust approach: process the JSON character by character
     // to properly escape newlines and tabs within string values
     let inString = false;
     let escapeNext = false;
     let fixed = '';
-    
+
     for (let i = 0; i < result.length; i++) {
       const char = result[i];
       const nextChar = result[i + 1];
-      
+
       if (escapeNext) {
         escapeNext = false;
         fixed += char;
         continue;
       }
-      
+
       if (char === '\\') {
         escapeNext = true;
         fixed += char;
         continue;
       }
-      
+
       if (char === '"') {
         inString = !inString;
         fixed += char;
         continue;
       }
-      
+
       if (inString) {
         // Inside a string, escape problematic characters
         if (char === '\n') {
@@ -651,16 +659,16 @@ Response format:
           continue;
         }
       }
-      
+
       fixed += char;
     }
-    
+
     // If we ended up inside a string, something is still wrong
     // but at least we tried to fix the newline issues
     if (fixed !== result) {
       console.log('Fixed newlines/tabs in JSON strings');
     }
-    
+
     return fixed;
   }
 
@@ -692,9 +700,48 @@ Response format:
     if (error.message?.includes('JSON')) {
       return new Error(`Failed to parse ${this.adapter.serviceName} response as valid JSON`);
     }
-    
+
     // Delegate to adapter for service-specific error handling
     return this.adapter.enhanceError(error);
+  }
+
+  /**
+   * Build human-readable chart summary for AI understanding
+   * @param {Object} chartState - Current chart state
+   * @returns {string} - Human-readable summary
+   */
+  buildChartSummary(chartState) {
+    if (!chartState || !chartState.chartData) {
+      return "No chart currently exists.";
+    }
+
+    const { chartType, chartData, chartConfig } = chartState;
+    const datasets = chartData.datasets || [];
+    const labels = chartData.labels || [];
+
+    let summary = `Current chart is a ${chartType} chart`;
+
+    if (labels.length > 0) {
+      summary += ` with ${labels.length} data points`;
+      if (labels.length <= 5) {
+        summary += ` (labels: ${labels.join(', ')})`;
+      } else {
+        summary += ` (labels: ${labels.slice(0, 3).join(', ')}... and ${labels.length - 3} more)`;
+      }
+    }
+
+    if (datasets.length > 0) {
+      summary += `. It has ${datasets.length} dataset(s): `;
+      summary += datasets.map(ds => `"${ds.label || 'Untitled'}"`).join(', ');
+    }
+
+    // Add title if present
+    const title = chartConfig?.plugins?.title?.text;
+    if (title) {
+      summary += `. Chart title: "${title}"`;
+    }
+
+    return summary;
   }
 
   /**

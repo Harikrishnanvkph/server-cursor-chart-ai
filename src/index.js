@@ -201,41 +201,50 @@ async function modifyChartData(inputText, currentChartState, messageHistory) {
 
     const modificationInstructions = await fs.readFile('./src/AI_Modification_Inform.txt', 'utf-8');
 
-    // Create compact chart state summary (remove formatting to reduce tokens by ~70%)
+    // Create human-readable chart summary for AI to understand context
+    const chartSummary = buildChartSummary(currentChartState);
+
+    // Create compact chart state for exact data reference
     const compactData = JSON.stringify(currentChartState.chartData);
     const compactConfig = JSON.stringify(currentChartState.chartConfig);
+
+    // Increased from 2→5 messages and 150→300 chars for better AI context
+    const recentHistory = messageHistory.slice(-5).map(msg => {
+      const content = msg.content?.length > 300 ? msg.content.substring(0, 300) + '...' : msg.content;
+      return `${msg.role}: ${content}`;
+    }).join('\n');
 
     const contextPrompt = `
     ${modificationInstructions}
 
-    Current Chart State:
+    CURRENT CHART SUMMARY (for your understanding):
+    ${chartSummary}
+
+    CURRENT CHART STATE (exact data):
     - Chart Type: ${currentChartState.chartType}
-    - Current Data: ${compactData}
-    - Current Config: ${compactConfig}
+    - Data: ${compactData}
+    - Config: ${compactConfig}
 
-    Recent conversation context (last 2 messages):
-    ${messageHistory.slice(-2).map(msg => {
-      const content = msg.content?.length > 150 ? msg.content.substring(0, 150) + '...' : msg.content;
-      return `${msg.role}: ${content}`;
-    }).join('\n')}
+    CONVERSATION HISTORY (last 5 messages):
+    ${recentHistory}
 
-    User's modification request: ${inputText}
+    USER'S CURRENT REQUEST: ${inputText}
 
-    Respond with ONLY a JSON object containing the modified chart configuration.
-    Keep all existing data and settings unless specifically requested to change.
+    IMPORTANT INSTRUCTIONS:
+    1. If user wants to MODIFY this chart → preserve existing structure, apply only requested changes
+    2. If user wants a COMPLETELY NEW chart on a DIFFERENT TOPIC → create fresh data from scratch
+    3. Read the conversation history to understand the full context
 
-    Response format:
+    Respond with ONLY a JSON object:
     {
       "action": "modify",
       "chartType": "same or new type",
-      "chartData": { /* modified data */ },
-      "chartConfig": { /* modified config */ },
-      "user_message": "Explanation of changes made",
+      "chartData": { /* modified or new data */ },
+      "chartConfig": { /* modified or new config */ },
+      "user_message": "Clear explanation of what you did",
       "changes": ["list of specific changes made"]
     }
     `;
-
-    // console.log('Modification prompt:', contextPrompt);
 
     const result = await model.generateContent(contextPrompt);
     const response = await result.response;
@@ -255,6 +264,41 @@ async function modifyChartData(inputText, currentChartState, messageHistory) {
     console.error('Error modifying chart data:', error);
     throw error;
   }
+}
+
+// Helper function to build human-readable chart summary
+function buildChartSummary(chartState) {
+  if (!chartState || !chartState.chartData) {
+    return "No chart currently exists.";
+  }
+
+  const { chartType, chartData, chartConfig } = chartState;
+  const datasets = chartData.datasets || [];
+  const labels = chartData.labels || [];
+
+  let summary = `Current chart is a ${chartType} chart`;
+
+  if (labels.length > 0) {
+    summary += ` with ${labels.length} data points`;
+    if (labels.length <= 5) {
+      summary += ` (labels: ${labels.join(', ')})`;
+    } else {
+      summary += ` (labels: ${labels.slice(0, 3).join(', ')}... and ${labels.length - 3} more)`;
+    }
+  }
+
+  if (datasets.length > 0) {
+    summary += `. It has ${datasets.length} dataset(s): `;
+    summary += datasets.map(ds => `"${ds.label || 'Untitled'}"`).join(', ');
+  }
+
+  // Add title if present
+  const title = chartConfig?.plugins?.title?.text;
+  if (title) {
+    summary += `. Chart title: "${title}"`;
+  }
+
+  return summary;
 }
 
 // Endpoint to process chart request (new or modification)
