@@ -1,11 +1,11 @@
 import { supabaseAdminClient } from '../supabase/client.js';
 
 class ChartDataService {
-  
+
   // =============================================
   // CONVERSATION MANAGEMENT
   // =============================================
-  
+
   async createConversation(userId, title, description = null) {
     try {
       // First, ensure user has a profile (fix for missing profiles)
@@ -32,24 +32,24 @@ class ChartDataService {
         })
         .select('*')
         .single();
-      
+
       if (error) {
         console.error('Error creating conversation:', error);
         throw error;
       }
-      
+
       // Create initial assistant message
-      await this.addMessage(data.id, 'assistant', 
-        'Hi! Describe the chart you want to create, or ask me to modify an existing chart.', 
+      await this.addMessage(data.id, 'assistant',
+        'Hi! Describe the chart you want to create, or ask me to modify an existing chart.',
         null, null, null);
-      
+
       return data;
     } catch (error) {
       console.error('Error creating conversation:', error);
       throw error;
     }
   }
-  
+
   async getUserConversations(userId, limit = 50) {
     try {
       const { data, error } = await supabaseAdminClient
@@ -57,7 +57,7 @@ class ChartDataService {
           user_uuid: userId,
           limit_count: limit
         });
-      
+
       if (error) {
         console.error('RPC error, trying direct query:', error);
         // Fallback to direct query if RPC doesn't exist
@@ -68,15 +68,15 @@ class ChartDataService {
           .eq('is_active', true)
           .order('updated_at', { ascending: false })
           .limit(limit);
-        
+
         if (directError) {
           console.error('Direct query also failed:', directError);
           throw directError;
         }
-        
+
         return directData || [];
       }
-      
+
       return data || [];
     } catch (error) {
       console.error('Error fetching conversations:', error);
@@ -89,7 +89,7 @@ class ChartDataService {
       throw error;
     }
   }
-  
+
   async getConversationById(conversationId, userId) {
     try {
       const { data, error } = await supabaseAdminClient
@@ -102,7 +102,7 @@ class ChartDataService {
         .eq('id', conversationId)
         .eq('user_id', userId)
         .single();
-      
+
       if (error) throw error;
       return data;
     } catch (error) {
@@ -123,7 +123,7 @@ class ChartDataService {
         .eq('user_id', userId)
         .select('*')
         .single();
-      
+
       if (error) throw error;
       return data;
     } catch (error) {
@@ -139,7 +139,7 @@ class ChartDataService {
         .delete()
         .eq('id', conversationId)
         .eq('user_id', userId);
-      
+
       if (error) throw error;
       return { success: true };
     } catch (error) {
@@ -156,7 +156,7 @@ class ChartDataService {
         .from('conversations')
         .delete()
         .eq('user_id', userId);
-      
+
       if (error) throw error;
       return { success: true };
     } catch (error) {
@@ -164,11 +164,11 @@ class ChartDataService {
       throw error;
     }
   }
-  
+
   // =============================================
   // CHART SNAPSHOT MANAGEMENT
   // =============================================
-  
+
   async saveChartSnapshot(conversationId, chartType, chartData, chartConfig, templateStructure = null, templateContent = null, snapshotId = null) {
     try {
       // Always pass all parameters including snapshot_id_val (even if null)
@@ -184,19 +184,19 @@ class ChartDataService {
           template_content_val: templateContent,
           snapshot_id_val: snapshotId // Always pass, even if null
         });
-      
+
       if (error) {
         console.error('Error saving chart snapshot:', error);
         throw error;
       }
-      
+
       return data;
     } catch (error) {
       console.error('Error saving chart snapshot:', error);
       throw error;
     }
   }
-  
+
   async getCurrentChartSnapshot(conversationId) {
     try {
       const { data, error } = await supabaseAdminClient
@@ -205,7 +205,7 @@ class ChartDataService {
         .eq('conversation_id', conversationId)
         .eq('is_current', true)
         .single();
-      
+
       if (error && error.code !== 'PGRST116') throw error;
       return data;
     } catch (error) {
@@ -213,7 +213,7 @@ class ChartDataService {
       throw error;
     }
   }
-  
+
   async getChartHistory(conversationId, limit = 10) {
     try {
       const { data, error } = await supabaseAdminClient
@@ -222,7 +222,7 @@ class ChartDataService {
         .eq('conversation_id', conversationId)
         .order('created_at', { ascending: false })
         .limit(limit);
-      
+
       if (error) throw error;
       return data;
     } catch (error) {
@@ -230,11 +230,11 @@ class ChartDataService {
       throw error;
     }
   }
-  
+
   // =============================================
   // CHAT MESSAGE MANAGEMENT
   // =============================================
-  
+
   async addMessage(conversationId, role, content, chartSnapshotId = null, action = null, changes = null) {
     try {
       // Get next message order
@@ -242,9 +242,9 @@ class ChartDataService {
         .from('chat_messages')
         .select('*', { count: 'exact', head: true })
         .eq('conversation_id', conversationId);
-      
+
       const messageOrder = (count || 0) + 1;
-      
+
       const { data, error } = await supabaseAdminClient
         .from('chat_messages')
         .insert({
@@ -258,74 +258,51 @@ class ChartDataService {
         })
         .select('*')
         .single();
-      
+
       if (error) throw error;
-      
+
       // Update conversation last activity
       await supabaseAdminClient
         .from('conversations')
-        .update({ 
+        .update({
           last_activity: new Date().toISOString(),
           updated_at: new Date().toISOString()
         })
         .eq('id', conversationId);
-      
+
       return data;
     } catch (error) {
       console.error('Error adding message:', error);
       throw error;
     }
   }
-  
+
   async getConversationMessages(conversationId, limit = 100) {
     try {
-      // Try with chart_snapshots join first
+      // Fetch messages without join - chart snapshot data is fetched separately
+      // The join fails because Supabase schema cache doesn't recognize the relationship
       const { data, error } = await supabaseAdminClient
         .from('chat_messages')
-        .select(`
-          *,
-          chart_snapshots(*)
-        `)
+        .select('*')
         .eq('conversation_id', conversationId)
         .order('created_at', { ascending: true })
         .limit(limit);
-      
+
       if (error) {
-        // If join fails, try without chart_snapshots
-        console.warn('Error fetching messages with chart_snapshots join, trying without:', error.message);
-        const { data: simpleData, error: simpleError } = await supabaseAdminClient
-          .from('chat_messages')
-          .select('*')
-          .eq('conversation_id', conversationId)
-          .order('created_at', { ascending: true })
-          .limit(limit);
-        
-        if (simpleError) {
-          console.error('Error fetching messages (simple query):', simpleError);
-          throw simpleError;
-        }
-        
-        return simpleData || [];
+        throw error;
       }
-      
+
       return data || [];
     } catch (error) {
-      console.error('Error fetching messages:', error);
-      console.error('Error details:', {
-        message: error.message,
-        code: error.code,
-        details: error.details,
-        hint: error.hint,
-        conversationId
-      });
+      console.error('Error fetching messages:', error.message);
       throw error;
     }
   }
-  
+
   // =============================================
   // USER PREFERENCES
   // =============================================
-  
+
   async getUserPreferences(userId) {
     try {
       const { data, error } = await supabaseAdminClient
@@ -333,7 +310,7 @@ class ChartDataService {
         .select('*')
         .eq('user_id', userId)
         .single();
-      
+
       if (error && error.code !== 'PGRST116') throw error;
       return data || { chart_defaults: {}, ui_preferences: {} };
     } catch (error) {
@@ -341,7 +318,7 @@ class ChartDataService {
       throw error;
     }
   }
-  
+
   async updateUserPreferences(userId, preferences) {
     try {
       const { data, error } = await supabaseAdminClient
@@ -354,7 +331,7 @@ class ChartDataService {
         })
         .select('*')
         .single();
-      
+
       if (error) throw error;
       return data;
     } catch (error) {
@@ -362,11 +339,11 @@ class ChartDataService {
       throw error;
     }
   }
-  
+
   // =============================================
   // PROJECT MANAGEMENT
   // =============================================
-  
+
   async createProject(userId, name, description = null) {
     try {
       const { data, error } = await supabaseAdminClient
@@ -378,7 +355,7 @@ class ChartDataService {
         })
         .select('*')
         .single();
-      
+
       if (error) throw error;
       return data;
     } catch (error) {
@@ -386,7 +363,7 @@ class ChartDataService {
       throw error;
     }
   }
-  
+
   async getUserProjects(userId) {
     try {
       const { data, error } = await supabaseAdminClient
@@ -397,7 +374,7 @@ class ChartDataService {
         `)
         .eq('user_id', userId)
         .order('updated_at', { ascending: false });
-      
+
       if (error) throw error;
       return data;
     } catch (error) {

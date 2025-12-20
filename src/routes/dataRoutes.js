@@ -17,7 +17,7 @@ router.get('/conversations', async (req, res) => {
   try {
     const { limit = 50 } = req.query;
     const userId = req.user.id;
-    
+
     const conversations = await chartDataService.getUserConversations(userId, parseInt(limit));
     res.json(conversations);
   } catch (error) {
@@ -31,7 +31,7 @@ router.get('/conversations/:id', async (req, res) => {
   try {
     const { id } = req.params;
     const userId = req.user.id;
-    
+
     const conversation = await chartDataService.getConversationById(id, userId);
     res.json(conversation);
   } catch (error) {
@@ -45,11 +45,11 @@ router.post('/conversations', async (req, res) => {
   try {
     const { title, description } = req.body;
     const userId = req.user.id;
-    
+
     if (!title) {
       return res.status(400).json({ error: 'Title is required' });
     }
-    
+
     const conversation = await chartDataService.createConversation(userId, title, description);
     res.status(201).json(conversation);
   } catch (error) {
@@ -64,7 +64,7 @@ router.patch('/conversations/:id', async (req, res) => {
     const { id } = req.params;
     const userId = req.user.id;
     const updates = req.body;
-    
+
     const conversation = await chartDataService.updateConversation(id, userId, updates);
     res.json(conversation);
   } catch (error) {
@@ -78,7 +78,7 @@ router.delete('/conversations/:id', async (req, res) => {
   try {
     const { id } = req.params;
     const userId = req.user.id;
-    
+
     await chartDataService.deleteConversation(id, userId);
     res.json({ success: true });
   } catch (error) {
@@ -91,7 +91,7 @@ router.delete('/conversations/:id', async (req, res) => {
 router.delete('/conversations', async (req, res) => {
   try {
     const userId = req.user.id;
-    
+
     await chartDataService.deleteAllConversations(userId);
     res.json({ success: true });
   } catch (error) {
@@ -106,30 +106,28 @@ router.get('/conversations/:id/messages', async (req, res) => {
     const { id } = req.params;
     const { limit = 100 } = req.query;
     const userId = req.user?.id;
-    
-    console.log('📥 GET /conversations/:id/messages request:', { 
-      conversationId: id, 
-      limit, 
-      userId 
-    });
-    
+
+    // Verify conversation exists and belongs to user before fetching messages
+    const { data: conversation, error: convError } = await supabaseAdminClient
+      .from('conversations')
+      .select('id')
+      .eq('id', id)
+      .eq('user_id', userId)
+      .single();
+
+    if (convError || !conversation) {
+      // Return empty array instead of error for missing/deleted conversations
+      // This prevents console errors on frontend for stale local storage entries
+      return res.json([]);
+    }
+
     const messages = await chartDataService.getConversationMessages(id, parseInt(limit));
-    
-    console.log('✅ Messages fetched:', messages?.length || 0);
     res.json(messages || []);
   } catch (error) {
-    console.error('❌ Error fetching messages:', error);
-    console.error('Error details:', {
-      message: error.message,
-      code: error.code,
-      details: error.details,
-      hint: error.hint,
-      stack: error.stack
-    });
-    res.status(500).json({ 
+    console.error('❌ Error fetching messages:', error.message);
+    res.status(500).json({
       error: 'Failed to fetch messages',
-      details: error.message,
-      code: error.code
+      details: error.message
     });
   }
 });
@@ -142,11 +140,11 @@ router.get('/conversations/:id/messages', async (req, res) => {
 router.post('/chart-snapshots', async (req, res) => {
   try {
     const { conversationId, chartType, chartData, chartConfig, templateStructure, templateContent, snapshotId } = req.body;
-    
+
     if (!conversationId || !chartType || !chartData) {
       return res.status(400).json({ error: 'Missing required fields' });
     }
-    
+
     const resultId = await chartDataService.saveChartSnapshot(
       conversationId,
       chartType,
@@ -156,12 +154,12 @@ router.post('/chart-snapshots', async (req, res) => {
       templateContent || null,
       snapshotId || null
     );
-    
+
     res.status(snapshotId ? 200 : 201).json({ id: resultId });
   } catch (error) {
     console.error('Error saving chart snapshot:', error);
     const errorMessage = error.message || error.error || 'Failed to save chart snapshot';
-    res.status(500).json({ 
+    res.status(500).json({
       error: errorMessage,
       details: error.details || error.hint || null
     });
@@ -192,7 +190,7 @@ router.put('/chart-snapshots/:id', async (req, res) => {
   } catch (error) {
     console.error('Error updating chart snapshot:', error);
     const errorMessage = error.message || error.error || 'Failed to update chart snapshot';
-    res.status(500).json({ 
+    res.status(500).json({
       error: errorMessage,
       details: error.details || error.hint || null
     });
@@ -203,7 +201,7 @@ router.put('/chart-snapshots/:id', async (req, res) => {
 router.get('/conversations/:id/current-snapshot', async (req, res) => {
   try {
     const { id } = req.params;
-    
+
     const snapshot = await chartDataService.getCurrentChartSnapshot(id);
     res.json(snapshot);
   } catch (error) {
@@ -217,7 +215,7 @@ router.get('/conversations/:id/chart-history', async (req, res) => {
   try {
     const { id } = req.params;
     const { limit = 10 } = req.query;
-    
+
     const history = await chartDataService.getChartHistory(id, parseInt(limit));
     res.json(history);
   } catch (error) {
@@ -233,23 +231,23 @@ router.get('/conversations/:id/chart-history', async (req, res) => {
 // Add message to conversation
 router.post('/messages', async (req, res) => {
   try {
-    const { 
-      conversationId, 
-      role, 
-      content, 
-      chartSnapshotId, 
-      action, 
-      changes 
+    const {
+      conversationId,
+      role,
+      content,
+      chartSnapshotId,
+      action,
+      changes
     } = req.body;
-    
+
     if (!conversationId || !role || !content) {
       return res.status(400).json({ error: 'Missing required fields' });
     }
-    
+
     if (!['user', 'assistant'].includes(role)) {
       return res.status(400).json({ error: 'Invalid role' });
     }
-    
+
     const message = await chartDataService.addMessage(
       conversationId,
       role,
@@ -258,7 +256,7 @@ router.post('/messages', async (req, res) => {
       action,
       changes
     );
-    
+
     res.status(201).json(message);
   } catch (error) {
     console.error('Error adding message:', error);
@@ -287,7 +285,7 @@ router.put('/user-preferences', async (req, res) => {
   try {
     const userId = req.user.id;
     const preferences = req.body;
-    
+
     const updatedPreferences = await chartDataService.updateUserPreferences(userId, preferences);
     res.json(updatedPreferences);
   } catch (error) {
@@ -317,11 +315,11 @@ router.post('/projects', async (req, res) => {
   try {
     const { name, description } = req.body;
     const userId = req.user.id;
-    
+
     if (!name) {
       return res.status(400).json({ error: 'Name is required' });
     }
-    
+
     const project = await chartDataService.createProject(userId, name, description);
     res.status(201).json(project);
   } catch (error) {
