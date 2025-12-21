@@ -344,25 +344,34 @@ Respond with ONLY a JSON object:
   "changes": ["list of specific changes made"]`;
 
     if (templateStructure) {
-      prompt += ',\n  "templateContent": { /* updated text for template areas if template is active */ }';
+      prompt += ',\n  "templateContent": { /* updated text/HTML for template areas */ }';
     }
 
     prompt += `\n}`;
 
     if (templateStructure) {
+      // List available template text areas
+      const textAreas = templateStructure.sections.filter(s => s.type !== 'chart');
+
+      prompt += `\n\n=== TEMPLATE IS ACTIVE ===`;
+      prompt += `\nAvailable text areas you can modify:`;
+      textAreas.forEach(s => {
+        const formatType = s.contentType === 'html' ? 'HTML' : 'plain text';
+        prompt += `\n- "${s.type}" (${s.name}): expects ${formatType}`;
+      });
+
       // Collect sections with notes for guidance
-      const sectionsWithNotes = templateStructure.sections.filter(s => s.type !== 'chart' && s.note && s.note.trim());
-
-      prompt += `\n\nNote: If a template is active, also update the "templateContent" object with relevant text for each template area based on the chart modifications.`;
-
-      // Include user notes for template sections if any exist
+      const sectionsWithNotes = textAreas.filter(s => s.note && s.note.trim());
       if (sectionsWithNotes.length > 0) {
-        prompt += `\n\nUser-specified instructions for template content:`;
+        prompt += `\n\nUser instructions for specific areas:`;
         sectionsWithNotes.forEach(s => {
-          const formatType = s.contentType === 'html' ? 'HTML' : 'plain text';
-          prompt += `\n- ${s.name} (${formatType}): ${s.note}`;
+          prompt += `\n- ${s.name}: "${s.note}"`;
         });
       }
+
+      prompt += `\n\nREMEMBER: "main text area" = templateContent.main, NOT pointImages!`;
+    } else {
+      prompt += `\n\nNOTE: No template is active. Text areas are not available in chart-only mode.`;
     }
 
     return prompt;
