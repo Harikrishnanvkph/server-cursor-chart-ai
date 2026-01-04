@@ -41,7 +41,7 @@ The response must be a single JSON object with the following structure:
 }
 Only return the JSON object, with no markdown or additional explanation.
 
-The chartType must be one of the following: "bar", "line", "pie", "doughnut", "scatter", or "bubble".
+The chartType must be one of the following: "bar", "line", "pie", "doughnut", "scatter", "bubble", "polarArea" or "radar"
 
 The data field must include both labels and datasets, as shown above.
 

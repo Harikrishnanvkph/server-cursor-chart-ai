@@ -69,7 +69,7 @@ app.use(compression());
 app.use(express.json({ limit: '10mb' })); // Limit request body size
 
 // CORS with enhanced security
-const appOrigin = process.env.APP_ORIGIN || 'http://localhost:3000'
+const appOrigin = process.env.APP_ORIGIN || 'http://localhost:3000' || 'http://localhost:3001' || 'http://localhost:3002' || 'http://localhost:3003'
 app.use(
   cors({
     origin: appOrigin,
