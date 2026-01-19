@@ -151,7 +151,9 @@ RETURNS TABLE(
     updated_at TIMESTAMP WITH TIME ZONE,
     last_activity TIMESTAMP WITH TIME ZONE,
     message_count BIGINT,
-    current_chart_type TEXT
+    current_chart_type TEXT,
+    is_template_mode BOOLEAN,
+    chart_mode TEXT
 ) AS $$
 BEGIN
     RETURN QUERY
@@ -163,12 +165,19 @@ BEGIN
         c.updated_at,
         c.last_activity,
         COUNT(cm.id) as message_count,
-        cs.chart_type as current_chart_type
+        cs.chart_type as current_chart_type,
+        COALESCE(cs.is_template_mode, false) as is_template_mode,
+        COALESCE(
+            cs.chart_data->'datasets'->0->>'mode',
+            'single'
+        ) as chart_mode
     FROM public.conversations c
     LEFT JOIN public.chat_messages cm ON c.id = cm.conversation_id
     LEFT JOIN public.chart_snapshots cs ON c.id = cs.conversation_id AND cs.is_current = true
     WHERE c.user_id = user_uuid
-    GROUP BY c.id, c.title, c.description, c.created_at, c.updated_at, c.last_activity, cs.chart_type
+      AND c.is_active = true
+    GROUP BY c.id, c.title, c.description, c.created_at, c.updated_at, c.last_activity, 
+             cs.chart_type, cs.is_template_mode, cs.chart_data
     ORDER BY c.last_activity DESC
     LIMIT limit_count;
 END;

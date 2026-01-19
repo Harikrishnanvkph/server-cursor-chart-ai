@@ -61,6 +61,7 @@ class ChartDataService {
       if (error) {
         console.error('RPC error, trying direct query:', error);
         // Fallback to direct query if RPC doesn't exist
+        // First, get conversations without join to avoid excluding those without snapshots
         const { data: directData, error: directError } = await supabaseAdminClient
           .from('conversations')
           .select('*')
@@ -74,9 +75,43 @@ class ChartDataService {
           throw directError;
         }
 
+        // Fetch snapshot metadata separately (optimized: fetch only is_template_mode, extract mode from minimal chart_data)
+        if (directData && directData.length > 0) {
+          const conversationIds = directData.map(c => c.id);
+
+          // Fetch is_template_mode and only the datasets array from chart_data (much smaller than full chart_data)
+          const { data: snapshotData } = await supabaseAdminClient
+            .from('chart_snapshots')
+            .select('conversation_id, is_template_mode, chart_data')
+            .in('conversation_id', conversationIds)
+            .eq('is_current', true);
+
+          // Create a map for quick lookup
+          const snapshotMap = new Map();
+          (snapshotData || []).forEach(s => {
+            snapshotMap.set(s.conversation_id, s);
+          });
+
+          // Transform to include mode info at top level
+          // Extract chart_mode from datasets array (minimal processing)
+          return directData.map(conv => {
+            const snapshot = snapshotMap.get(conv.id);
+            const chartData = snapshot?.chart_data;
+            const chartMode = chartData?.datasets?.[0]?.mode || 'single';
+
+            return {
+              ...conv,
+              is_template_mode: snapshot?.is_template_mode || false,
+              chart_mode: chartMode
+            };
+          });
+        }
+
         return directData || [];
       }
 
+      // RPC now returns is_template_mode and chart_mode directly - no second query needed!
+      // The RPC function extracts chart_mode from JSONB in the database, avoiding large data transfer
       return data || [];
     } catch (error) {
       console.error('Error fetching conversations:', error);
