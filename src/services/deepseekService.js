@@ -1,14 +1,20 @@
-import { callDeepSeekAPI } from '../adapters/deepseekAdapter.js'
+import { createChartProcessor } from '../utils/chartProcessor.js';
+import { createDeepSeekAdapter } from '../adapters/deepseekAdapter.js';
 
-const NOT_IMPLEMENTED_MESSAGE = 'DeepSeek chart generation is not yet available. Please use Google, Perplexity, or OpenRouter.'
+const deepseekProcessor = createChartProcessor(createDeepSeekAdapter());
 
-export async function generateChartDataWithDeepSeek(input, model) {
-  console.warn('[DeepSeek] generateChartDataWithDeepSeek invoked before integration is complete.')
-  throw new Error(NOT_IMPLEMENTED_MESSAGE)
+export async function generateChartDataWithDeepSeek(inputText, model, templateStructure = null) {
+  return await deepseekProcessor.generateChart(inputText, model, templateStructure);
 }
 
-export async function modifyChartDataWithDeepSeek(input, currentChartState, messageHistory, model) {
-  console.warn('[DeepSeek] modifyChartDataWithDeepSeek invoked before integration is complete.')
-  throw new Error(NOT_IMPLEMENTED_MESSAGE)
+export async function modifyChartDataWithDeepSeek(inputText, currentChartState, messageHistory = [], model, templateStructure = null) {
+  return await deepseekProcessor.modifyChart(inputText, currentChartState, messageHistory, model, templateStructure);
 }
 
+export function getAvailableDeepSeekModels() {
+  return deepseekProcessor.adapter.getAvailableModels();
+}
+
+export async function validateDeepSeekApiKey() {
+  return await deepseekProcessor.validateApiKey();
+}

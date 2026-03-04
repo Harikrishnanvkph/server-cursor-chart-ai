@@ -79,10 +79,10 @@ class ChartDataService {
         if (directData && directData.length > 0) {
           const conversationIds = directData.map(c => c.id);
 
-          // Fetch is_template_mode and only the datasets array from chart_data (much smaller than full chart_data)
+          // Fetch is_template_mode, chart_type, and only the datasets array from chart_data (much smaller than full chart_data)
           const { data: snapshotData } = await supabaseAdminClient
             .from('chart_snapshots')
-            .select('conversation_id, is_template_mode, chart_data')
+            .select('conversation_id, is_template_mode, chart_type, chart_data')
             .in('conversation_id', conversationIds)
             .eq('is_current', true);
 
@@ -102,7 +102,8 @@ class ChartDataService {
             return {
               ...conv,
               is_template_mode: snapshot?.is_template_mode || false,
-              chart_mode: chartMode
+              chart_mode: chartMode,
+              current_chart_type: snapshot?.chart_type || null
             };
           });
         }

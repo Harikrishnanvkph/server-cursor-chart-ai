@@ -1,9 +1,9 @@
 import express from 'express';
-import { 
+import {
   generateChartDataWithPerplexity,
   modifyChartDataWithPerplexity,
-  getAvailablePerplexityModels, 
-  validatePerplexityApiKey 
+  getAvailablePerplexityModels,
+  validatePerplexityApiKey
 } from '../services/perplexityService.js';
 
 const router = express.Router();
@@ -16,23 +16,23 @@ const router = express.Router();
  */
 router.post('/process-chart', async (req, res) => {
   try {
-    const { 
-      input, 
+    const {
+      input,
       model = 'sonar-pro',
       conversationId,
       currentChartState,
       messageHistory
     } = req.body;
-    
+
     if (!input) {
       return res.status(400).json({ error: 'Input text is required' });
     }
     if (!process.env.PERPLEXITY_API_KEY) {
       return res.status(500).json({ error: 'Perplexity API key not configured' });
     }
-    
+
     let aiResponse;
-    
+
     // Determine if this is a modification or new chart
     if (currentChartState && conversationId) {
       aiResponse = await modifyChartDataWithPerplexity(input, currentChartState, messageHistory || [], model);
@@ -62,9 +62,9 @@ router.post('/process-chart', async (req, res) => {
       });
       throw new Error('AI response missing required chart data - please try a different request');
     }
-    
+
     res.json(result);
-    
+
   } catch (error) {
     console.error('Error processing Perplexity chart request:', {
       message: error.message,
@@ -73,12 +73,12 @@ router.post('/process-chart', async (req, res) => {
       model: req.body.model || 'sonar-pro',
       timestamp: new Date().toISOString()
     });
-    
+
     // Provide more specific error messages based on error type
     let errorMessage = 'Failed to process chart request with Perplexity';
     let details = error.message;
     let statusCode = 500;
-    
+
     if (error.message?.includes('Empty response')) {
       errorMessage = 'Perplexity AI returned empty response';
       details = 'This might be due to rate limiting or service issues. Try using Google Gemini instead.';
@@ -104,8 +104,8 @@ router.post('/process-chart', async (req, res) => {
       details = 'The response exceeded token limits. Try a simpler request or use Google Gemini instead.';
       statusCode = 413; // Payload Too Large
     }
-    
-    res.status(statusCode).json({ 
+
+    res.status(statusCode).json({
       error: errorMessage,
       details: details,
       service: 'perplexity',
@@ -122,16 +122,16 @@ router.post('/process-chart', async (req, res) => {
 router.get('/models', (req, res) => {
   try {
     const models = getAvailablePerplexityModels();
-    res.json({ 
+    res.json({
       models,
       total: models.length,
       recommended: 'sonar-pro'
     });
   } catch (error) {
     console.error('Error fetching Perplexity models:', error);
-    res.status(500).json({ 
+    res.status(500).json({
       error: 'Failed to fetch available models',
-      details: error.message 
+      details: error.message
     });
   }
 });
@@ -143,32 +143,32 @@ router.get('/models', (req, res) => {
 router.get('/validate', async (req, res) => {
   try {
     if (!process.env.PERPLEXITY_API_KEY) {
-      return res.status(400).json({ 
-        valid: false, 
-        error: 'Perplexity API key not configured in environment variables' 
+      return res.status(400).json({
+        valid: false,
+        error: 'Perplexity API key not configured in environment variables'
       });
     }
-    
+
     const isValid = await validatePerplexityApiKey();
-    
+
     if (isValid) {
-      res.json({ 
-        valid: true, 
+      res.json({
+        valid: true,
         message: 'Perplexity API key is valid and working',
         timestamp: new Date().toISOString()
       });
     } else {
-      res.status(401).json({ 
-        valid: false, 
-        error: 'Perplexity API key is invalid or service unavailable' 
+      res.status(401).json({
+        valid: false,
+        error: 'Perplexity API key is invalid or service unavailable'
       });
     }
   } catch (error) {
     console.error('Error validating Perplexity API key:', error);
-    res.status(500).json({ 
+    res.status(500).json({
       valid: false,
       error: 'Failed to validate API key',
-      details: error.message 
+      details: error.message
     });
   }
 });
@@ -181,7 +181,7 @@ router.get('/status', (req, res) => {
   try {
     const hasApiKey = !!process.env.PERPLEXITY_API_KEY;
     const models = getAvailablePerplexityModels()
-    
+
     res.json({
       service: 'perplexity',
       version: '1.0.0',
@@ -204,9 +204,9 @@ router.get('/status', (req, res) => {
     });
   } catch (error) {
     console.error('Error getting Perplexity status:', error);
-    res.status(500).json({ 
+    res.status(500).json({
       error: 'Failed to get service status',
-      details: error.message 
+      details: error.message
     });
   }
 });
@@ -218,19 +218,19 @@ router.get('/status', (req, res) => {
 router.post('/test', async (req, res) => {
   try {
     const { query = 'What is artificial intelligence?' } = req.body;
-    
+
     if (!process.env.PERPLEXITY_API_KEY) {
-      return res.status(400).json({ 
-        error: 'Perplexity API key not configured for testing' 
+      return res.status(400).json({
+        error: 'Perplexity API key not configured for testing'
       });
     }
-    
+
     // Simple test query (not for chart generation)
     const testResponse = await generateChartDataWithPerplexity(
-      `Create a simple bar chart showing: ${query}`, 
+      `Create a simple bar chart showing: ${query}`,
       'sonar-pro'
     );
-    
+
     res.json({
       test: 'success',
       query: query,
@@ -239,10 +239,10 @@ router.post('/test', async (req, res) => {
       model_used: testResponse._metadata?.model,
       timestamp: new Date().toISOString()
     });
-    
+
   } catch (error) {
     console.error('Error in Perplexity test:', error);
-    res.status(500).json({ 
+    res.status(500).json({
       test: 'failed',
       error: error.message,
       timestamp: new Date().toISOString()

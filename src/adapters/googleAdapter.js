@@ -20,7 +20,7 @@ export class GoogleAdapter {
    */
   async generateContent(params) {
     const { systemPrompt, userPrompt, model, maxTokens, temperature } = params;
-    
+
     // Select appropriate model based on context
     const modelName = this.getModelName(model);
     const genModel = this.genAI.getGenerativeModel({ model: modelName });

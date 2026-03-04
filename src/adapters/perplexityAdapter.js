@@ -24,14 +24,14 @@ export class PerplexityAdapter {
    */
   async generateContent(params) {
     const { systemPrompt, userPrompt, model, maxTokens, temperature, topP } = params;
-    
+
     const messages = [];
-    
+
     // Add system message if provided
     if (systemPrompt) {
       messages.push({ role: "system", content: systemPrompt });
     }
-    
+
     // Add user message
     messages.push({ role: "user", content: userPrompt });
 
@@ -40,11 +40,11 @@ export class PerplexityAdapter {
       let optimalMaxTokens = maxTokens;
       if (!optimalMaxTokens) {
         // Check if this is likely a modification request (contains "current chart" or similar)
-        const isModification = userPrompt?.includes('Current Chart State') || 
-                              userPrompt?.includes('modification request') ||
-                              userPrompt?.includes('change') ||
-                              userPrompt?.includes('modify');
-        
+        const isModification = userPrompt?.includes('Current Chart State') ||
+          userPrompt?.includes('modification request') ||
+          userPrompt?.includes('change') ||
+          userPrompt?.includes('modify');
+
         // Use higher limits for modifications and certain models
         if (isModification) {
           optimalMaxTokens = 6000; // Increased for modifications with conversation history
@@ -65,7 +65,7 @@ export class PerplexityAdapter {
       });
 
       const content = response.choices[0]?.message?.content;
-      
+
       // Handle empty or null responses from Perplexity
       if (!content || content.trim() === '') {
         console.warn('Perplexity returned empty content');
@@ -93,7 +93,7 @@ export class PerplexityAdapter {
         tokensUsed: response.usage?.total_tokens || null,
         rawResponse: response
       };
-      
+
     } catch (error) {
       // Handle API errors
       if (error.status === 401) {
@@ -128,7 +128,7 @@ export class PerplexityAdapter {
         messages: [{ role: 'user', content: 'Test connection' }],
         max_tokens: 10
       });
-      
+
       return !!response.choices?.[0]?.message?.content;
     } catch (error) {
       console.error('Perplexity API key validation failed:', error.message);

@@ -7,12 +7,13 @@ import cookieParser from 'cookie-parser';
 import rateLimit from 'express-rate-limit';
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import fs from 'node:fs/promises'
-import { generateChartDataWithPerplexity, modifyChartDataWithPerplexity } from './services/perplexityService.js';
+import { generateChartDataWithGemini, modifyChartDataWithGemini } from './services/geminiService.js';
 import { generateChartDataWithOpenRouter, modifyChartDataWithOpenRouter } from './services/openrouterService.js';
 import { generateChartDataWithDeepSeek, modifyChartDataWithDeepSeek } from './services/deepseekService.js';
 import perplexityRoutes from './routes/perplexityRoutes.js';
 import openrouterRoutes from './routes/openrouterRoutes.js';
 import deepseekRoutes from './routes/deepseekRoutes.js';
+import geminiRoutes from './routes/geminiRoutes.js';
 import { requireAuth, rateLimitMiddleware, getSecurityStats, blockIP, unblockIP } from './middleware/authMiddleware.js'
 
 dotenv.config();
@@ -37,7 +38,7 @@ if (missingEnvVars.length > 0) {
 console.log('✅ All required environment variables are configured');
 
 const app = express();
-const port = process.env.PORT || 3001;
+const port = process.env.PORT || 5000;
 
 // Initialize Gemini API
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
@@ -69,10 +70,20 @@ app.use(compression());
 app.use(express.json({ limit: '10mb' })); // Limit request body size
 
 // CORS with enhanced security
-const appOrigin = process.env.APP_ORIGIN || 'http://localhost:3000' || 'http://localhost:3001' || 'http://localhost:3002' || 'http://localhost:3003'
+const allowedOrigins = [
+  'http://localhost:3000',
+  'http://localhost:3001',
+  'http://localhost:3002',
+  'http://localhost:3003'
+];
+
+if (process.env.APP_ORIGIN) {
+  allowedOrigins.push(process.env.APP_ORIGIN);
+}
+
 app.use(
   cors({
-    origin: appOrigin,
+    origin: allowedOrigins,
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
@@ -105,6 +116,7 @@ import templateRoutes from './routes/templateRoutes.js'
 app.use('/auth', authRoutes)
 
 // Chart processing endpoints (public - no auth required)
+app.use('/api/gemini', geminiRoutes);
 app.use('/api/perplexity', perplexityRoutes);
 app.use('/api/openrouter', openrouterRoutes);
 app.use('/api/deepseek', deepseekRoutes);
@@ -370,7 +382,7 @@ app.post('/api/process-chart-enhanced', async (req, res) => {
   // Extract service outside try block so it's accessible in catch
   const {
     input,
-    service = 'perplexity', // 'google' or 'perplexity'
+    service = 'deepseek', // default AI: 'gemini' | 'deepseek' | 'openrouter' | 'google'
     model,
     conversationId,
     currentChartState,
@@ -384,54 +396,29 @@ app.post('/api/process-chart-enhanced', async (req, res) => {
       return res.status(400).json({ error: 'Input text is required' });
     }
 
-    let aiResponse;
+    // Service registry — add new services here, no if/else needed
+    const SERVICE_REGISTRY = {
+      perplexity: { generate: generateChartDataWithGemini, modify: modifyChartDataWithGemini, apiKey: 'GEMINI_API_KEY' },
+      gemini: { generate: generateChartDataWithGemini, modify: modifyChartDataWithGemini, apiKey: 'GEMINI_API_KEY' },
+      openrouter: { generate: generateChartDataWithOpenRouter, modify: modifyChartDataWithOpenRouter, apiKey: 'OPENROUTER_API_KEY' },
+      deepseek: { generate: generateChartDataWithDeepSeek, modify: modifyChartDataWithDeepSeek, apiKey: 'DEEPSEEK_API_KEY' },
+      google: { generate: generateChartData, modify: (i, s, h) => modifyChartData(i, s, h), apiKey: 'GEMINI_API_KEY' },
+    };
 
-    if (service === 'perplexity') {
-      if (!process.env.PERPLEXITY_API_KEY) {
-        return res.status(500).json({ error: 'Perplexity API key not configured' });
-      }
+    const svc = SERVICE_REGISTRY[service] ?? SERVICE_REGISTRY.gemini;
 
-      if (currentChartState && conversationId) {
-        aiResponse = await modifyChartDataWithPerplexity(input, currentChartState, messageHistory || [], model, templateStructure);
-      } else {
-        aiResponse = await generateChartDataWithPerplexity(input, model, templateStructure);
-      }
+    const apiKeyValue = process.env[svc.apiKey];
+    const isPlaceholder = !apiKeyValue || apiKeyValue.startsWith('your_') || apiKeyValue === '';
 
-    } else if (service === 'openrouter') {
-      if (!process.env.OPENROUTER_API_KEY) {
-        return res.status(500).json({ error: 'OpenRouter API key not configured' });
-      }
-
-      if (currentChartState && conversationId) {
-        aiResponse = await modifyChartDataWithOpenRouter(input, currentChartState, messageHistory || [], model, templateStructure);
-      } else {
-        aiResponse = await generateChartDataWithOpenRouter(input, model, templateStructure);
-      }
-
-    } else if (service === 'deepseek') {
-      // DeepSeek integration scaffold - respond with informative message until fully wired
-      if (!process.env.DEEPSEEK_API_KEY) {
-        return res.status(500).json({ error: 'DeepSeek API key not configured' });
-      }
-
-      if (currentChartState && conversationId) {
-        aiResponse = await modifyChartDataWithDeepSeek(input, currentChartState, messageHistory || [], model, templateStructure);
-      } else {
-        aiResponse = await generateChartDataWithDeepSeek(input, model, templateStructure);
-      }
-
-    } else {
-      // Default to Google (existing logic)
-      if (!process.env.GEMINI_API_KEY) {
-        return res.status(500).json({ error: 'Google API key not configured' });
-      }
-
-      if (currentChartState && conversationId) {
-        aiResponse = await modifyChartData(input, currentChartState, messageHistory || []);
-      } else {
-        aiResponse = await generateChartData(input);
-      }
+    if (isPlaceholder) {
+      return res.status(500).json({ error: `API key for '${service}' is not configured. Set ${svc.apiKey} in .env` });
     }
+
+    //console.log(`\n🤖 AI SERVICE: ${service.toUpperCase()} | Key: ${svc.apiKey} = ${apiKeyValue.substring(0, 8)}...`);
+
+    const aiResponse = (currentChartState && conversationId)
+      ? await svc.modify(input, currentChartState, messageHistory || [], model, templateStructure)
+      : await svc.generate(input, model, templateStructure);
 
     // Format response consistently
     const result = {
