@@ -11,20 +11,19 @@ if (!supabaseUrl) {
 if (!supabaseAnonKey) {
   console.error('❌ SUPABASE_ANON_KEY is not set. Supabase client will not work properly.');
 }
-if (!supabaseServiceRoleKey) {
-  console.warn('⚠️ SUPABASE_SERVICE_ROLE_KEY is not set. OAuth functionality will not work properly.');
-}
-
 export const supabaseUserClient = createClient(supabaseUrl || '', supabaseAnonKey || '', {
   auth: { persistSession: false, autoRefreshToken: false },
 })
 
-// Create admin client only if the service role key is provided
-export const supabaseAdminClient = supabaseServiceRoleKey
-  ? createClient(supabaseUrl || '', supabaseServiceRoleKey, {
-      auth: { persistSession: false, autoRefreshToken: false },
-    })
-  : null
+// Create admin client — fail fast if service role key is missing (required for OAuth, sessions, etc.)
+if (!supabaseServiceRoleKey) {
+  console.error('❌ SUPABASE_SERVICE_ROLE_KEY is not set. Server cannot start without it.');
+  process.exit(1);
+}
+
+export const supabaseAdminClient = createClient(supabaseUrl || '', supabaseServiceRoleKey, {
+  auth: { persistSession: false, autoRefreshToken: false },
+})
 
 export const getSupabaseAuthUrls = () => {
   if (!supabaseUrl) throw new Error('SUPABASE_URL is not configured')

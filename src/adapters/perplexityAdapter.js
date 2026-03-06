@@ -62,6 +62,8 @@ export class PerplexityAdapter {
         temperature: temperature || 0.3,
         top_p: topP || 0.9,
         stream: false  // Ensure we get complete responses
+      }, {
+        signal: AbortSignal.timeout(60000) // 60-second timeout
       });
 
       const content = response.choices[0]?.message?.content;

@@ -213,9 +213,13 @@ router.get('/status', (req, res) => {
 
 /**
  * POST /api/perplexity/test
- * Test endpoint for development and debugging
+ * Test endpoint for development and debugging (disabled in production)
  */
 router.post('/test', async (req, res) => {
+  if (process.env.NODE_ENV === 'production') {
+    return res.status(404).json({ error: 'Not found' });
+  }
+
   try {
     const { query = 'What is artificial intelligence?' } = req.body;
 

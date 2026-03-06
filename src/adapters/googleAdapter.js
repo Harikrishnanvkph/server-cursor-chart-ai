@@ -28,15 +28,30 @@ export class GoogleAdapter {
     // For Google, we combine system and user prompts
     const combinedPrompt = systemPrompt ? `${systemPrompt}\n\nUser request: ${userPrompt}` : userPrompt;
 
-    const result = await genModel.generateContent(combinedPrompt);
-    const response = await result.response;
-    const responseText = response.text();
+    // 30-second timeout using AbortController
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 60000);
 
-    return {
-      content: responseText,
-      tokensUsed: this.extractTokenUsage(result),
-      rawResponse: result
-    };
+    try {
+      const result = await genModel.generateContent(combinedPrompt, {
+        signal: controller.signal
+      });
+      clearTimeout(timeoutId);
+      const response = await result.response;
+      const responseText = response.text();
+
+      return {
+        content: responseText,
+        tokensUsed: this.extractTokenUsage(result),
+        rawResponse: result
+      };
+    } catch (error) {
+      clearTimeout(timeoutId);
+      if (error.name === 'AbortError') {
+        throw new Error('Google Gemini API request timed out after 30 seconds.');
+      }
+      throw error;
+    }
   }
 
   /**

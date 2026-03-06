@@ -16,8 +16,8 @@ async function ensureUserProfile(userId, userEmail = null, userName = null, user
       return existingProfile;
     }
 
-    console.log('Profile not found for user:', userId, 'Attempting to create profile...');
-    
+    console.warn('⚠️ Profile not found for user:', userId, '. Attempting to create...');
+
     // Try to get user info from auth.users first
     let authUser = null;
     try {
@@ -27,7 +27,6 @@ async function ensureUserProfile(userId, userEmail = null, userName = null, user
       }
     } catch (err) {
       // User might not exist in auth.users (OAuth users stored differently)
-      console.log('User not found in auth.users, will use provided user data');
     }
 
     // Prepare profile data
@@ -48,14 +47,14 @@ async function ensureUserProfile(userId, userEmail = null, userName = null, user
       .single();
 
     if (profileError) {
-      console.error('Error creating profile:', profileError);
+      console.error('❌ Failed to create profile for user:', userId, profileError.message);
       return null;
-    } else {
-      console.log('✅ Profile created for user:', userId);
-      return newProfile;
     }
+
+    console.log('✅ Profile created for user:', userId);
+    return newProfile;
   } catch (error) {
-    console.error('Error ensuring user profile:', error);
+    console.error('❌ Error in ensureUserProfile for user:', userId, error.message);
     return null;
   }
 }
@@ -91,47 +90,47 @@ const rateLimitStore = new Map();
 
 // Helper function to get client IP
 function getClientIP(req) {
-  return req.headers['x-forwarded-for'] || 
-         req.headers['x-real-ip'] || 
-         req.connection?.remoteAddress || 
-         req.socket?.remoteAddress || 
-         'unknown';
+  return req.headers['x-forwarded-for'] ||
+    req.headers['x-real-ip'] ||
+    req.connection?.remoteAddress ||
+    req.socket?.remoteAddress ||
+    'unknown';
 }
 
 // Rate limiting middleware
 function rateLimitMiddleware(req, res, next) {
   const clientIP = getClientIP(req);
-  
+
   // Check if IP is permanently blocked
   if (BLOCKED_IPS.has(clientIP)) {
     console.warn(`Blocked request from permanently blocked IP: ${clientIP}`);
     return res.status(403).json({ error: 'Access denied' });
   }
-  
+
   // Check if IP is temporarily blocked due to suspicious activity
   const suspiciousInfo = SUSPICIOUS_IPS.get(clientIP);
   if (suspiciousInfo && Date.now() < suspiciousInfo.blockedUntil) {
     console.warn(`Blocked request from temporarily blocked IP: ${clientIP}`);
-    return res.status(429).json({ 
-      error: 'Too many requests', 
+    return res.status(429).json({
+      error: 'Too many requests',
       retryAfter: Math.ceil((suspiciousInfo.blockedUntil - Date.now()) / 1000)
     });
   }
-  
+
   // Rate limiting logic
   const now = Date.now();
   const windowStart = now - RATE_LIMIT_WINDOW;
-  
+
   if (!rateLimitStore.has(clientIP)) {
     rateLimitStore.set(clientIP, []);
   }
-  
+
   const requests = rateLimitStore.get(clientIP);
-  
+
   // Remove old requests outside the current window
   const validRequests = requests.filter(timestamp => timestamp > windowStart);
   rateLimitStore.set(clientIP, validRequests);
-  
+
   // Check if current request exceeds limit
   if (validRequests.length >= MAX_REQUESTS_PER_WINDOW) {
     // Mark IP as suspicious
@@ -139,17 +138,17 @@ function rateLimitMiddleware(req, res, next) {
       blockedUntil: now + (30 * 60 * 1000), // Block for 30 minutes
       reason: 'Rate limit exceeded'
     });
-    
+
     console.warn(`Rate limit exceeded for IP: ${clientIP}, blocking for 30 minutes`);
-    return res.status(429).json({ 
-      error: 'Too many requests', 
+    return res.status(429).json({
+      error: 'Too many requests',
       retryAfter: 1800 // 30 minutes in seconds
     });
   }
-  
+
   // Add current request timestamp
   validRequests.push(now);
-  
+
   next();
 }
 
@@ -157,7 +156,7 @@ function rateLimitMiddleware(req, res, next) {
 setInterval(() => {
   const now = Date.now();
   const windowStart = now - RATE_LIMIT_WINDOW;
-  
+
   for (const [ip, requests] of rateLimitStore.entries()) {
     const validRequests = requests.filter(timestamp => timestamp > windowStart);
     if (validRequests.length === 0) {
@@ -166,7 +165,7 @@ setInterval(() => {
       rateLimitStore.set(ip, validRequests);
     }
   }
-  
+
   // Clean up expired suspicious IP blocks
   for (const [ip, info] of SUSPICIOUS_IPS.entries()) {
     if (now > info.blockedUntil) {
@@ -180,7 +179,7 @@ export async function requireAuth(req, res, next) {
   try {
     const accessToken = req.cookies?.access_token;
     const clientIP = getClientIP(req);
-    
+
     if (!accessToken) {
       console.warn('No access token provided');
       return res.status(401).json({ error: 'Authentication required' });
@@ -192,13 +191,13 @@ export async function requireAuth(req, res, next) {
       req.user = cached;
       return next();
     }
-    
+
     // Check if IP is blocked
     if (BLOCKED_IPS.has(clientIP)) {
       console.warn(`Blocked request from blocked IP: ${clientIP}`);
       return res.status(403).json({ error: 'Access denied' });
     }
-    
+
     // First try Supabase token validation
     try {
       const url = `${process.env.SUPABASE_URL}/auth/v1/user`;
@@ -208,13 +207,13 @@ export async function requireAuth(req, res, next) {
           'apikey': process.env.SUPABASE_ANON_KEY || ''
         }
       });
-      
+
       if (response.ok) {
         const user = await response.json();
-        
+
         // Ensure user has a profile
         await ensureUserProfile(user.id, user.email, user.user_metadata?.name, user.user_metadata?.avatar_url);
-        
+
         setCachedUser(accessToken, user);
         req.user = user;
         return next();
@@ -222,24 +221,24 @@ export async function requireAuth(req, res, next) {
     } catch (supabaseError) {
       // Fallback to OAuth session validation when Supabase validation fails
     }
-    
+
     // If Supabase validation failed, check OAuth session
     try {
       const oauthUser = await secureSessionStore.validateSession(accessToken);
-      
+
       if (oauthUser) {
         console.log('OAuth user validated:', {
           userId: oauthUser.user_id || oauthUser.id,
           email: oauthUser.email,
           provider: oauthUser.provider
         });
-        
+
         // Use user_id if available (from validateSession), otherwise fall back to id
         const userId = oauthUser.user_id || oauthUser.id;
-        
+
         // Ensure user has a profile (OAuth users have email, full_name, avatar_url directly)
         await ensureUserProfile(userId, oauthUser.email, oauthUser.full_name, oauthUser.avatar_url);
-        
+
         // Create a normalized user object with consistent ID field
         const normalizedUser = {
           id: userId,
@@ -248,7 +247,7 @@ export async function requireAuth(req, res, next) {
           avatar_url: oauthUser.avatar_url,
           provider: oauthUser.provider
         };
-        
+
         setCachedUser(accessToken, normalizedUser);
         req.user = normalizedUser;
         return next();
@@ -256,11 +255,11 @@ export async function requireAuth(req, res, next) {
     } catch (sessionError) {
       console.error('OAuth session validation error:', sessionError);
     }
-    
+
     // No valid authentication found
     console.warn('No valid authentication found');
     return res.status(401).json({ error: 'Invalid or expired token' });
-    
+
   } catch (error) {
     console.error('Authentication middleware error:', error);
     return res.status(500).json({ error: 'Authentication error' });
@@ -272,36 +271,36 @@ export async function requireAuthEnhanced(req, res, next) {
   try {
     const accessToken = req.cookies?.access_token;
     const clientIP = getClientIP(req);
-    
+
     if (!accessToken) {
       console.warn('No access token provided');
       return res.status(401).json({ error: 'Authentication required' });
     }
-    
+
     // Additional security checks
     const userAgent = req.headers['user-agent'];
     const referer = req.headers['referer'];
-    
+
     // Check for suspicious patterns
     if (userAgent && (
-      userAgent.includes('bot') || 
-      userAgent.includes('crawler') || 
+      userAgent.includes('bot') ||
+      userAgent.includes('crawler') ||
       userAgent.includes('spider') ||
       userAgent === 'Mozilla/5.0 (compatible; MSIE 9.0; Windows NT 6.1; Trident/5.0)' // Known malicious UA
     )) {
       console.warn(`Suspicious user agent detected: ${userAgent}`);
       // Don't block immediately, but log for monitoring
     }
-    
+
     // Check for missing or suspicious referer (for certain endpoints)
     if (req.method === 'POST' && !referer) {
       console.warn('Missing referer header for POST request');
       // This could be a CSRF attempt, but don't block immediately
     }
-    
+
     // Proceed with normal authentication
     return requireAuth(req, res, next);
-    
+
   } catch (error) {
     console.error('Enhanced authentication middleware error:', error);
     return res.status(500).json({ error: 'Authentication error' });
@@ -315,15 +314,15 @@ export async function requireAdmin(req, res, next) {
     if (!req.user) {
       return res.status(401).json({ error: 'Authentication required' });
     }
-    
+
     // Check if user has admin privileges
     // This would depend on your user role system
     const isAdmin = req.user.role === 'admin' || req.user.is_admin === true;
-    
+
     if (!isAdmin) {
       return res.status(403).json({ error: 'Admin privileges required' });
     }
-    
+
     next();
   } catch (error) {
     console.error('Admin middleware error:', error);

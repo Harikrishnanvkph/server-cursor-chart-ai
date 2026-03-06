@@ -5,8 +5,6 @@ import dotenv from 'dotenv';
 import helmet from 'helmet';
 import cookieParser from 'cookie-parser';
 import rateLimit from 'express-rate-limit';
-import { GoogleGenerativeAI } from "@google/generative-ai";
-import fs from 'node:fs/promises'
 import { generateChartDataWithGemini, modifyChartDataWithGemini } from './services/geminiService.js';
 import { generateChartDataWithOpenRouter, modifyChartDataWithOpenRouter } from './services/openrouterService.js';
 import { generateChartDataWithDeepSeek, modifyChartDataWithDeepSeek } from './services/deepseekService.js';
@@ -39,12 +37,6 @@ console.log('✅ All required environment variables are configured');
 
 const app = express();
 const port = process.env.PORT || 5000;
-
-// Initialize Gemini API
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-
-// In-memory conversation store (in production, use a database)
-const conversationStore = new Map();
 
 // Enhanced security middleware
 app.use(helmet({
@@ -109,17 +101,33 @@ const globalLimiter = rateLimit({
 
 app.use(globalLimiter);
 
+// Stricter rate limiter for AI endpoints (prevents credit abuse)
+const aiLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 30, // limit each IP to 30 AI requests per 15 minutes
+  message: 'Too many AI requests. Please try again later.',
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: (req, res) => {
+    res.status(429).json({
+      error: 'Too many AI requests',
+      retryAfter: 900,
+      message: 'AI rate limit exceeded. Please try again later.'
+    });
+  }
+});
+
 // Mount routes with enhanced security
 import authRoutes from './routes/authRoutes.js'
 import dataRoutes from './routes/dataRoutes.js'
 import templateRoutes from './routes/templateRoutes.js'
 app.use('/auth', authRoutes)
 
-// Chart processing endpoints (public - no auth required)
-app.use('/api/gemini', geminiRoutes);
-app.use('/api/perplexity', perplexityRoutes);
-app.use('/api/openrouter', openrouterRoutes);
-app.use('/api/deepseek', deepseekRoutes);
+// Chart processing endpoints (require auth + stricter AI rate limit)
+app.use('/api/gemini', requireAuth, aiLimiter, geminiRoutes);
+app.use('/api/perplexity', requireAuth, aiLimiter, perplexityRoutes);
+app.use('/api/openrouter', requireAuth, aiLimiter, openrouterRoutes);
+app.use('/api/deepseek', requireAuth, aiLimiter, deepseekRoutes);
 
 // Protected API endpoints (require authentication)
 app.use('/api/data', requireAuth, dataRoutes);
@@ -170,219 +178,14 @@ app.post('/admin/security/unblock-ip', requireAuth, (req, res) => {
   }
 });
 
-// Helper function to generate chart data using Gemini
-async function generateChartData(inputText) {
-  try {
-    // Get the generative model
-    const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
 
-    const text = await fs.readFile('./src/AI_Inform.txt', 'utf-8');
-
-    const prompt = `${text} and User request: ${inputText}`;
-
-    const result = await model.generateContent(prompt);
-    const response = await result.response;
-    let responseText = response.text()
-
-    // Clean the response text - remove markdown code blocks if present
-    responseText = responseText.trim();
-
-    // Remove ```json and ``` if they exist
-    if (responseText.startsWith('```json')) {
-      responseText = responseText.replace(/^```json\s*/, '').replace(/\s*```$/, '');
-    } else if (responseText.startsWith('```')) {
-      responseText = responseText.replace(/^```\s*/, '').replace(/\s*```$/, '');
-    }
-
-    // Additional cleanup - remove any remaining backticks at start/end
-    responseText = responseText.replace(/^`+|`+$/g, '').trim()
-
-    // Parse the cleaned response text as JSON
-    const chartData = JSON.parse(responseText);
-    return chartData;
-  } catch (error) {
-    console.error('Error generating chart data:', error);
-    throw error;
-  }
-}
-
-// Helper function to modify existing chart
-async function modifyChartData(inputText, currentChartState, messageHistory) {
-  try {
-    const model = genAI.getGenerativeModel({ model: "gemini-2.5-pro" });
-
-    const modificationInstructions = await fs.readFile('./src/AI_Modification_Inform.txt', 'utf-8');
-
-    // Create human-readable chart summary for AI to understand context
-    const chartSummary = buildChartSummary(currentChartState);
-
-    // Create compact chart state for exact data reference
-    const compactData = JSON.stringify(currentChartState.chartData);
-    const compactConfig = JSON.stringify(currentChartState.chartConfig);
-
-    // Increased from 2→5 messages and 150→300 chars for better AI context
-    const recentHistory = messageHistory.slice(-5).map(msg => {
-      const content = msg.content?.length > 300 ? msg.content.substring(0, 300) + '...' : msg.content;
-      return `${msg.role}: ${content}`;
-    }).join('\n');
-
-    const contextPrompt = `
-    ${modificationInstructions}
-
-    CURRENT CHART SUMMARY (for your understanding):
-    ${chartSummary}
-
-    CURRENT CHART STATE (exact data):
-    - Chart Type: ${currentChartState.chartType}
-    - Data: ${compactData}
-    - Config: ${compactConfig}
-
-    CONVERSATION HISTORY (last 5 messages):
-    ${recentHistory}
-
-    USER'S CURRENT REQUEST: ${inputText}
-
-    IMPORTANT INSTRUCTIONS:
-    1. If user wants to MODIFY this chart → preserve existing structure, apply only requested changes
-    2. If user wants a COMPLETELY NEW chart on a DIFFERENT TOPIC → create fresh data from scratch
-    3. Read the conversation history to understand the full context
-
-    Respond with ONLY a JSON object:
-    {
-      "action": "modify",
-      "chartType": "same or new type",
-      "chartData": { /* modified or new data */ },
-      "chartConfig": { /* modified or new config */ },
-      "user_message": "Clear explanation of what you did",
-      "changes": ["list of specific changes made"]
-    }
-    `;
-
-    const result = await model.generateContent(contextPrompt);
-    const response = await result.response;
-    let responseText = response.text().trim();
-
-    // Clean the response text
-    if (responseText.startsWith('```json')) {
-      responseText = responseText.replace(/^```json\s*/, '').replace(/\s*```$/, '');
-    } else if (responseText.startsWith('```')) {
-      responseText = responseText.replace(/^```\s*/, '').replace(/\s*```$/, '');
-    }
-    responseText = responseText.replace(/^`+|`+$/g, '').trim();
-
-    const chartData = JSON.parse(responseText);
-    return chartData;
-  } catch (error) {
-    console.error('Error modifying chart data:', error);
-    throw error;
-  }
-}
-
-// Helper function to build human-readable chart summary
-function buildChartSummary(chartState) {
-  if (!chartState || !chartState.chartData) {
-    return "No chart currently exists.";
-  }
-
-  const { chartType, chartData, chartConfig } = chartState;
-  const datasets = chartData.datasets || [];
-  const labels = chartData.labels || [];
-
-  let summary = `Current chart is a ${chartType} chart`;
-
-  if (labels.length > 0) {
-    summary += ` with ${labels.length} data points`;
-    if (labels.length <= 5) {
-      summary += ` (labels: ${labels.join(', ')})`;
-    } else {
-      summary += ` (labels: ${labels.slice(0, 3).join(', ')}... and ${labels.length - 3} more)`;
-    }
-  }
-
-  if (datasets.length > 0) {
-    summary += `. It has ${datasets.length} dataset(s): `;
-    summary += datasets.map(ds => `"${ds.label || 'Untitled'}"`).join(', ');
-  }
-
-  // Add title if present
-  const title = chartConfig?.plugins?.title?.text;
-  if (title) {
-    summary += `. Chart title: "${title}"`;
-  }
-
-  return summary;
-}
-
-// Endpoint to process chart request (new or modification)
-app.post('/api/process-chart', async (req, res) => {
-  try {
-    const { input, conversationId, currentChartState, messageHistory } = req.body;
-
-    if (!input) {
-      return res.status(400).json({ error: 'Input text is required' });
-    }
-
-    let aiResponse;
-
-    // Determine if this is a modification or new chart
-    if (currentChartState && conversationId) {
-      aiResponse = await modifyChartData(input, currentChartState, messageHistory || []);
-    } else {
-      aiResponse = await generateChartData(input);
-    }
-
-    // console.log('AI Response:', aiResponse);
-
-    // Compose the correct format for the frontend
-    const result = {
-      chartType: aiResponse.chartType,
-      chartData: aiResponse.chartData || aiResponse.data,
-      chartConfig: aiResponse.chartConfig || aiResponse.options,
-      user_message: aiResponse.user_message,
-      action: aiResponse.action || 'create',
-      changes: aiResponse.changes || []
-    };
-
-    res.json(result);
-  } catch (error) {
-    console.error('Error processing chart request:', error);
-    res.status(500).json({
-      error: 'Failed to process chart request',
-      details: error.message
-    });
-  }
-});
-
-// Endpoint to get conversation history
-app.get('/api/conversation/:id', (req, res) => {
-  const { id } = req.params;
-  const conversation = conversationStore.get(id);
-
-  if (!conversation) {
-    return res.status(404).json({ error: 'Conversation not found' });
-  }
-
-  res.json(conversation);
-});
-
-// Endpoint to delete conversation
-app.delete('/api/conversation/:id', (req, res) => {
-  const { id } = req.params;
-  const deleted = conversationStore.delete(id);
-
-  if (!deleted) {
-    return res.status(404).json({ error: 'Conversation not found' });
-  }
-
-  res.json({ message: 'Conversation deleted successfully' });
-});
 
 // Enhanced main endpoint that supports both Google and Perplexity
-app.post('/api/process-chart-enhanced', async (req, res) => {
-  // Extract service outside try block so it's accessible in catch
+// Protected: requires authentication + AI rate limiting
+app.post('/api/process-chart-enhanced', requireAuth, aiLimiter, async (req, res) => {
   const {
     input,
-    service = 'deepseek', // default AI: 'gemini' | 'deepseek' | 'openrouter' | 'google'
+    service = 'gemini', // default AI: 'gemini' | 'deepseek' | 'openrouter' | 'google'
     model,
     conversationId,
     currentChartState,
@@ -402,7 +205,7 @@ app.post('/api/process-chart-enhanced', async (req, res) => {
       gemini: { generate: generateChartDataWithGemini, modify: modifyChartDataWithGemini, apiKey: 'GEMINI_API_KEY' },
       openrouter: { generate: generateChartDataWithOpenRouter, modify: modifyChartDataWithOpenRouter, apiKey: 'OPENROUTER_API_KEY' },
       deepseek: { generate: generateChartDataWithDeepSeek, modify: modifyChartDataWithDeepSeek, apiKey: 'DEEPSEEK_API_KEY' },
-      google: { generate: generateChartData, modify: (i, s, h) => modifyChartData(i, s, h), apiKey: 'GEMINI_API_KEY' },
+      google: { generate: generateChartDataWithGemini, modify: modifyChartDataWithGemini, apiKey: 'GEMINI_API_KEY' },
     };
 
     const svc = SERVICE_REGISTRY[service] ?? SERVICE_REGISTRY.gemini;
@@ -414,7 +217,7 @@ app.post('/api/process-chart-enhanced', async (req, res) => {
       return res.status(500).json({ error: `API key for '${service}' is not configured. Set ${svc.apiKey} in .env` });
     }
 
-    //console.log(`\n🤖 AI SERVICE: ${service.toUpperCase()} | Key: ${svc.apiKey} = ${apiKeyValue.substring(0, 8)}...`);
+    console.log(`🤖 Processing chart request using: ${service.toUpperCase()} (Model: ${model || 'default'})`);
 
     const aiResponse = (currentChartState && conversationId)
       ? await svc.modify(input, currentChartState, messageHistory || [], model, templateStructure)
@@ -455,8 +258,11 @@ app.get('/health', (req, res) => {
   });
 });
 
-// Security status endpoint
-app.get('/security/status', (req, res) => {
+// Security status endpoint (protected — requires admin)
+app.get('/security/status', requireAuth, (req, res) => {
+  if (req.user?.email !== process.env.ADMIN_EMAIL) {
+    return res.status(403).json({ error: 'Admin access required' });
+  }
   const stats = getSecurityStats();
   res.json({
     status: 'secure',
@@ -467,6 +273,24 @@ app.get('/security/status', (req, res) => {
   });
 });
 
-app.listen(port, () => {
+// Start server with graceful shutdown support
+const server = app.listen(port, () => {
   console.log(`Server running on port ${port}`);
 });
+
+// Graceful shutdown handler
+function gracefulShutdown(signal) {
+  console.log(`\n${signal} received. Shutting down gracefully...`);
+  server.close(() => {
+    console.log('Server closed. Exiting process.');
+    process.exit(0);
+  });
+  // Force exit after 10 seconds if graceful shutdown fails
+  setTimeout(() => {
+    console.error('Forced shutdown after timeout.');
+    process.exit(1);
+  }, 10000);
+}
+
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));

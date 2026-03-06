@@ -37,20 +37,35 @@ export class GeminiAdapter {
             : userPrompt;
 
         try {
-            const result = await genModel.generateContent(combinedPrompt);
-            const response = await result.response;
-            const content = response.text();
+            // 30-second timeout using AbortController
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 60000);
 
-            if (!content?.trim()) {
-                throw new Error('Empty response from Gemini AI service');
+            try {
+                const result = await genModel.generateContent(combinedPrompt, {
+                    signal: controller.signal
+                });
+                clearTimeout(timeoutId);
+                const response = await result.response;
+                const content = response.text();
+
+                if (!content?.trim()) {
+                    throw new Error('Empty response from Gemini AI service');
+                }
+
+                return {
+                    content,
+                    tokensUsed: this._extractTokenUsage(result),
+                    rawResponse: result,
+                };
+            } catch (innerError) {
+                clearTimeout(timeoutId);
+                throw innerError;
             }
-
-            return {
-                content,
-                tokensUsed: this._extractTokenUsage(result),
-                rawResponse: result,
-            };
         } catch (error) {
+            if (error.name === 'AbortError') {
+                throw new Error('Gemini API request timed out after 30 seconds.');
+            }
             if (error.status === 401 || error.message?.includes('API key')) {
                 throw new Error('Invalid Gemini API key');
             } else if (error.status === 429) {

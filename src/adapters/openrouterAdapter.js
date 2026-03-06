@@ -28,14 +28,14 @@ export class OpenRouterAdapter {
    */
   async generateContent(params) {
     const { systemPrompt, userPrompt, model, maxTokens, temperature, topP } = params;
-    
+
     const messages = [];
-    
+
     // Add system message if provided
     if (systemPrompt) {
       messages.push({ role: "system", content: systemPrompt });
     }
-    
+
     // Add user message
     messages.push({ role: "user", content: userPrompt });
 
@@ -45,6 +45,8 @@ export class OpenRouterAdapter {
       max_tokens: maxTokens || 2000,
       temperature: temperature || 0.3,
       top_p: topP || 0.9
+    }, {
+      signal: AbortSignal.timeout(60000) // 60-second timeout
     });
 
     return {
@@ -69,7 +71,7 @@ export class OpenRouterAdapter {
         messages: [{ role: 'user', content: 'Test connection' }],
         max_tokens: 10
       });
-      
+
       return !!response.choices?.[0]?.message?.content;
     } catch (error) {
       console.error('OpenRouter API key validation failed:', error.message);
@@ -206,7 +208,7 @@ export class OpenRouterAdapter {
           'Content-Type': 'application/json'
         }
       });
-      
+
       if (response.ok) {
         return await response.json();
       }

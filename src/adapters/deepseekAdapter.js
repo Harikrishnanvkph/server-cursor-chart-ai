@@ -30,6 +30,8 @@ export class DeepSeekAdapter {
         max_tokens: maxTokens || 4096,
         temperature: temperature ?? 0.3,
         stream: false
+      }, {
+        signal: AbortSignal.timeout(60000) // 60-second timeout
       });
 
       const content = response.choices[0]?.message?.content;
@@ -41,6 +43,7 @@ export class DeepSeekAdapter {
         rawResponse: response
       };
     } catch (error) {
+      if (error.name === 'AbortError' || error.name === 'TimeoutError') throw new Error('DeepSeek API request timed out after 30 seconds.');
       if (error.status === 401) throw new Error('Invalid DeepSeek API key');
       if (error.status === 429) throw new Error('DeepSeek API rate limit exceeded. Please try again.');
       if (error.status >= 500) throw new Error('DeepSeek API server error. Please try again later.');

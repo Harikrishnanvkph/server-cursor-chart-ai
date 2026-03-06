@@ -2,6 +2,7 @@ import { supabaseUserClient, supabaseAdminClient, getSupabaseAuthUrls } from '..
 import { signInSchema, signUpSchema } from '../utils/validators.js'
 import googleOAuthService from '../services/googleOAuthService.js'
 import secureSessionStore from '../services/sessionStore.js'
+import crypto from 'crypto'
 
 const isProd = process.env.NODE_ENV === 'production'
 
@@ -28,7 +29,7 @@ function clearSessionCookies(res) {
 export async function signUp(req, res) {
   try {
     const { email, password, fullName } = signUpSchema.parse(req.body)
-    
+
     const { data, error } = await supabaseUserClient.auth.signUp({
       email,
       password,
@@ -41,9 +42,9 @@ export async function signUp(req, res) {
       return res.status(400).json({ error: error.message })
     }
 
-    res.status(201).json({ 
+    res.status(201).json({
       message: 'User created successfully. Please check your email for verification.',
-      user: data.user 
+      user: data.user
     })
   } catch (error) {
     console.error('Sign up error:', error)
@@ -55,7 +56,7 @@ export async function signUp(req, res) {
 export async function signIn(req, res) {
   try {
     const { email, password } = signInSchema.parse(req.body)
-    
+
     const { data, error } = await supabaseUserClient.auth.signInWithPassword({
       email,
       password
@@ -66,9 +67,9 @@ export async function signIn(req, res) {
     }
 
     setSessionCookies(res, data.session)
-    res.json({ 
+    res.json({
       message: 'Signed in successfully',
-      user: data.user 
+      user: data.user
     })
   } catch (error) {
     console.error('Sign in error:', error)
@@ -80,14 +81,14 @@ export async function signIn(req, res) {
 export async function me(req, res) {
   try {
     const accessToken = req.cookies.access_token || req.headers.authorization?.replace('Bearer ', '')
-    
+
     if (!accessToken) {
       return res.status(401).json({ error: 'No access token provided' })
     }
 
     // Try to validate as OAuth session first
     let user = await secureSessionStore.validateSession(accessToken)
-    
+
     if (!user) {
       // Try Supabase auth as fallback
       const { data: { user: supabaseUser }, error } = await supabaseUserClient.auth.getUser(accessToken)
@@ -108,11 +109,11 @@ export async function me(req, res) {
 export async function signOut(req, res) {
   try {
     const accessToken = req.cookies.access_token || req.headers.authorization?.replace('Bearer ', '')
-    
+
     if (accessToken) {
       // Try to delete OAuth session
       await secureSessionStore.deleteSession(accessToken)
-      
+
       // Try Supabase sign out as well
       try {
         await supabaseUserClient.auth.signOut()
@@ -133,7 +134,19 @@ export async function signOut(req, res) {
 // Start Google OAuth flow
 export async function googleStart(req, res) {
   try {
-    const authUrl = await googleOAuthService.getAuthorizationUrl()
+    // Generate CSRF state token for security
+    const state = crypto.randomBytes(32).toString('hex')
+
+    // Store state in a short-lived httpOnly cookie for verification on callback
+    res.cookie('oauth_state', state, {
+      httpOnly: true,
+      secure: isProd,
+      sameSite: 'lax',
+      path: '/',
+      maxAge: 10 * 60 * 1000 // 10 minutes
+    })
+
+    const authUrl = await googleOAuthService.getAuthorizationUrl(state)
     res.json({ authUrl })
   } catch (error) {
     console.error('Google OAuth start error:', error)
@@ -144,18 +157,33 @@ export async function googleStart(req, res) {
 // Google OAuth callback
 export async function googleCallback(req, res) {
   try {
-    const { code } = req.query
-    
+    const { code, state } = req.query
+
     if (!code) {
       return res.status(400).json({ error: 'Authorization code required' })
     }
 
+    // Verify CSRF state token
+    const storedState = req.cookies?.oauth_state
+    if (!state || !storedState || state !== storedState) {
+      console.warn('OAuth state mismatch - possible CSRF attack')
+      await secureSessionStore.logSecurityEvent('suspicious_activity', req.ip, req.get('User-Agent'), {
+        reason: 'OAuth state mismatch',
+        provider: 'google'
+      })
+      const errorUrl = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/auth/error?message=${encodeURIComponent('Authentication failed: invalid state')}`
+      return res.redirect(errorUrl)
+    }
+
+    // Clear the state cookie
+    res.clearCookie('oauth_state', { path: '/' })
+
     // Exchange code for tokens
     const tokens = await googleOAuthService.exchangeCodeForToken(code)
-    
+
     // Get user info from Google
     const userInfo = await googleOAuthService.getUserInfo(tokens.access_token)
-    
+
     // Create or get user session
     const session = await secureSessionStore.createSession(
       tokens.access_token,
@@ -171,22 +199,22 @@ export async function googleCallback(req, res) {
       path: '/',
       maxAge: 15 * 24 * 60 * 60 * 1000 // 15 days
     }
-    
+
     res.cookie('access_token', tokens.access_token, cookieOptions)
-    
+
     // Redirect to frontend with success
     const redirectUrl = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/auth/success?provider=google`
     res.redirect(redirectUrl)
 
   } catch (error) {
     console.error('Google OAuth callback error:', error)
-    
+
     // Log security event (only critical failures)
     await secureSessionStore.logSecurityEvent('oauth_callback_failed', req.ip, req.get('User-Agent'), {
       provider: 'google',
       error: error.message
     })
-    
+
     const errorUrl = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/auth/error?message=${encodeURIComponent('OAuth authentication failed')}`
     res.redirect(errorUrl)
   }
@@ -196,7 +224,7 @@ export async function googleCallback(req, res) {
 export async function passwordForgot(req, res) {
   try {
     const { email } = req.body
-    
+
     if (!email) {
       return res.status(400).json({ error: 'Email required' })
     }
@@ -219,13 +247,29 @@ export async function passwordForgot(req, res) {
 // Password reset
 export async function passwordReset(req, res) {
   try {
-    const { password } = req.body
-    
+    const { password, access_token } = req.body
+
     if (!password) {
       return res.status(400).json({ error: 'New password required' })
     }
 
-    const { error } = await supabaseUserClient.auth.updateUser({
+    // The access_token should come from the reset email link
+    // It authenticates which user is performing the reset
+    const tokenToUse = access_token || req.cookies?.access_token || req.headers.authorization?.replace('Bearer ', '')
+
+    if (!tokenToUse) {
+      return res.status(401).json({ error: 'Authentication token required for password reset' })
+    }
+
+    // Verify the user via the token before updating password
+    const { data: { user }, error: verifyError } = await supabaseAdminClient.auth.getUser(tokenToUse)
+
+    if (verifyError || !user) {
+      return res.status(401).json({ error: 'Invalid or expired reset token' })
+    }
+
+    // Update password using admin client with the verified user ID
+    const { error } = await supabaseAdminClient.auth.admin.updateUserById(user.id, {
       password: password
     })
 
@@ -244,7 +288,7 @@ export async function passwordReset(req, res) {
 export async function resendVerification(req, res) {
   try {
     const { email } = req.body
-    
+
     if (!email) {
       return res.status(400).json({ error: 'Email required' })
     }
