@@ -57,4 +57,4 @@ Key Requirements:
 - Include x/y axis names for bar, line, area, scatter charts
 - Provide user_message explaining the chart
 
-CRITICAL: Use most recent 2024 data available.
+CRITICAL: Use most recent data available.

@@ -1,7 +1,4 @@
 import { OpenAI } from 'openai';
-import dotenv from 'dotenv';
-
-dotenv.config();
 
 /**
  * Perplexity AI Adapter
@@ -10,11 +7,18 @@ dotenv.config();
 export class PerplexityAdapter {
   constructor() {
     this.serviceName = 'perplexity';
-    this.client = new OpenAI({
-      apiKey: process.env.PERPLEXITY_API_KEY,
-      baseURL: "https://api.perplexity.ai"
-      // No timeout - let frontend handle it
-    });
+    this._client = null; // lazy-initialized on first use
+  }
+
+  // Lazy client getter — defers instantiation until env vars are loaded
+  get client() {
+    if (!this._client) {
+      this._client = new OpenAI({
+        apiKey: process.env.PERPLEXITY_API_KEY,
+        baseURL: "https://api.perplexity.ai"
+      });
+    }
+    return this._client;
   }
 
   /**

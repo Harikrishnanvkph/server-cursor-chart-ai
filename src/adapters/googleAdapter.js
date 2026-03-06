@@ -1,8 +1,4 @@
 import { GoogleGenerativeAI } from "@google/generative-ai";
-import dotenv from 'dotenv';
-
-dotenv.config();
-
 /**
  * Google Gemini AI Adapter
  * Handles Google-specific API calls and response formatting
@@ -10,7 +6,15 @@ dotenv.config();
 export class GoogleAdapter {
   constructor() {
     this.serviceName = 'google';
-    this.genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+    this._genAI = null; // lazy-initialized on first use
+  }
+
+  // Lazy getter — defers instantiation until env vars are loaded
+  get genAI() {
+    if (!this._genAI) {
+      this._genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+    }
+    return this._genAI;
   }
 
   /**

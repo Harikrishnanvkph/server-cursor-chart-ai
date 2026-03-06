@@ -1,7 +1,4 @@
 import { OpenAI } from 'openai';
-import dotenv from 'dotenv';
-
-dotenv.config();
 
 /**
  * DeepSeek Adapter
@@ -10,10 +7,18 @@ dotenv.config();
 export class DeepSeekAdapter {
   constructor() {
     this.serviceName = 'deepseek';
-    this.client = new OpenAI({
-      apiKey: process.env.DEEPSEEK_API_KEY,
-      baseURL: 'https://api.deepseek.com/v1'
-    });
+    this._client = null; // lazy-initialized on first use
+  }
+
+  // Lazy client getter — defers instantiation until env vars are loaded
+  get client() {
+    if (!this._client) {
+      this._client = new OpenAI({
+        apiKey: process.env.DEEPSEEK_API_KEY,
+        baseURL: 'https://api.deepseek.com/v1'
+      });
+    }
+    return this._client;
   }
 
   async generateContent({ systemPrompt, userPrompt, model, maxTokens, temperature }) {

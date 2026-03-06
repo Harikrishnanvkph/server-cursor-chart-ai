@@ -1,7 +1,4 @@
 import { GoogleGenerativeAI } from '@google/generative-ai';
-import dotenv from 'dotenv';
-
-dotenv.config();
 
 const MODEL_MAP = {
     // Perplexity names → Gemini equivalents
@@ -25,7 +22,15 @@ const DEFAULT_MODEL = 'gemini-2.5-flash';
 export class GeminiAdapter {
     constructor() {
         this.serviceName = 'gemini';
-        this.genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+        this._genAI = null; // lazy-initialized on first use
+    }
+
+    // Lazy getter — defers instantiation until env vars are loaded
+    get genAI() {
+        if (!this._genAI) {
+            this._genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+        }
+        return this._genAI;
     }
 
     async generateContent({ systemPrompt, userPrompt, model }) {

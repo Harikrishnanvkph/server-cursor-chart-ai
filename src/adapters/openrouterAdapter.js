@@ -1,7 +1,4 @@
 import { OpenAI } from 'openai';
-import dotenv from 'dotenv';
-
-dotenv.config();
 
 /**
  * OpenRouter AI Adapter
@@ -10,15 +7,22 @@ dotenv.config();
 export class OpenRouterAdapter {
   constructor() {
     this.serviceName = 'openrouter';
-    this.client = new OpenAI({
-      apiKey: process.env.OPENROUTER_API_KEY,
-      baseURL: "https://openrouter.ai/api/v1",
-      defaultHeaders: {
-        "HTTP-Referer": process.env.OPENROUTER_SITE_URL || "http://localhost:3001",
-        "X-Title": process.env.OPENROUTER_SITE_NAME || "Chart Generator",
-      }
-      // No timeout - let frontend handle it
-    });
+    this._client = null; // lazy-initialized on first use
+  }
+
+  // Lazy client getter — defers instantiation until env vars are loaded
+  get client() {
+    if (!this._client) {
+      this._client = new OpenAI({
+        apiKey: process.env.OPENROUTER_API_KEY,
+        baseURL: "https://openrouter.ai/api/v1",
+        defaultHeaders: {
+          "HTTP-Referer": process.env.OPENROUTER_SITE_URL || "http://localhost:3001",
+          "X-Title": process.env.OPENROUTER_SITE_NAME || "Chart Generator",
+        }
+      });
+    }
+    return this._client;
   }
 
   /**

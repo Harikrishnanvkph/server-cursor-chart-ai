@@ -1,7 +1,7 @@
+import './env.js'; // MUST be the first import to load env vars before ESM hoisting
 import express from 'express';
 import compression from 'compression';
 import cors from 'cors';
-import dotenv from 'dotenv';
 import helmet from 'helmet';
 import cookieParser from 'cookie-parser';
 import rateLimit from 'express-rate-limit';
@@ -13,8 +13,6 @@ import openrouterRoutes from './routes/openrouterRoutes.js';
 import deepseekRoutes from './routes/deepseekRoutes.js';
 import geminiRoutes from './routes/geminiRoutes.js';
 import { requireAuth, rateLimitMiddleware, getSecurityStats, blockIP, unblockIP } from './middleware/authMiddleware.js'
-
-dotenv.config();
 
 // Check required environment variables
 const requiredEnvVars = [
@@ -58,7 +56,7 @@ app.use(helmet({
 }));
 
 app.use(cookieParser());
-app.use(compression());
+app.use(compression({ threshold: '1kb' }));
 app.use(express.json({ limit: '10mb' })); // Limit request body size
 
 // CORS with enhanced security

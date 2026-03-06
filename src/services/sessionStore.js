@@ -22,17 +22,17 @@ class SecureSessionStore {
   checkRateLimit(identifier) {
     const now = Date.now();
     const attempts = this.rateLimitMap.get(identifier) || { count: 0, firstAttempt: now };
-    
+
     if (now - attempts.firstAttempt > this.lockoutDuration) {
       // Reset if lockout period has passed
       attempts.count = 0;
       attempts.firstAttempt = now;
     }
-    
+
     if (attempts.count >= this.maxFailedAttempts) {
       return false; // Blocked
     }
-    
+
     return true; // Allowed
   }
 
@@ -55,7 +55,7 @@ class SecureSessionStore {
 
       // First, create or get user via Supabase Auth (this triggers profile creation via trigger)
       let user = await this.getUserByEmail(userData.email);
-      
+
       if (!user) {
         // Create user in Supabase Auth first (this will auto-create profile via trigger)
         const { data: authData, error: authError } = await supabaseAdminClient.auth.admin.createUser({
@@ -82,7 +82,7 @@ class SecureSessionStore {
 
         // Get the newly created profile
         user = await this.getUserByEmail(userData.email);
-        
+
         if (!user) {
           console.error('Profile not created by trigger for user:', authData.user.id);
           throw new Error('Failed to create user profile');
@@ -160,7 +160,7 @@ class SecureSessionStore {
   async validateSession(accessToken) {
     try {
       const tokenHash = this.hashToken(accessToken);
-      
+
       const { data: session, error } = await supabaseAdminClient
         .from('oauth_sessions')
         .select(`
@@ -181,11 +181,21 @@ class SecureSessionStore {
         return null;
       }
 
-      // Update last used timestamp
-      await supabaseAdminClient
-        .from('oauth_sessions')
-        .update({ last_used_at: new Date().toISOString() })
-        .eq('id', session.id);
+      // Throttle last_used_at DB writes: only write if >5 minutes since last update
+      // This avoids a DB write on every authenticated request
+      const SESSION_WRITE_THROTTLE_MS = 5 * 60 * 1000; // 5 minutes
+      const lastWrite = this._sessionLastWrite?.get(session.id) || 0;
+      if (Date.now() - lastWrite > SESSION_WRITE_THROTTLE_MS) {
+        if (!this._sessionLastWrite) this._sessionLastWrite = new Map();
+        this._sessionLastWrite.set(session.id, Date.now());
+        // Fire-and-forget — don't await, don't block the request
+        supabaseAdminClient
+          .from('oauth_sessions')
+          .update({ last_used_at: new Date().toISOString() })
+          .eq('id', session.id)
+          .then(() => { })
+          .catch(err => console.warn('Failed to update session last_used_at:', err.message));
+      }
 
       return {
         id: session.id,
@@ -228,7 +238,7 @@ class SecureSessionStore {
   async deleteSession(accessToken) {
     try {
       const tokenHash = this.hashToken(accessToken);
-      
+
       const { error } = await supabaseAdminClient
         .from('oauth_sessions')
         .delete()
@@ -270,7 +280,7 @@ class SecureSessionStore {
       // Only log critical security events, skip routine operations
       const criticalEvents = [
         'failed_login',
-        'suspicious_activity', 
+        'suspicious_activity',
         'rate_limit_exceeded',
         'new_oauth_user_created',
         'oauth_callback_failed'

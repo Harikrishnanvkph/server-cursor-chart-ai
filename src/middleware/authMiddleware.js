@@ -61,7 +61,7 @@ async function ensureUserProfile(userId, userEmail = null, userName = null, user
 
 // Simple in-memory auth cache (token -> { user, expiresAt })
 const authCache = new Map();
-const AUTH_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+const AUTH_CACHE_TTL_MS = 15 * 60 * 1000; // 15 minutes — reduced external Supabase calls by 3×
 
 function getCachedUser(token) {
   if (!token) return null;
@@ -85,9 +85,6 @@ const MAX_REQUESTS_PER_WINDOW = 100; // Max requests per IP per window
 const BLOCKED_IPS = new Set(); // IPs that are permanently blocked
 const SUSPICIOUS_IPS = new Map(); // IPs with suspicious activity
 
-// Rate limiting storage
-const rateLimitStore = new Map();
-
 // Helper function to get client IP
 function getClientIP(req) {
   return req.headers['x-forwarded-for'] ||
@@ -97,7 +94,61 @@ function getClientIP(req) {
     'unknown';
 }
 
-// Rate limiting middleware
+// ============================================================
+// Sliding-window rate limiter (O(1) per request)
+// Two half-period buckets: curr (this window half) + prev (last window half)
+// Estimated count = prev × (fraction of window remaining) + curr
+// ============================================================
+const RATE_HALF = RATE_LIMIT_WINDOW / 2; // 7.5 minutes
+const rateLimitStore = new Map(); // Map<ip, { curr, prev, halfStart }>
+
+function getSlidingCount(ip) {
+  const now = Date.now();
+  let entry = rateLimitStore.get(ip);
+
+  if (!entry) {
+    entry = { curr: 0, prev: 0, halfStart: now };
+    rateLimitStore.set(ip, entry);
+  }
+
+  const elapsed = now - entry.halfStart;
+
+  if (elapsed >= RATE_HALF * 2) {
+    // Both buckets expired — full reset
+    entry.prev = 0;
+    entry.curr = 0;
+    entry.halfStart = now;
+  } else if (elapsed >= RATE_HALF) {
+    // Half-period rolled over — shift buckets
+    entry.prev = entry.curr;
+    entry.curr = 0;
+    entry.halfStart = now - (elapsed - RATE_HALF);
+  }
+
+  // Weighted count: prev bucket weighted by remaining fraction
+  const prevWeight = Math.max(0, 1 - (elapsed % RATE_HALF) / RATE_HALF);
+  return Math.floor(entry.prev * prevWeight) + entry.curr;
+}
+
+function incrementSlidingCount(ip) {
+  const entry = rateLimitStore.get(ip);
+  if (entry) entry.curr++;
+}
+
+// Clean up idle entries every 15 minutes
+setInterval(() => {
+  const cutoff = Date.now() - RATE_LIMIT_WINDOW * 2;
+  for (const [ip, entry] of rateLimitStore.entries()) {
+    if (entry.halfStart < cutoff) rateLimitStore.delete(ip);
+  }
+  // Clean up expired suspicious IP blocks
+  const now = Date.now();
+  for (const [ip, info] of SUSPICIOUS_IPS.entries()) {
+    if (now > info.blockedUntil) SUSPICIOUS_IPS.delete(ip);
+  }
+}, 15 * 60 * 1000);
+
+// Rate limiting middleware — uses sliding window counter (O(1) per request)
 function rateLimitMiddleware(req, res, next) {
   const clientIP = getClientIP(req);
 
@@ -117,62 +168,24 @@ function rateLimitMiddleware(req, res, next) {
     });
   }
 
-  // Rate limiting logic
-  const now = Date.now();
-  const windowStart = now - RATE_LIMIT_WINDOW;
+  // Sliding window count check
+  const count = getSlidingCount(clientIP);
 
-  if (!rateLimitStore.has(clientIP)) {
-    rateLimitStore.set(clientIP, []);
-  }
-
-  const requests = rateLimitStore.get(clientIP);
-
-  // Remove old requests outside the current window
-  const validRequests = requests.filter(timestamp => timestamp > windowStart);
-  rateLimitStore.set(clientIP, validRequests);
-
-  // Check if current request exceeds limit
-  if (validRequests.length >= MAX_REQUESTS_PER_WINDOW) {
-    // Mark IP as suspicious
+  if (count >= MAX_REQUESTS_PER_WINDOW) {
     SUSPICIOUS_IPS.set(clientIP, {
-      blockedUntil: now + (30 * 60 * 1000), // Block for 30 minutes
+      blockedUntil: Date.now() + (30 * 60 * 1000),
       reason: 'Rate limit exceeded'
     });
-
     console.warn(`Rate limit exceeded for IP: ${clientIP}, blocking for 30 minutes`);
     return res.status(429).json({
       error: 'Too many requests',
-      retryAfter: 1800 // 30 minutes in seconds
+      retryAfter: 1800
     });
   }
 
-  // Add current request timestamp
-  validRequests.push(now);
-
+  incrementSlidingCount(clientIP);
   next();
 }
-
-// Clean up old rate limit data
-setInterval(() => {
-  const now = Date.now();
-  const windowStart = now - RATE_LIMIT_WINDOW;
-
-  for (const [ip, requests] of rateLimitStore.entries()) {
-    const validRequests = requests.filter(timestamp => timestamp > windowStart);
-    if (validRequests.length === 0) {
-      rateLimitStore.delete(ip);
-    } else {
-      rateLimitStore.set(ip, validRequests);
-    }
-  }
-
-  // Clean up expired suspicious IP blocks
-  for (const [ip, info] of SUSPICIOUS_IPS.entries()) {
-    if (now > info.blockedUntil) {
-      SUSPICIOUS_IPS.delete(ip);
-    }
-  }
-}, 5 * 60 * 1000); // Clean up every 5 minutes
 
 // Authentication middleware
 export async function requireAuth(req, res, next) {

@@ -75,14 +75,14 @@ class ChartDataService {
           throw directError;
         }
 
-        // Fetch snapshot metadata separately (optimized: fetch only is_template_mode, extract mode from minimal chart_data)
+        // Fetch snapshot metadata separately — extract only mode via JSON path, NOT the full chart_data blob
         if (directData && directData.length > 0) {
           const conversationIds = directData.map(c => c.id);
 
-          // Fetch is_template_mode, chart_type, and only the datasets array from chart_data (much smaller than full chart_data)
+          // Use Postgres JSON path to extract datasets[0].mode server-side (~10 bytes vs 5KB-2MB per row)
           const { data: snapshotData } = await supabaseAdminClient
             .from('chart_snapshots')
-            .select('conversation_id, is_template_mode, chart_type, chart_data')
+            .select('conversation_id, is_template_mode, chart_type, chart_data->datasets->0->mode')
             .in('conversation_id', conversationIds)
             .eq('is_current', true);
 
@@ -93,16 +93,12 @@ class ChartDataService {
           });
 
           // Transform to include mode info at top level
-          // Extract chart_mode from datasets array (minimal processing)
           return directData.map(conv => {
             const snapshot = snapshotMap.get(conv.id);
-            const chartData = snapshot?.chart_data;
-            const chartMode = chartData?.datasets?.[0]?.mode || 'single';
-
             return {
               ...conv,
               is_template_mode: snapshot?.is_template_mode || false,
-              chart_mode: chartMode,
+              chart_mode: snapshot?.mode || 'single',
               current_chart_type: snapshot?.chart_type || null
             };
           });
@@ -273,44 +269,65 @@ class ChartDataService {
 
   async addMessage(conversationId, role, content, chartSnapshotId = null, action = null, changes = null) {
     try {
-      // Get next message order
-      const { count } = await supabaseAdminClient
-        .from('chat_messages')
-        .select('*', { count: 'exact', head: true })
-        .eq('conversation_id', conversationId);
+      // Single RPC call: computes MAX(message_order)+1 and inserts atomically
+      // Replaces previous pattern of COUNT query + INSERT (2 round-trips → 1)
+      // Requires Supabase function: add_chat_message (see implementation_plan.md for SQL)
+      const { data, error } = await supabaseAdminClient.rpc('add_chat_message', {
+        p_conversation_id: conversationId,
+        p_role: role,
+        p_content: content,
+        p_chart_snapshot_id: chartSnapshotId,
+        p_action: action,
+        p_changes: changes ? JSON.stringify(changes) : null
+      });
 
-      const messageOrder = (count || 0) + 1;
-
-      const { data, error } = await supabaseAdminClient
-        .from('chat_messages')
-        .insert({
-          conversation_id: conversationId,
-          chart_snapshot_id: chartSnapshotId,
-          role,
-          content,
-          action,
-          changes,
-          message_order: messageOrder
-        })
-        .select('*')
-        .single();
-
-      if (error) throw error;
-
-      // Update conversation last activity
-      await supabaseAdminClient
-        .from('conversations')
-        .update({
-          last_activity: new Date().toISOString(),
-          updated_at: new Date().toISOString()
-        })
-        .eq('id', conversationId);
+      if (error) {
+        // Fallback: if RPC doesn't exist yet, use the original two-query approach
+        console.warn('add_chat_message RPC not found, falling back to direct insert:', error.message);
+        return await this._addMessageFallback(conversationId, role, content, chartSnapshotId, action, changes);
+      }
 
       return data;
     } catch (error) {
       console.error('Error adding message:', error);
       throw error;
     }
+  }
+
+  // Fallback for when the Supabase RPC hasn't been created yet
+  async _addMessageFallback(conversationId, role, content, chartSnapshotId = null, action = null, changes = null) {
+    const { count } = await supabaseAdminClient
+      .from('chat_messages')
+      .select('*', { count: 'exact', head: true })
+      .eq('conversation_id', conversationId);
+
+    const messageOrder = (count || 0) + 1;
+
+    const { data, error } = await supabaseAdminClient
+      .from('chat_messages')
+      .insert({
+        conversation_id: conversationId,
+        chart_snapshot_id: chartSnapshotId,
+        role,
+        content,
+        action,
+        changes,
+        message_order: messageOrder
+      })
+      .select('*')
+      .single();
+
+    if (error) throw error;
+
+    await supabaseAdminClient
+      .from('conversations')
+      .update({
+        last_activity: new Date().toISOString(),
+        updated_at: new Date().toISOString()
+      })
+      .eq('id', conversationId);
+
+    return data;
   }
 
   async getConversationMessages(conversationId, limit = 100) {
