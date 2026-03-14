@@ -264,6 +264,68 @@ class ChartDataService {
   }
 
   // =============================================
+  // CHART SHARING MANAGEMENT
+  // =============================================
+
+  async generateShareLink(snapshotId, userId) {
+    try {
+      // First, verify the snapshot exists and belongs to a conversation owned by the user
+      const { data: snapshot, error: snapshotError } = await supabaseAdminClient
+        .from('chart_snapshots')
+        .select(`
+          id,
+          share_id,
+          conversations!inner(user_id)
+        `)
+        .eq('id', snapshotId)
+        .eq('conversations.user_id', userId)
+        .single();
+
+      if (snapshotError) throw snapshotError;
+      if (!snapshot) throw new Error('Snapshot not found or unauthorized');
+
+      // If it already has a share_id, just return it instead of creating a new one
+      if (snapshot.share_id) {
+        return { share_id: snapshot.share_id };
+      }
+
+      // Generate a new share_id and save it
+      const newShareId = crypto.randomUUID();
+      const { data: updatedSnapshot, error: updateError } = await supabaseAdminClient
+        .from('chart_snapshots')
+        .update({ share_id: newShareId })
+        .eq('id', snapshotId)
+        .select('share_id')
+        .single();
+
+      if (updateError) throw updateError;
+      return { share_id: updatedSnapshot.share_id };
+    } catch (error) {
+      console.error('Error generating share link:', error);
+      throw error;
+    }
+  }
+
+  async getSharedChart(shareId) {
+    try {
+      // Query the snapshot explicitly by share_id. No user authentication required.
+      const { data, error } = await supabaseAdminClient
+        .from('chart_snapshots')
+        .select('chart_data, chart_config, chart_type, created_at, template_structure, template_content')
+        .eq('share_id', shareId)
+        .single();
+
+      if (error && error.code !== 'PGRST116') throw error;
+      if (!data) throw new Error('Shared chart not found');
+      
+      return data;
+    } catch (error) {
+      console.error('Error fetching shared chart:', error);
+      throw error;
+    }
+  }
+
+  // =============================================
   // CHAT MESSAGE MANAGEMENT
   // =============================================
 

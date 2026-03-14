@@ -12,6 +12,7 @@ import perplexityRoutes from './routes/perplexityRoutes.js';
 import openrouterRoutes from './routes/openrouterRoutes.js';
 import deepseekRoutes from './routes/deepseekRoutes.js';
 import geminiRoutes from './routes/geminiRoutes.js';
+import imageProxyRoutes from './routes/imageProxyRoutes.js';
 import { requireAuth, rateLimitMiddleware, getSecurityStats, blockIP, unblockIP } from './middleware/authMiddleware.js'
 
 // Check required environment variables
@@ -131,6 +132,9 @@ app.use('/api/deepseek', requireAuth, aiLimiter, deepseekRoutes);
 app.use('/api/data', requireAuth, dataRoutes);
 app.use('/api/data', requireAuth, templateRoutes);
 
+// Utilities (no requireAuth because img tags cannot send Auth headers, protected via ALLOWED_PROXY_DOMAINS whitelist)
+app.use('/api/proxy', imageProxyRoutes);
+
 // Security monitoring endpoints (admin only)
 app.get('/admin/security/stats', requireAuth, (req, res) => {
   // Check if user is admin (you can implement your own admin check)
@@ -183,7 +187,7 @@ app.post('/admin/security/unblock-ip', requireAuth, (req, res) => {
 app.post('/api/process-chart-enhanced', requireAuth, aiLimiter, async (req, res) => {
   const {
     input,
-    service = 'gemini', // default AI: 'gemini' | 'deepseek' | 'openrouter' | 'google'
+    service = 'deepseek', // default AI: 'gemini' | 'deepseek' | 'openrouter' | 'google'
     model,
     conversationId,
     currentChartState,

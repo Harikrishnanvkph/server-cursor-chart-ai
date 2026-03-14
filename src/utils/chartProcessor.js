@@ -32,7 +32,7 @@ export class ChartProcessor {
         systemPrompt,
         userPrompt,
         model,
-        maxTokens: 4000,  // Increased to 4000 for complex charts
+        maxTokens: 2500,  // Tuned: typical chart JSON is 500-1500 tokens
         temperature: 0.2,
         topP: 0.85
       });
@@ -93,7 +93,7 @@ export class ChartProcessor {
       const response = await this.adapter.generateContent({
         userPrompt: contextPrompt,
         model,
-        maxTokens: 5000,  // Increased to 5000 for complex chart modifications with history
+        maxTokens: 3500,  // Tuned: modifications rarely exceed 2000 tokens
         temperature: 0.2
       });
 
@@ -197,6 +197,12 @@ CRITICAL JSON FORMATTING RULE FOR HTML:
     let prompt = `User request: ${inputText}
 
 Please generate chart data in valid JSON format.`;
+
+    // F4: Reinforce pointImages instructions when user mentions image-related keywords
+    const imageKeywords = /\b(image|icon|picture|logo|photo|emoji|avatar|flag)\b/i;
+    if (imageKeywords.test(inputText)) {
+      prompt += `\n\nIMPORTANT: The user wants images on data points. You MUST include "pointImages" (array of working image URLs) and "pointImageConfig" (array of config objects) in each dataset.`;
+    }
 
     if (templateStructure) {
       // Group sections by content type for clearer instructions
@@ -310,68 +316,58 @@ Generate contextually relevant content for each section based on the chart topic
     // Build human-readable chart summary for AI to understand context
     const chartSummary = this.buildChartSummary(currentChartState);
 
-    // Create compact chart state for exact data reference
-    const compactData = JSON.stringify(currentChartState.chartData);
-    const compactConfig = JSON.stringify(currentChartState.chartConfig);
+    // F1: Slim chart data — strip colors, styling, pointImages to save ~1,000-2,500 tokens
+    // The LLM rarely needs exact RGBA values or image URLs for modifications
+    const slimData = this.slimChartData(currentChartState.chartData);
+    const slimConfig = this.slimChartConfig(currentChartState.chartConfig);
 
+    // F3: AI_Modification_Inform.txt (modificationContext) already covers all instructions
+    // — no duplicate inline instructions needed here
     let prompt = `${modificationContext}
 
-CURRENT CHART SUMMARY (for your understanding):
+CURRENT CHART SUMMARY:
 ${chartSummary}
 
-CURRENT CHART STATE (exact data):
+CURRENT CHART STATE:
 - Chart Type: ${currentChartState.chartType}
-- Data: ${compactData}
-- Config: ${compactConfig}
+- Data: ${JSON.stringify(slimData)}
+- Config: ${JSON.stringify(slimConfig)}
 
 CONVERSATION HISTORY (last 5 messages):
 ${recentHistory}
 
-USER'S CURRENT REQUEST: ${inputText}
-
-IMPORTANT INSTRUCTIONS:
-1. If user wants to MODIFY this chart → preserve existing structure, apply only requested changes
-2. If user wants a COMPLETELY NEW chart on a DIFFERENT TOPIC → create fresh data from scratch
-3. Read the conversation history to understand the full context
-
-Respond with ONLY a JSON object:
-{
-  "action": "modify",
-  "chartType": "same or new type",
-  "chartData": { /* modified or new data */ },
-  "chartConfig": { /* modified or new config */ },
-  "user_message": "Clear explanation of what you did",
-  "changes": ["list of specific changes made"]`;
+USER'S CURRENT REQUEST: ${inputText}`;
 
     if (templateStructure) {
       prompt += ',\n  "templateContent": { /* updated text/HTML for template areas */ }';
     }
 
-    prompt += `\n}`;
+    prompt += `\n
+  }`;
 
     if (templateStructure) {
       // List available template text areas
       const textAreas = templateStructure.sections.filter(s => s.type !== 'chart');
 
-      prompt += `\n\n=== TEMPLATE IS ACTIVE ===`;
-      prompt += `\nAvailable text areas you can modify:`;
+      prompt += `\n\n === TEMPLATE IS ACTIVE === `;
+      prompt += `\nAvailable text areas you can modify: `;
       textAreas.forEach(s => {
         const formatType = s.contentType === 'html' ? 'HTML' : 'plain text';
-        prompt += `\n- "${s.type}" (${s.name}): expects ${formatType}`;
+        prompt += `\n - "${s.type}"(${s.name}): expects ${formatType} `;
       });
 
       // Collect sections with notes for guidance
       const sectionsWithNotes = textAreas.filter(s => s.note && s.note.trim());
       if (sectionsWithNotes.length > 0) {
-        prompt += `\n\nUser instructions for specific areas:`;
+        prompt += `\n\nUser instructions for specific areas: `;
         sectionsWithNotes.forEach(s => {
-          prompt += `\n- ${s.name}: "${s.note}"`;
+          prompt += `\n - ${s.name}: "${s.note}"`;
         });
       }
 
       prompt += `\n\nREMEMBER: "main text area" = templateContent.main, NOT pointImages!`;
     } else {
-      prompt += `\n\nNOTE: No template is active. Text areas are not available in chart-only mode.`;
+      prompt += `\n\nNOTE: No template is active.Text areas are not available in chart - only mode.`;
     }
 
     return prompt;
@@ -395,7 +391,7 @@ Respond with ONLY a JSON object:
       throw new Error('AI service could not generate chart data - please try rephrasing your request');
     }
 
-    // Remove ```json and ``` if they exist
+    // Remove ```json and``` if they exist
     if (cleaned.startsWith('```json')) {
       cleaned = cleaned.replace(/^```json\s*/, '').replace(/\s*```$/, '');
     } else if (cleaned.startsWith('```')) {
@@ -759,6 +755,49 @@ Respond with ONLY a JSON object:
   clearCache() {
     this.aiContextCache = null;
     this.modificationContextCache = null;
+  }
+
+  /**
+   * F1: Create a slim version of chart data for the modification prompt.
+   * Strips colors, styling, pointImages — keeps only labels, data, and dataset names.
+   */
+  slimChartData(chartData) {
+    if (!chartData) return {};
+    return {
+      labels: chartData.labels,
+      datasets: (chartData.datasets || []).map(ds => {
+        const slim = { label: ds.label, data: ds.data };
+        if (ds.mode) slim.mode = ds.mode;
+        if (ds.stack) slim.stack = ds.stack;
+        // Preserve pointImages so LLM doesn't drop them during modifications
+        if (ds.pointImages) slim.pointImages = ds.pointImages;
+        if (ds.pointImageConfig) slim.pointImageConfig = ds.pointImageConfig;
+        return slim;
+      })
+    };
+  }
+
+  /**
+   * F1: Create a slim version of chart config — only title, legend position, and scale info.
+   */
+  slimChartConfig(chartConfig) {
+    if (!chartConfig) return {};
+    const slim = {};
+    if (chartConfig.plugins?.title?.text) {
+      slim.title = chartConfig.plugins.title.text;
+    }
+    if (chartConfig.plugins?.legend?.position) {
+      slim.legendPosition = chartConfig.plugins.legend.position;
+    }
+    if (chartConfig.scales) {
+      slim.scales = {};
+      for (const [axis, cfg] of Object.entries(chartConfig.scales)) {
+        slim.scales[axis] = {};
+        if (cfg.title?.text) slim.scales[axis].title = cfg.title.text;
+        if (cfg.beginAtZero !== undefined) slim.scales[axis].beginAtZero = cfg.beginAtZero;
+      }
+    }
+    return slim;
   }
 }
 

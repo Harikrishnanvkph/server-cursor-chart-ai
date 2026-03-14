@@ -5,7 +5,30 @@ import { supabaseAdminClient } from '../supabase/client.js';
 
 const router = express.Router();
 
-// Apply auth middleware to all routes
+// =============================================
+// PUBLIC SHARE ROUTES
+// =============================================
+
+// Get shared chart data (UNAUTHENTICATED)
+router.get('/shared/:shareId', async (req, res) => {
+  try {
+    const { shareId } = req.params;
+    if (!shareId) {
+      return res.status(400).json({ error: 'Share ID is required' });
+    }
+
+    const sharedChart = await chartDataService.getSharedChart(shareId);
+    res.json(sharedChart);
+  } catch (error) {
+    if (error.message === 'Shared chart not found') {
+      return res.status(404).json({ error: 'Shared chart not found' });
+    }
+    console.error('Error fetching shared chart:', error);
+    res.status(500).json({ error: 'Failed to fetch shared chart' });
+  }
+});
+
+// Apply auth middleware to all remaining routes
 router.use(requireAuth);
 
 // =============================================
@@ -194,6 +217,24 @@ router.put('/chart-snapshots/:id', async (req, res) => {
       error: errorMessage,
       details: error.details || error.hint || null
     });
+  }
+});
+
+// Generate or fetch a share link for a chart snapshot
+router.post('/chart-snapshots/:id/share', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const userId = req.user.id; // guaranteed by requireAuth
+
+    if (!id) {
+      return res.status(400).json({ error: 'Snapshot ID is required' });
+    }
+
+    const shareInfo = await chartDataService.generateShareLink(id, userId);
+    res.json(shareInfo);
+  } catch (error) {
+    console.error('Error generating share link:', error);
+    res.status(500).json({ error: 'Failed to generate share link' });
   }
 });
 
