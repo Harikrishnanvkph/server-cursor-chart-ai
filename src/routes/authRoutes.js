@@ -1,5 +1,5 @@
 import { Router } from 'express'
-import { signUp, signIn, me, signOut, googleStart, googleCallback, passwordForgot, passwordReset, resendVerification } from '../controllers/authController.js'
+import { signUp, signIn, me, signOut, googleStart, googleCallback, passwordForgot, passwordReset, resendVerification, guestSignIn } from '../controllers/authController.js'
 import { requireAuth, rateLimitMiddleware, requireAuthEnhanced } from '../middleware/authMiddleware.js'
 
 const router = Router()
@@ -10,6 +10,7 @@ router.use(rateLimitMiddleware)
 // Public routes (with rate limiting)
 router.post('/signup', signUp)
 router.post('/signin', signIn)
+router.post('/guest', guestSignIn)
 router.get('/google', googleStart)
 router.get('/google/callback', googleCallback)
 

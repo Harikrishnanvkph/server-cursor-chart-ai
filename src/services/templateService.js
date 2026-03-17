@@ -150,7 +150,16 @@ class TemplateService {
    */
   async deleteTemplate(templateId, userId) {
     try {
-      // First check if template exists and user owns it
+      // First check if user is an admin
+      const { data: profile } = await supabaseAdminClient
+        .from('profiles')
+        .select('is_admin')
+        .eq('id', userId)
+        .single();
+        
+      const isAdmin = profile?.is_admin === true;
+
+      // Check if template exists
       const { data: existingTemplate, error: fetchError } = await supabaseAdminClient
         .from('user_templates')
         .select('id, user_id, name')
@@ -165,7 +174,8 @@ class TemplateService {
         throw new Error('Template not found');
       }
       
-      if (existingTemplate.user_id !== userId) {
+      // Enforce ownership UNLESS user is an admin
+      if (!isAdmin && existingTemplate.user_id !== userId) {
         throw new Error('Unauthorized: You do not own this template');
       }
       
@@ -174,7 +184,8 @@ class TemplateService {
         .from('user_templates')
         .delete()
         .eq('id', templateId)
-        .eq('user_id', userId)
+        // Only restrict to user_id if standard user
+        .match(isAdmin ? {} : { user_id: userId })
         .select();
       
       if (error) {
@@ -213,6 +224,32 @@ class TemplateService {
       return data;
     } catch (error) {
       console.error('Error updating template visibility:', error);
+      throw error;
+    }
+  }
+  /**
+   * Set template official status (global templates)
+   * @param {string} templateId - Template ID
+   * @param {boolean} isOfficial - Whether template should be official
+   * @returns {Promise<Object>} Updated template
+   */
+  async setTemplateOfficial(templateId, isOfficial) {
+    try {
+      const { data, error } = await supabaseAdminClient
+        .from('user_templates')
+        .update({ is_official: isOfficial })
+        .eq('id', templateId)
+        .select()
+        .single();
+      
+      if (error) throw error;
+      if (!data) {
+        throw new Error('Template not found or update failed');
+      }
+      
+      return data;
+    } catch (error) {
+      console.error('Error updating template official status:', error);
       throw error;
     }
   }

@@ -66,10 +66,26 @@ export async function signIn(req, res) {
       return res.status(400).json({ error: error.message })
     }
 
+    let user = data.user
+    
+    // Look up admin status from profiles table
+    try {
+      const { data: profile } = await supabaseAdminClient
+        .from('profiles')
+        .select('is_admin')
+        .eq('id', user.id)
+        .single()
+
+      user = { ...user, is_admin: profile?.is_admin || false }
+    } catch (profileError) {
+      console.warn('Failed to fetch admin status for user:', user.id, profileError?.message)
+      user = { ...user, is_admin: false }
+    }
+
     setSessionCookies(res, data.session)
     res.json({
       message: 'Signed in successfully',
-      user: data.user
+      user: user
     })
   } catch (error) {
     console.error('Sign in error:', error)
@@ -96,6 +112,22 @@ export async function me(req, res) {
         return res.status(401).json({ error: 'Invalid or expired token' })
       }
       user = supabaseUser
+    }
+
+    // Look up admin status from profiles table
+    const userId = user.user_id || user.id
+    try {
+      const { data: profile } = await supabaseAdminClient
+        .from('profiles')
+        .select('is_admin')
+        .eq('id', userId)
+        .single()
+
+      user = { ...user, is_admin: profile?.is_admin || false }
+    } catch (profileError) {
+      // If profile lookup fails, default to non-admin
+      console.warn('Failed to fetch admin status for user:', userId, profileError?.message)
+      user = { ...user, is_admin: false }
     }
 
     res.json({ user })
@@ -305,6 +337,57 @@ export async function resendVerification(req, res) {
     res.json({ message: 'Verification email resent' })
   } catch (error) {
     console.error('Resend verification error:', error)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+}
+
+// Guest sign-in — temporary, for testing only
+const GUEST_EMAIL = 'guest@aichartor.local'
+const GUEST_PASSWORD = 'GuestTester@2026!'
+
+export async function guestSignIn(req, res) {
+  try {
+    // Try signing in with guest credentials first
+    let { data, error } = await supabaseUserClient.auth.signInWithPassword({
+      email: GUEST_EMAIL,
+      password: GUEST_PASSWORD,
+    })
+
+    // If guest user doesn't exist yet, create it
+    if (error && (error.message.includes('Invalid login') || error.message.includes('invalid'))) {
+      const { data: newUser, error: createError } = await supabaseAdminClient.auth.admin.createUser({
+        email: GUEST_EMAIL,
+        password: GUEST_PASSWORD,
+        email_confirm: true,
+        user_metadata: { full_name: 'Guest User' },
+      })
+
+      if (createError) {
+        console.error('Failed to create guest user:', createError.message)
+        return res.status(500).json({ error: 'Failed to create guest account' })
+      }
+
+      // Now sign in with the newly created user
+      const signInResult = await supabaseUserClient.auth.signInWithPassword({
+        email: GUEST_EMAIL,
+        password: GUEST_PASSWORD,
+      })
+      data = signInResult.data
+      error = signInResult.error
+    }
+
+    if (error) {
+      console.error('Guest sign-in error:', error.message)
+      return res.status(400).json({ error: error.message })
+    }
+
+    setSessionCookies(res, data.session)
+    res.json({
+      message: 'Signed in as guest',
+      user: { ...data.user, full_name: 'Guest User' },
+    })
+  } catch (error) {
+    console.error('Guest sign-in error:', error)
     res.status(500).json({ error: 'Internal server error' })
   }
 }
