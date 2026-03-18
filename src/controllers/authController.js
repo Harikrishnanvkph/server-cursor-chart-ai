@@ -11,7 +11,7 @@ function setSessionCookies(res, session) {
   const cookieOptions = {
     httpOnly: true,
     secure: isProd,
-    sameSite: 'lax',
+    sameSite: isProd ? 'none' : 'lax',
     path: '/',
   }
   res.cookie('access_token', session.access_token, { ...cookieOptions, maxAge: session.expires_in * 1000 })
@@ -67,7 +67,7 @@ export async function signIn(req, res) {
     }
 
     let user = data.user
-    
+
     // Look up admin status from profiles table
     try {
       const { data: profile } = await supabaseAdminClient
@@ -173,7 +173,7 @@ export async function googleStart(req, res) {
     res.cookie('oauth_state', state, {
       httpOnly: true,
       secure: isProd,
-      sameSite: 'lax',
+      sameSite: isProd ? 'none' : 'lax',
       path: '/',
       maxAge: 10 * 60 * 1000 // 10 minutes
     })
@@ -227,7 +227,7 @@ export async function googleCallback(req, res) {
     const cookieOptions = {
       httpOnly: true,
       secure: isProd,
-      sameSite: 'lax',
+      sameSite: isProd ? 'none' : 'lax',
       path: '/',
       maxAge: 15 * 24 * 60 * 60 * 1000 // 15 days
     }

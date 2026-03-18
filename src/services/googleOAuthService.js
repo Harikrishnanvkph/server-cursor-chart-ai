@@ -5,7 +5,7 @@ class GoogleOAuthService {
     this.clientId = process.env.GOOGLE_CLIENT_ID;
     this.clientSecret = process.env.GOOGLE_CLIENT_SECRET;
     this.redirectUri = process.env.GOOGLE_REDIRECT_URI || `${process.env.SERVER_PUBLIC_URL}/auth/google/callback`;
-    
+
     if (!this.clientId || !this.clientSecret) {
       console.warn('Google OAuth credentials not configured. Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET in environment variables.');
     }
@@ -31,7 +31,7 @@ class GoogleOAuthService {
       response_type: 'code',
       scope: 'openid email profile',
       access_type: 'offline',
-      prompt : 'select_account'
+      prompt: 'select_account'
       // Removed 'prompt: consent' - users will only see consent screen once
       // prompt : 'select_account'  = Shows account selector only when multiple accounts
       // No prompt parameter = Only shows consent on first authorization
@@ -122,10 +122,10 @@ class GoogleOAuthService {
     try {
       // Exchange code for tokens
       const tokens = await this.exchangeCodeForToken(code);
-      
+
       // Get user information
       const userInfo = await this.getUserInfo(tokens.access_token);
-      
+
       const result = {
         user: {
           id: userInfo.id,
