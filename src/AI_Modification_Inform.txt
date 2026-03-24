@@ -109,7 +109,8 @@ The response must be a single JSON object with the following structure (no markd
 
 Only return the JSON object, with no markdown or additional explanation.
 
-The chartType must be one of the following: "bar", "line", "pie", "doughnut", "scatter", "bubble", "radar", "polarArea", "horizontalBar", "stackedBar", "area".
+The chartType must be one of the following: "bar", "line", "pie", "doughnut", "scatter", "bubble", "radar", "polarArea", "horizontalBar", "stackedBar", "area", "pie3d", "doughnut3d".
+IMPORTANT: If the user asks for a "3D pie chart", use chartType "pie3d". If the user asks for a "3D doughnut chart", use chartType "doughnut3d".
 
 All arrays (e.g., labels, data, backgroundColor, pointImages, etc.) must be of the same length.
 

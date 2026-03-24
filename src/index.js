@@ -65,7 +65,8 @@ const allowedOrigins = [
   'http://localhost:3000',
   'http://localhost:3001',
   'http://localhost:3002',
-  'http://localhost:3003'
+  'http://localhost:3003',
+  'http://192.168.1.3:3000' //this is temporary for mobile testing only
 ];
 
 if (process.env.FRONTEND_URL) {
