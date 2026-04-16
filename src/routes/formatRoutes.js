@@ -23,6 +23,18 @@ router.get('/formats/official', async (req, res) => {
 // AUTHENTICATED FORMAT ROUTES
 // =============================================
 
+// Get only the user's own custom formats (non-official)
+router.get('/formats/mine', requireAuth, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const formats = await formatService.getUserFormats(userId);
+    res.json(formats);
+  } catch (error) {
+    console.error('Error fetching user formats:', error);
+    res.status(500).json({ error: 'Failed to fetch user formats' });
+  }
+});
+
 // Get all formats (official + user's own - requires auth)
 router.get('/formats', requireAuth, async (req, res) => {
   try {

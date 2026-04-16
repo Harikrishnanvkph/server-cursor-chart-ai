@@ -58,6 +58,28 @@ class FormatService {
   }
 
   /**
+   * Get only the user's own custom formats (non-official)
+   * @param {string} userId - User ID
+   * @returns {Promise<Array>} Array of user's format blueprints
+   */
+  async getUserFormats(userId) {
+    try {
+      const { data, error } = await supabaseAdminClient
+        .from('format_blueprints')
+        .select('*')
+        .eq('user_id', userId)
+        .eq('is_official', false)
+        .order('created_at', { ascending: false });
+
+      if (error) throw error;
+      return data || [];
+    } catch (error) {
+      console.error('Error fetching user formats:', error);
+      throw error;
+    }
+  }
+
+  /**
    * Get a specific format by ID
    * @param {string} formatId - Format blueprint ID
    * @param {string|null} userId - User ID for authorization
