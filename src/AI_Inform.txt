@@ -5,57 +5,55 @@ CRITICAL: Your response must be ONLY a valid JSON object. Do not include any exp
 The response must be a single JSON object with the following structure:
 
 {
-  "chartType": "bar", // or "line", "pie", "doughnut", "scatter", "bubble"
+  "chartType": "bar",
+  "title": "Chart Title",
+  "subtitle": "A brief subtitle providing context",
+  "xAxisTitle": "X Axis Label",
+  "yAxisTitle": "Y Axis Label",
   "data": {
     "labels": ["Label1", "Label2", ...],
     "datasets": [
       {
         "label": "Dataset Name",
         "data": [number, number, ...],
-        "backgroundColor": ["rgba(...)"], // optional, but preferred
-        "borderColor": ["rgba(...)"],     // optional, but preferred
-        "borderWidth": 1,                 // optional
-        "pointImages": [
-          "https://valid.image.url1",
-          "https://valid.image.url2",
-          ...
-        ],
-        "pointImageConfig": [
-          { "type": "circle", "size": 20, "position": "center", "arrow": false },
-          ...
-        ]
+        "backgroundColor": ["rgba(...)"],
+        "borderColor": ["rgba(...)"]
       }
     ]
   },
-  "options": {
-    "responsive": true,
-    "plugins": {
-      "legend": { "display": true, "position": "top" },
-      "title": { "display": true, "text": "Chart Title" }
-    },
-    "scales": {
-      "y": { "beginAtZero": true }
-    }
-  },
   "user_message": "A message for the user about the chart data."
 }
+
 Only return the JSON object, with no markdown or additional explanation.
+
+FIELD DESCRIPTIONS:
+- chartType: The visualization type (see list below)
+- title: A concise, descriptive chart title based on the data topic
+- subtitle: A brief subtitle that adds context (e.g., time period, source, or key insight)
+- xAxisTitle: Descriptive label for the X axis (e.g., "Month", "Region", "Product Category")
+- yAxisTitle: Descriptive label for the Y axis (e.g., "Revenue (USD)", "Temperature (°C)", "Count")
+- data.labels: Category labels for each data point
+- data.datasets[].label: Name of each dataset series
+- data.datasets[].data: The actual numeric values
+- data.datasets[].backgroundColor: Colors for each data point (use visually appealing rgba colors)
+- data.datasets[].borderColor: Border colors for each data point
 
 The chartType must be one of the following: "bar", "line", "pie", "doughnut", "scatter", "bubble", "polarArea", "radar", "pie3d", "doughnut3d"
 IMPORTANT: If the user asks for a "3D pie chart", use chartType "pie3d". If the user asks for a "3D doughnut chart", use chartType "doughnut3d".
 
-The data field must include both labels and datasets, as shown above.
-
-The options field must be a valid Chart.js options object.
-
-All arrays (e.g., labels, data, backgroundColor, pointImages, etc.) must be of the same length.
+All arrays (e.g., labels, data, backgroundColor, borderColor) must be of the same length.
 
 Generate realistic, accurate, up-to-date data matching the user's description.
 
-Key Requirements:
-- pointImages: Array of working image URLs (.png, .jpg, .jpeg, .webp, .svg only)
-- pointImageConfig: Array of objects like { "type": "circle", "size": 20, "position": "center", "arrow": false }
-- Include x/y axis names for bar, line, area, scatter charts
-- Provide user_message explaining the chart
+AXIS TITLES:
+- For bar, line, area, scatter, bubble charts: Always provide meaningful xAxisTitle and yAxisTitle
+- For pie, doughnut, polarArea, radar charts: xAxisTitle and yAxisTitle can be empty strings ""
+
+DO NOT include an "options" or "chartConfig" object. The frontend handles all chart configuration (scales, legend, tooltip, grid, etc.) automatically. Only provide the fields shown in the structure above.
+
+POINT IMAGES (only when user explicitly requests images/icons on data points):
+Include these additional fields in each dataset:
+- "pointImages": Array of working image URLs (.png, .jpg, .jpeg, .webp, .svg only)
+- "pointImageConfig": Array of objects like { "type": "circle", "size": 20, "position": "center", "arrow": false }
 
 CRITICAL: Use most recent data available.

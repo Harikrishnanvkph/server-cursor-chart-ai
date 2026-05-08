@@ -158,9 +158,9 @@ export class ChartProcessor {
   buildSystemPrompt(aiContext, templateStructure = null) {
     let prompt = `${aiContext}
 
-You are an expert chart data generator. Always respond with valid JSON that follows Chart.js format. 
-Focus on creating accurate, well-structured data that can be immediately used to render charts.
-Include proper labels, datasets, colors, and configuration options.`;
+You are an expert chart data generator. Always respond with valid JSON.
+Focus on creating accurate, well-structured data with meaningful titles and axis labels.
+Do NOT include "options" or "chartConfig" — the frontend handles all chart configuration automatically.`;
 
     if (templateStructure) {
       // Check if any sections require HTML
@@ -759,7 +759,8 @@ USER'S CURRENT REQUEST: ${inputText}`;
 
   /**
    * F1: Create a slim version of chart data for the modification prompt.
-   * Strips colors, styling, pointImages — keeps only labels, data, and dataset names.
+   * Includes colors so AI can preserve them when not asked to change them.
+   * Strips other styling (borderWidth, tension, fill, etc.) to save tokens.
    */
   slimChartData(chartData) {
     if (!chartData) return {};
@@ -767,6 +768,9 @@ USER'S CURRENT REQUEST: ${inputText}`;
       labels: chartData.labels,
       datasets: (chartData.datasets || []).map(ds => {
         const slim = { label: ds.label, data: ds.data };
+        // Include colors so AI preserves them exactly when not asked to change
+        if (ds.backgroundColor) slim.backgroundColor = ds.backgroundColor;
+        if (ds.borderColor) slim.borderColor = ds.borderColor;
         if (ds.mode) slim.mode = ds.mode;
         if (ds.stack) slim.stack = ds.stack;
         // Preserve pointImages so LLM doesn't drop them during modifications

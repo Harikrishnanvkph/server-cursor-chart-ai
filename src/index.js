@@ -232,18 +232,28 @@ app.post('/api/process-chart-enhanced', requireAuth, aiLimiter, async (req, res)
       ? await svc.modify(input, currentChartState, messageHistory || [], model, templateStructure)
       : await svc.generate(input, model, templateStructure);
 
+    // Determine if this is a creation or modification
+    const isModification = !!(currentChartState && conversationId);
+
     // Format response consistently
     const result = {
       chartType: aiResponse.chartType,
       chartData: aiResponse.chartData || aiResponse.data,
-      chartConfig: aiResponse.chartConfig || aiResponse.options,
+      // For creation: chartConfig is null — frontend builds from getDefaultConfigForType()
+      // For modification: AI returns full chartConfig with styling changes
+      chartConfig: isModification ? (aiResponse.chartConfig || aiResponse.options) : null,
       user_message: aiResponse.user_message,
-      action: aiResponse.action || 'create',
+      action: aiResponse.action || (isModification ? 'modify' : 'create'),
       changes: aiResponse.changes || [],
       service: service,
       _metadata: aiResponse._metadata,
       // Include template content if generated
-      templateContent: aiResponse.templateContent || null
+      templateContent: aiResponse.templateContent || null,
+      // Pass through AI-generated text metadata (creation only — frontend uses these to populate config)
+      title: aiResponse.title || null,
+      subtitle: aiResponse.subtitle || null,
+      xAxisTitle: aiResponse.xAxisTitle || null,
+      yAxisTitle: aiResponse.yAxisTitle || null,
     };
 
     res.json(result);
