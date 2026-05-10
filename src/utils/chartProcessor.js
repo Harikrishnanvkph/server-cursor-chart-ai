@@ -782,25 +782,66 @@ USER'S CURRENT REQUEST: ${inputText}`;
   }
 
   /**
-   * F1: Create a slim version of chart config — only title, legend position, and scale info.
+   * F1: Create a slim version of chart config — preserves Chart.js nesting structure
+   * so the AI returns changes in the correct format for deep-merge.
    */
   slimChartConfig(chartConfig) {
     if (!chartConfig) return {};
     const slim = {};
-    if (chartConfig.plugins?.title?.text) {
-      slim.title = chartConfig.plugins.title.text;
+
+    // Preserve plugins structure so AI can target plugins.title.display, etc.
+    if (chartConfig.plugins) {
+      slim.plugins = {};
+      if (chartConfig.plugins.title) {
+        slim.plugins.title = {
+          display: chartConfig.plugins.title.display,
+          text: chartConfig.plugins.title.text || ''
+        };
+      }
+      if (chartConfig.plugins.subtitle) {
+        slim.plugins.subtitle = {
+          display: chartConfig.plugins.subtitle.display,
+          text: chartConfig.plugins.subtitle.text || ''
+        };
+      }
+      if (chartConfig.plugins.legend) {
+        slim.plugins.legend = {
+          display: chartConfig.plugins.legend.display,
+          position: chartConfig.plugins.legend.position
+        };
+      }
+      if (chartConfig.plugins.datalabels) {
+        slim.plugins.datalabels = {
+          display: chartConfig.plugins.datalabels.display
+        };
+      }
+      if (chartConfig.plugins.customLabelsConfig) {
+        slim.plugins.customLabelsConfig = {
+          display: chartConfig.plugins.customLabelsConfig.display
+        };
+      }
     }
-    if (chartConfig.plugins?.legend?.position) {
-      slim.legendPosition = chartConfig.plugins.legend.position;
+
+    // Preserve visualSettings so AI can sync with frontend toggles
+    if (chartConfig.visualSettings) {
+      slim.visualSettings = { ...chartConfig.visualSettings };
     }
+
+    // Preserve scales structure
     if (chartConfig.scales) {
       slim.scales = {};
       for (const [axis, cfg] of Object.entries(chartConfig.scales)) {
         slim.scales[axis] = {};
-        if (cfg.title?.text) slim.scales[axis].title = cfg.title.text;
+        if (cfg.title) {
+          slim.scales[axis].title = {
+            display: cfg.title.display,
+            text: cfg.title.text || ''
+          };
+        }
         if (cfg.beginAtZero !== undefined) slim.scales[axis].beginAtZero = cfg.beginAtZero;
       }
     }
+
     return slim;
   }
 }

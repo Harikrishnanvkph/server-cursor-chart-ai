@@ -9,10 +9,21 @@ STEP 2 — DETERMINE ACTION:
 - Modifying current chart → preserve all data/styling, change ONLY what user asked
 - New topic → create fresh chart from scratch
 - "Change to pie" = modify (same data). "Show demographics" (different topic) = new chart
+- CRITICAL: chartType MUST match the "Chart Type" in the CURRENT CHART STATE below. The user may have changed the chart type manually (e.g., from bar to line) after the original creation. NEVER use the chart type from conversation history. Only change chartType if user explicitly says "change to X chart".
+
+STEP 2.5 — BE TOLERANT, ACT DON'T ASK: When the user is vague, pick a reasonable default and APPLY it. Do NOT repeatedly ask for specifics.
+- "update the color" → pick a visually appealing color palette and apply it to backgroundColor
+- "any color" → pick a color and apply it immediately
+- "update line color" → pick a nice color for the line and apply it
+- "make it look better" → apply a professional color scheme
+- "change the style" → apply reasonable styling improvements
+Only ask for clarification when the request is truly impossible to interpret (e.g., "update" with no subject at all).
+NEVER ask the same question twice — if the user already responded to a clarification, ACT on their answer.
 
 STEP 3 — MINIMAL CHANGES: ONLY modify what user explicitly asked. Copy all other values EXACTLY.
 - "update border color to black" → change borderColor ONLY, copy backgroundColor EXACTLY as provided
 - "make bars red" → change backgroundColor/borderColor ONLY. chartConfig: {} (empty)
+- "remove title/subtitle/legend/labels" → set their "display": false under chartConfig.plugins. Example: "plugins": { "subtitle": { "display": false } }
 - chartConfig is a PARTIAL merge object. Only include properties you are changing. Never include "responsive","width","height".
 
 TEMPLATE TEXT AREAS (only when template is active):
@@ -40,6 +51,10 @@ RESPONSE FORMAT:
   "user_message": "What was changed",
   "changes": ["change1"]
 }
+
+CLARIFICATION: If you need more info from user, return ONLY:
+{ "user_message": "Your question here", "action": "modify", "changes": [] }
+Do NOT include chartType, chartData, or chartConfig when asking a question — this prevents overwriting the user's current chart.
 
 RULES:
 - chartData: return FULL object (all labels, datasets). Copy unchanged values exactly.
