@@ -1,5 +1,5 @@
 import express from 'express';
-import { requireAuth } from '../middleware/authMiddleware.js';
+import { requireAuth, requireAdmin } from '../middleware/authMiddleware.js';
 import templateService from '../services/templateService.js';
 
 const router = express.Router();
@@ -144,7 +144,7 @@ router.patch('/templates/:id/visibility', async (req, res) => {
 });
 
 // Set template official status (Admin only)
-router.patch('/templates/:id/official', async (req, res) => {
+router.patch('/templates/:id/official', requireAdmin, async (req, res) => {
   try {
     // Note: In authController.js `me()` we attach is_admin to the frontend, 
     // but the JWT itself may not have it. Let's verify they are admin:

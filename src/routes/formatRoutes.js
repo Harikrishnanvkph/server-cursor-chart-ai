@@ -1,5 +1,5 @@
 import express from 'express';
-import { requireAuth } from '../middleware/authMiddleware.js';
+import { requireAuth, requireAdmin } from '../middleware/authMiddleware.js';
 import formatService from '../services/formatService.js';
 
 const router = express.Router();
@@ -127,7 +127,7 @@ router.delete('/formats/:id', requireAuth, async (req, res) => {
 });
 
 // Toggle official status (admin only)
-router.patch('/formats/:id/official', requireAuth, async (req, res) => {
+router.patch('/formats/:id/official', requireAuth, requireAdmin, async (req, res) => {
   try {
     const { id } = req.params;
     const { isOfficial } = req.body;
@@ -145,7 +145,7 @@ router.patch('/formats/:id/official', requireAuth, async (req, res) => {
 });
 
 // Bulk create formats (for seeding - admin only)
-router.post('/formats/bulk', requireAuth, async (req, res) => {
+router.post('/formats/bulk', requireAuth, requireAdmin, async (req, res) => {
   try {
     const userId = req.user?.id;
     if (!userId) {

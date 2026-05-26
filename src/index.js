@@ -13,7 +13,7 @@ import openrouterRoutes from './routes/openrouterRoutes.js';
 import deepseekRoutes from './routes/deepseekRoutes.js';
 import geminiRoutes from './routes/geminiRoutes.js';
 import imageProxyRoutes from './routes/imageProxyRoutes.js';
-import { requireAuth, rateLimitMiddleware, getSecurityStats, blockIP, unblockIP } from './middleware/authMiddleware.js'
+import { requireAuth, requireAdmin, rateLimitMiddleware, getSecurityStats, blockIP, unblockIP } from './middleware/authMiddleware.js'
 
 // Check required environment variables
 const requiredEnvVars = [
@@ -143,22 +143,12 @@ app.use('/api/data', requireAuth, templateRoutes);
 app.use('/api/proxy', imageProxyRoutes);
 
 // Security monitoring endpoints (admin only)
-app.get('/admin/security/stats', requireAuth, (req, res) => {
-  // Check if user is admin (you can implement your own admin check)
-  if (req.user?.email !== process.env.ADMIN_EMAIL) {
-    return res.status(403).json({ error: 'Admin access required' });
-  }
-
+app.get('/admin/security/stats', requireAuth, requireAdmin, (req, res) => {
   const stats = getSecurityStats();
   res.json(stats);
 });
 
-app.post('/admin/security/block-ip', requireAuth, (req, res) => {
-  // Check if user is admin
-  if (req.user?.email !== process.env.ADMIN_EMAIL) {
-    return res.status(403).json({ error: 'Admin access required' });
-  }
-
+app.post('/admin/security/block-ip', requireAuth, requireAdmin, (req, res) => {
   const { ipAddress, reason } = req.body;
   if (!ipAddress) {
     return res.status(400).json({ error: 'IP address is required' });
@@ -168,12 +158,7 @@ app.post('/admin/security/block-ip', requireAuth, (req, res) => {
   res.json({ success: true, message: `IP ${ipAddress} blocked` });
 });
 
-app.post('/admin/security/unblock-ip', requireAuth, (req, res) => {
-  // Check if user is admin
-  if (req.user?.email !== process.env.ADMIN_EMAIL) {
-    return res.status(403).json({ error: 'Admin access required' });
-  }
-
+app.post('/admin/security/unblock-ip', requireAuth, requireAdmin, (req, res) => {
   const { ipAddress } = req.body;
   if (!ipAddress) {
     return res.status(400).json({ error: 'IP address is required' });
@@ -278,10 +263,7 @@ app.get('/health', (req, res) => {
 });
 
 // Security status endpoint (protected — requires admin)
-app.get('/security/status', requireAuth, (req, res) => {
-  if (req.user?.email !== process.env.ADMIN_EMAIL) {
-    return res.status(403).json({ error: 'Admin access required' });
-  }
+app.get('/security/status', requireAuth, requireAdmin, (req, res) => {
   const stats = getSecurityStats();
   res.json({
     status: 'secure',

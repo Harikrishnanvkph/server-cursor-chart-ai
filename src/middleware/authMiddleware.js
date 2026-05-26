@@ -7,7 +7,7 @@ async function ensureUserProfile(userId, userEmail = null, userName = null, user
     // Check if profile exists
     const { data: existingProfile, error: profileCheckError } = await supabaseAdminClient
       .from('profiles')
-      .select('id')
+      .select('id, is_admin')
       .eq('id', userId)
       .single();
 
@@ -43,7 +43,7 @@ async function ensureUserProfile(userId, userEmail = null, userName = null, user
     const { data: newProfile, error: profileError } = await supabaseAdminClient
       .from('profiles')
       .insert([profileData])
-      .select()
+      .select('id, is_admin')
       .single();
 
     if (profileError) {
@@ -225,10 +225,15 @@ export async function requireAuth(req, res, next) {
         const user = await response.json();
 
         // Ensure user has a profile
-        await ensureUserProfile(user.id, user.email, user.user_metadata?.name, user.user_metadata?.avatar_url);
+        const profile = await ensureUserProfile(user.id, user.email, user.user_metadata?.name, user.user_metadata?.avatar_url);
 
-        setCachedUser(accessToken, user);
-        req.user = user;
+        const enrichedUser = {
+          ...user,
+          is_admin: profile?.is_admin || false
+        };
+
+        setCachedUser(accessToken, enrichedUser);
+        req.user = enrichedUser;
         return next();
       }
     } catch (supabaseError) {
@@ -250,7 +255,7 @@ export async function requireAuth(req, res, next) {
         const userId = oauthUser.user_id || oauthUser.id;
 
         // Ensure user has a profile (OAuth users have email, full_name, avatar_url directly)
-        await ensureUserProfile(userId, oauthUser.email, oauthUser.full_name, oauthUser.avatar_url);
+        const profile = await ensureUserProfile(userId, oauthUser.email, oauthUser.full_name, oauthUser.avatar_url);
 
         // Create a normalized user object with consistent ID field
         const normalizedUser = {
@@ -258,7 +263,8 @@ export async function requireAuth(req, res, next) {
           email: oauthUser.email,
           full_name: oauthUser.full_name,
           avatar_url: oauthUser.avatar_url,
-          provider: oauthUser.provider
+          provider: oauthUser.provider,
+          is_admin: profile?.is_admin || false
         };
 
         setCachedUser(accessToken, normalizedUser);
@@ -329,8 +335,10 @@ export async function requireAdmin(req, res, next) {
     }
 
     // Check if user has admin privileges
-    // This would depend on your user role system
-    const isAdmin = req.user.role === 'admin' || req.user.is_admin === true;
+    // Support database is_admin property, JWT role metadata, or environment fallback email
+    const isAdmin = req.user.is_admin === true || 
+                    req.user.role === 'admin' || 
+                    req.user.email === process.env.ADMIN_EMAIL;
 
     if (!isAdmin) {
       return res.status(403).json({ error: 'Admin privileges required' });
