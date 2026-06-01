@@ -1,4 +1,12 @@
 import fs from 'node:fs/promises';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+// Resolve paths relative to THIS file, not the working directory.
+// This fixes "ENOENT" errors on Vercel/serverless where cwd differs from local dev.
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const SRC_DIR = path.resolve(__dirname, '..');
 
 /**
  * Generic Chart Processing Engine
@@ -133,7 +141,7 @@ export class ChartProcessor {
    */
   async getAIContext() {
     if (!this.aiContextCache) {
-      this.aiContextCache = await fs.readFile('./src/AI_Inform.txt', 'utf-8');
+      this.aiContextCache = await fs.readFile(path.join(SRC_DIR, 'AI_Inform.txt'), 'utf-8');
     }
     return this.aiContextCache;
   }
@@ -144,7 +152,7 @@ export class ChartProcessor {
    */
   async getModificationContext() {
     if (!this.modificationContextCache) {
-      this.modificationContextCache = await fs.readFile('./src/AI_Modification_Inform.txt', 'utf-8');
+      this.modificationContextCache = await fs.readFile(path.join(SRC_DIR, 'AI_Modification_Inform.txt'), 'utf-8');
     }
     return this.modificationContextCache;
   }
