@@ -12,6 +12,8 @@ const router = express.Router();
 router.get('/chart-style-presets/official', async (req, res) => {
   try {
     const presets = await chartStylePresetService.getOfficialPresets();
+    // Cache on Vercel Edge CDN for 1 hour, serve stale and refresh in background up to 24 hours
+    res.setHeader('Cache-Control', 'public, s-maxage=3600, stale-while-revalidate=86400');
     res.json(presets);
   } catch (error) {
     console.error('Error fetching official chart style presets:', error);

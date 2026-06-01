@@ -12,6 +12,8 @@ const router = express.Router();
 router.get('/formats/official', async (req, res) => {
   try {
     const formats = await formatService.getOfficialFormats();
+    // Cache on Vercel Edge CDN for 1 hour, serve stale and refresh in background up to 24 hours
+    res.setHeader('Cache-Control', 'public, s-maxage=3600, stale-while-revalidate=86400');
     res.json(formats);
   } catch (error) {
     console.error('Error fetching official formats:', error);
