@@ -240,7 +240,28 @@ class FormatService {
         throw new Error('Format not found or access denied');
       }
 
-      return { success: true, deleted: data[0] };
+      const deletedFormat = data[0];
+
+      // Clean up associated images from Supabase Storage
+      try {
+        const pathsToDelete = Array.from(extractStoragePaths(deletedFormat));
+        if (pathsToDelete.length > 0) {
+          console.log(`Deleting associated storage assets for format ${formatId}:`, pathsToDelete);
+          const { error: storageError } = await supabaseAdminClient.storage
+            .from('format-assets')
+            .remove(pathsToDelete);
+          
+          if (storageError) {
+            console.error(`Failed to delete assets from storage for format ${formatId}:`, storageError);
+          } else {
+            console.log(`Successfully deleted ${pathsToDelete.length} assets from storage for format ${formatId}`);
+          }
+        }
+      } catch (storageCleanupError) {
+        console.error(`Error during storage cleanup for format ${formatId}:`, storageCleanupError);
+      }
+
+      return { success: true, deleted: deletedFormat };
     } catch (error) {
       console.error('Error deleting format:', error);
       throw error;
@@ -309,6 +330,44 @@ class FormatService {
       throw error;
     }
   }
+}
+
+/**
+ * Recursively extracts Supabase storage file paths from any object or string
+ * @param {any} obj - Object, array, or string to scan
+ * @param {Set<string>} paths - Set to collect paths in
+ * @returns {Set<string>} Set of extracted paths
+ */
+function extractStoragePaths(obj, paths = new Set()) {
+  if (!obj) return paths;
+
+  if (typeof obj === 'string') {
+    const marker = '/storage/v1/object/public/format-assets/';
+    const index = obj.indexOf(marker);
+    if (index !== -1) {
+      let path = obj.substring(index + marker.length);
+      // Strip query parameters or hashes if present
+      const queryIndex = path.indexOf('?');
+      if (queryIndex !== -1) path = path.substring(0, queryIndex);
+      const hashIndex = path.indexOf('#');
+      if (hashIndex !== -1) path = path.substring(0, hashIndex);
+      
+      if (path) {
+        paths.add(path);
+      }
+    }
+  } else if (Array.isArray(obj)) {
+    for (const item of obj) {
+      extractStoragePaths(item, paths);
+    }
+  } else if (typeof obj === 'object') {
+    for (const key in obj) {
+      if (Object.prototype.hasOwnProperty.call(obj, key)) {
+        extractStoragePaths(obj[key], paths);
+      }
+    }
+  }
+  return paths;
 }
 
 export default new FormatService();

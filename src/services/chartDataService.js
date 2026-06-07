@@ -82,7 +82,7 @@ class ChartDataService {
           // Use Postgres JSON path to extract datasets[0].mode server-side (~10 bytes vs 5KB-2MB per row)
           const { data: snapshotData } = await supabaseAdminClient
             .from('chart_snapshots')
-            .select('conversation_id, is_template_mode, chart_type, chart_data->datasets->0->mode')
+            .select('conversation_id, is_template_mode, chart_type, mode:chart_data->datasets->0->mode, width_config:chart_config->width, height_config:chart_config->height, width_temp_dim:template_structure->dimensions->width, height_temp_dim:template_structure->dimensions->height, width_temp:template_structure->width, height_temp:template_structure->height')
             .in('conversation_id', conversationIds)
             .eq('is_current', true);
 
@@ -92,14 +92,19 @@ class ChartDataService {
             snapshotMap.set(s.conversation_id, s);
           });
 
-          // Transform to include mode info at top level
+          // Transform to include mode info and dimensions at top level
           return directData.map(conv => {
             const snapshot = snapshotMap.get(conv.id);
+            const rawWidth = snapshot?.width_temp_dim || snapshot?.width_temp || snapshot?.width_config || null;
+            const rawHeight = snapshot?.height_temp_dim || snapshot?.height_temp || snapshot?.height_config || null;
+            
             return {
               ...conv,
               is_template_mode: snapshot?.is_template_mode || false,
               chart_mode: snapshot?.mode || 'single',
-              current_chart_type: snapshot?.chart_type || null
+              current_chart_type: snapshot?.chart_type || null,
+              width: rawWidth ? String(rawWidth) : null,
+              height: rawHeight ? String(rawHeight) : null
             };
           });
         }

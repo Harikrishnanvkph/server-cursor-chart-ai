@@ -26,13 +26,13 @@ export class ChartProcessor {
    * @param {Object} templateStructure - Template structure metadata for generating template text content
    * @returns {Promise<Object>} - Generated chart configuration
    */
-  async generateChart(inputText, model, templateStructure = null) {
+  async generateChart(inputText, model, templateStructure = null, formatStructure = null) {
     try {
       // Get AI context (with caching)
       const aiContext = await this.getAIContext();
 
       // Construct prompts
-      const systemPrompt = this.buildSystemPrompt(aiContext, templateStructure);
+      const systemPrompt = this.buildSystemPrompt(aiContext, templateStructure, formatStructure);
       const userPrompt = this.buildUserPrompt(inputText, templateStructure);
 
       // Make service-specific API call
@@ -83,7 +83,7 @@ export class ChartProcessor {
    * @param {Object} templateStructure - Template structure metadata for generating template text content
    * @returns {Promise<Object>} - Modified chart configuration
    */
-  async modifyChart(inputText, currentChartState, messageHistory = [], model, templateStructure = null) {
+  async modifyChart(inputText, currentChartState, messageHistory = [], model, templateStructure = null, formatStructure = null) {
     try {
       // Get modification context (with caching)
       const modificationContext = await this.getModificationContext();
@@ -94,7 +94,8 @@ export class ChartProcessor {
         currentChartState,
         messageHistory,
         inputText,
-        templateStructure
+        templateStructure,
+        formatStructure
       );
 
       // Make service-specific API call with higher tokens for modifications
@@ -163,7 +164,7 @@ export class ChartProcessor {
    * @param {Object} templateStructure - Template structure metadata
    * @returns {string} - System prompt
    */
-  buildSystemPrompt(aiContext, templateStructure = null) {
+  buildSystemPrompt(aiContext, templateStructure = null, formatStructure = null) {
     let prompt = `${aiContext}
 
 You are an expert chart data generator. Always respond with valid JSON.
@@ -313,7 +314,7 @@ Generate contextually relevant content for each section based on the chart topic
    * @param {Object} templateStructure - Template structure metadata
    * @returns {string} - Modification prompt
    */
-  buildModificationPrompt(modificationContext, currentChartState, messageHistory, inputText, templateStructure = null) {
+  buildModificationPrompt(modificationContext, currentChartState, messageHistory, inputText, templateStructure = null, formatStructure = null) {
     // Increased from 2→5 messages and 150→300 chars for better AI context
     const recentHistory = messageHistory.slice(-5).map(msg => {
       // Truncate long messages to first 300 characters
@@ -348,6 +349,8 @@ USER'S CURRENT REQUEST: ${inputText}`;
 
     if (templateStructure) {
       prompt += ',\n  "templateContent": { /* updated text/HTML for template areas */ }';
+    } else if (formatStructure) {
+      prompt += ',\n  "formatContent": { /* updated text for format zones */ }';
     }
 
     prompt += `\n
@@ -374,8 +377,19 @@ USER'S CURRENT REQUEST: ${inputText}`;
       }
 
       prompt += `\n\nREMEMBER: "main text area" = templateContent.main, NOT pointImages!`;
+    } else if (formatStructure) {
+      prompt += `\n\n === FORMAT IS ACTIVE === `;
+      prompt += `\nAvailable format content zones you can modify inside the "formatContent" object:`;
+      formatStructure.zones.forEach(z => {
+        if (z.type !== 'chart') {
+          prompt += `\n - "${z.role || z.type}" (max ${z.maxCharacters} chars)`;
+          if (z.adminMessage) prompt += ` - admin instruction: "${z.adminMessage}"`;
+          if (z.userNote) prompt += ` - user note: "${z.userNote}"`;
+        }
+      });
+      prompt += `\n\nEnsure you update formatContent zones to align with the changes.`;
     } else {
-      prompt += `\n\nNOTE: No template is active.Text areas are not available in chart - only mode.`;
+      prompt += `\n\nNOTE: No template or format is active. Text areas/zones are not available in chart-only mode.`;
     }
 
     return prompt;

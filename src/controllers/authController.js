@@ -4,6 +4,17 @@ import googleOAuthService from '../services/googleOAuthService.js'
 import secureSessionStore from '../services/sessionStore.js'
 import crypto from 'crypto'
 
+function decodeIdToken(idToken) {
+  const parts = idToken.split('.')
+  if (parts.length !== 3) {
+    throw new Error('Invalid JWT format')
+  }
+  const payloadBase64 = parts[1]
+  const base64 = payloadBase64.replace(/-/g, '+').replace(/_/g, '/')
+  const jsonString = Buffer.from(base64, 'base64').toString('utf8')
+  return JSON.parse(jsonString)
+}
+
 const isProd = process.env.NODE_ENV === 'production'
 
 function setSessionCookies(res, session) {
@@ -203,7 +214,7 @@ export async function googleCallback(req, res) {
         reason: 'OAuth state mismatch',
         provider: 'google'
       })
-      const errorUrl = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/auth/error?message=${encodeURIComponent('Authentication failed: invalid state')}`
+      const errorUrl = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/signin?error=${encodeURIComponent('Authentication failed: invalid state')}`
       return res.redirect(errorUrl)
     }
 
@@ -213,8 +224,18 @@ export async function googleCallback(req, res) {
     // Exchange code for tokens
     const tokens = await googleOAuthService.exchangeCodeForToken(code)
 
-    // Get user info from Google
-    const userInfo = await googleOAuthService.getUserInfo(tokens.access_token)
+    // Get user info from Google (decoded locally from id_token to avoid an extra 200ms network fetch)
+    let userInfo
+    if (tokens.id_token) {
+      try {
+        userInfo = decodeIdToken(tokens.id_token)
+      } catch (err) {
+        console.warn('Failed to decode id_token locally, falling back to API fetch:', err)
+        userInfo = await googleOAuthService.getUserInfo(tokens.access_token)
+      }
+    } else {
+      userInfo = await googleOAuthService.getUserInfo(tokens.access_token)
+    }
 
     // Create or get user session
     const session = await secureSessionStore.createSession(
@@ -247,7 +268,7 @@ export async function googleCallback(req, res) {
       error: error.message
     })
 
-    const errorUrl = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/auth/error?message=${encodeURIComponent('OAuth authentication failed')}`
+    const errorUrl = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/signin?error=${encodeURIComponent('OAuth authentication failed')}`
     res.redirect(errorUrl)
   }
 }

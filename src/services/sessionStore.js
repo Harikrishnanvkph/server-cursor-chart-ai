@@ -88,25 +88,33 @@ class SecureSessionStore {
           throw new Error('Failed to create user profile');
         }
       } else {
-        // Update existing user profile with latest data from OAuth provider
-        const { data: updatedUser, error: updateError } = await supabaseAdminClient
-          .from('profiles')
-          .update({
-            full_name: userData.name || userData.full_name,
-            avatar_url: userData.picture,
-            provider: provider,
-            provider_id: userData.sub || userData.id,
-            updated_at: new Date().toISOString()
-          })
-          .eq('id', user.id)
-          .select()
-          .single();
+        // Only update profile if the OAuth provider details actually changed (saves a database write query)
+        const needsUpdate = 
+          user.full_name !== (userData.name || userData.full_name) ||
+          user.avatar_url !== userData.picture ||
+          user.provider !== provider ||
+          user.provider_id !== String(userData.sub || userData.id);
 
-        if (updateError) {
-          console.error('Error updating user profile:', updateError);
-          // Don't throw error, continue with existing user data
-        } else {
-          user = updatedUser;
+        if (needsUpdate) {
+          const { data: updatedUser, error: updateError } = await supabaseAdminClient
+            .from('profiles')
+            .update({
+              full_name: userData.name || userData.full_name,
+              avatar_url: userData.picture,
+              provider: provider,
+              provider_id: userData.sub || userData.id,
+              updated_at: new Date().toISOString()
+            })
+            .eq('id', user.id)
+            .select()
+            .single();
+
+          if (updateError) {
+            console.error('Error updating user profile:', updateError);
+            // Don't throw error, continue with existing user data
+          } else {
+            user = updatedUser;
+          }
         }
       }
 

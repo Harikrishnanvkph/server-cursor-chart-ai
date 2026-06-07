@@ -37,7 +37,6 @@ console.log('✅ All required environment variables are configured');
 const app = express();
 const port = process.env.PORT || 5000;
 
-// Enhanced security middleware
 app.use(helmet({
   contentSecurityPolicy: {
     directives: {
@@ -49,6 +48,7 @@ app.use(helmet({
       connectSrc: ["'self'", "https://api.openai.com", "https://api.perplexity.ai"],
     },
   },
+  crossOriginResourcePolicy: { policy: "cross-origin" },
   hsts: {
     maxAge: 31536000,
     includeSubDomains: true,
@@ -184,7 +184,8 @@ app.post('/api/process-chart-enhanced', requireAuth, aiLimiter, async (req, res)
     conversationId,
     currentChartState,
     messageHistory,
-    templateStructure // NEW: Template structure metadata for generating template text content
+    templateStructure, // NEW: Template structure metadata for generating template text content
+    formatStructure
   } = req.body;
 
   try {
@@ -214,8 +215,8 @@ app.post('/api/process-chart-enhanced', requireAuth, aiLimiter, async (req, res)
     console.log(`🤖 Processing chart request using: ${service.toUpperCase()} (Model: ${model || 'default'})`);
 
     const aiResponse = (currentChartState && conversationId)
-      ? await svc.modify(input, currentChartState, messageHistory || [], model, templateStructure)
-      : await svc.generate(input, model, templateStructure);
+      ? await svc.modify(input, currentChartState, messageHistory || [], model, templateStructure, formatStructure)
+      : await svc.generate(input, model, templateStructure, formatStructure);
 
     // Determine if this is a creation or modification
     const isModification = !!(currentChartState && conversationId);
@@ -234,6 +235,8 @@ app.post('/api/process-chart-enhanced', requireAuth, aiLimiter, async (req, res)
       _metadata: aiResponse._metadata,
       // Include template content if generated
       templateContent: aiResponse.templateContent || null,
+      // Include format content if generated
+      formatContent: aiResponse.formatContent || null,
       // Pass through AI-generated text metadata (creation only — frontend uses these to populate config)
       title: aiResponse.title || null,
       subtitle: aiResponse.subtitle || null,

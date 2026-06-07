@@ -11,8 +11,8 @@ const openrouterProcessor = createChartProcessor(createOpenRouterAdapter());
  * @param {Object} templateStructure - Template structure metadata for generating template text content
  * @returns {Promise<Object>} - Generated chart configuration
  */
-export async function generateChartDataWithOpenRouter(inputText, model = 'deepseek/deepseek-chat-v3-0324:free', templateStructure = null) {
-  return await openrouterProcessor.generateChart(inputText, model, templateStructure);
+export async function generateChartDataWithOpenRouter(inputText, model = 'deepseek/deepseek-chat-v3-0324:free', templateStructure = null, formatStructure = null) {
+  return await openrouterProcessor.generateChart(inputText, model, templateStructure, formatStructure);
 }
 
 /**
@@ -24,8 +24,8 @@ export async function generateChartDataWithOpenRouter(inputText, model = 'deepse
  * @param {Object} templateStructure - Template structure metadata for generating template text content
  * @returns {Promise<Object>} - Modified chart configuration
  */
-export async function modifyChartDataWithOpenRouter(inputText, currentChartState, messageHistory = [], model = 'deepseek/deepseek-chat-v3-0324:free', templateStructure = null) {
-  return await openrouterProcessor.modifyChart(inputText, currentChartState, messageHistory, model, templateStructure);
+export async function modifyChartDataWithOpenRouter(inputText, currentChartState, messageHistory = [], model = 'deepseek/deepseek-chat-v3-0324:free', templateStructure = null, formatStructure = null) {
+  return await openrouterProcessor.modifyChart(inputText, currentChartState, messageHistory, model, templateStructure, formatStructure);
 }
 
 /**

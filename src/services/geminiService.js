@@ -3,12 +3,12 @@ import { createGeminiAdapter } from '../adapters/geminiAdapter.js';
 
 const geminiProcessor = createChartProcessor(createGeminiAdapter());
 
-export async function generateChartDataWithGemini(inputText, model, templateStructure = null) {
-    return await geminiProcessor.generateChart(inputText, model, templateStructure);
+export async function generateChartDataWithGemini(inputText, model, templateStructure = null, formatStructure = null) {
+    return await geminiProcessor.generateChart(inputText, model, templateStructure, formatStructure);
 }
 
-export async function modifyChartDataWithGemini(inputText, currentChartState, messageHistory = [], model, templateStructure = null) {
-    return await geminiProcessor.modifyChart(inputText, currentChartState, messageHistory, model, templateStructure);
+export async function modifyChartDataWithGemini(inputText, currentChartState, messageHistory = [], model, templateStructure = null, formatStructure = null) {
+    return await geminiProcessor.modifyChart(inputText, currentChartState, messageHistory, model, templateStructure, formatStructure);
 }
 
 export function getAvailableGeminiModels() {

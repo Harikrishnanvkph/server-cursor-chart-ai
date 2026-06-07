@@ -1,10 +1,12 @@
 import express from 'express';
 import fetch from 'node-fetch';
+import sharp from 'sharp';
 
 const router = express.Router();
 
 router.get('/image', async (req, res) => {
-    const imageUrl = req.query.url;
+    res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+    const { url: imageUrl, width, quality, format } = req.query;
 
     if (!imageUrl) {
         return res.status(400).json({ error: 'Image URL is required' });
@@ -72,17 +74,55 @@ router.get('/image', async (req, res) => {
             throw new Error(`Upstream server responded with ${response.status} ${response.statusText}`);
         }
 
-        // Forward the content type and cache headers
+        // Read the image stream into a buffer for processing/caching
+        const arrayBuffer = await response.arrayBuffer();
+        const buffer = Buffer.from(arrayBuffer);
+
         const contentType = response.headers.get('content-type');
+        const isSvg = contentType && contentType.includes('svg');
+        const isGif = contentType && contentType.includes('gif');
+        const shouldProcess = (width || quality || format) && !isSvg && !isGif;
+
+        if (shouldProcess) {
+            try {
+                let pipeline = sharp(buffer);
+                
+                if (width) {
+                    const parsedWidth = parseInt(width, 10);
+                    if (!isNaN(parsedWidth) && parsedWidth > 0) {
+                        pipeline = pipeline.resize(parsedWidth, null, { withoutEnlargement: true });
+                    }
+                }
+
+                // Transcode to modern format (default webp)
+                const targetFormat = format || 'webp';
+                const parsedQuality = parseInt(quality, 10) || 80;
+
+                if (targetFormat === 'png') {
+                    pipeline = pipeline.png({ quality: parsedQuality });
+                    res.setHeader('Content-Type', 'image/png');
+                } else if (targetFormat === 'jpeg' || targetFormat === 'jpg') {
+                    pipeline = pipeline.jpeg({ quality: parsedQuality });
+                    res.setHeader('Content-Type', 'image/jpeg');
+                } else {
+                    pipeline = pipeline.webp({ quality: parsedQuality });
+                    res.setHeader('Content-Type', 'image/webp');
+                }
+
+                res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+                const outputBuffer = await pipeline.toBuffer();
+                return res.send(outputBuffer);
+            } catch (sharpError) {
+                console.warn('[ImageProxy] Sharp processing failed, falling back to raw image:', sharpError);
+            }
+        }
+
+        // Fallback or skip resizing: Forward original contentType and stream raw buffer
         if (contentType) {
             res.setHeader('Content-Type', contentType);
         }
-
-        // Cache the image for 1 day in the browser
-        res.setHeader('Cache-Control', 'public, max-age=86400');
-
-        // Stream the image data to the client
-        response.body.pipe(res);
+        res.setHeader('Cache-Control', 'public, max-age=86400'); // Cache raw image for 1 day
+        res.send(buffer);
 
     } catch (error) {
         console.error('Image proxy error:', error);

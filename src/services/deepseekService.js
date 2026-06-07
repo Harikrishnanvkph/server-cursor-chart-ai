@@ -3,12 +3,12 @@ import { createDeepSeekAdapter } from '../adapters/deepseekAdapter.js';
 
 const deepseekProcessor = createChartProcessor(createDeepSeekAdapter());
 
-export async function generateChartDataWithDeepSeek(inputText, model, templateStructure = null) {
-  return await deepseekProcessor.generateChart(inputText, model, templateStructure);
+export async function generateChartDataWithDeepSeek(inputText, model, templateStructure = null, formatStructure = null) {
+  return await deepseekProcessor.generateChart(inputText, model, templateStructure, formatStructure);
 }
 
-export async function modifyChartDataWithDeepSeek(inputText, currentChartState, messageHistory = [], model, templateStructure = null) {
-  return await deepseekProcessor.modifyChart(inputText, currentChartState, messageHistory, model, templateStructure);
+export async function modifyChartDataWithDeepSeek(inputText, currentChartState, messageHistory = [], model, templateStructure = null, formatStructure = null) {
+  return await deepseekProcessor.modifyChart(inputText, currentChartState, messageHistory, model, templateStructure, formatStructure);
 }
 
 export function getAvailableDeepSeekModels() {

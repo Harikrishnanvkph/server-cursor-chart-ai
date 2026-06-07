@@ -1,4 +1,4 @@
-import { supabaseAdminClient } from '../supabase/client.js';
+import { supabaseAdminClient, supabaseUserClient } from '../supabase/client.js';
 import secureSessionStore from '../services/sessionStore.js';
 
 // Helper function to ensure user profile exists
@@ -191,38 +191,104 @@ function rateLimitMiddleware(req, res, next) {
 export async function requireAuth(req, res, next) {
   try {
     const accessToken = req.cookies?.access_token;
+    const refreshToken = req.cookies?.refresh_token;
     const clientIP = getClientIP(req);
 
-    if (!accessToken) {
-      console.warn('No access token provided');
-      return res.status(401).json({ error: 'Authentication required' });
-    }
+    // If access token is present, attempt to validate it first
+    if (accessToken) {
+      // Cache short-circuit
+      const cached = getCachedUser(accessToken);
+      if (cached) {
+        req.user = cached;
+        return next();
+      }
 
-    // Cache short-circuit
-    const cached = getCachedUser(accessToken);
-    if (cached) {
-      req.user = cached;
-      return next();
-    }
+      // Check if IP is blocked
+      if (BLOCKED_IPS.has(clientIP)) {
+        console.warn(`Blocked request from blocked IP: ${clientIP}`);
+        return res.status(403).json({ error: 'Access denied' });
+      }
 
-    // Check if IP is blocked
-    if (BLOCKED_IPS.has(clientIP)) {
-      console.warn(`Blocked request from blocked IP: ${clientIP}`);
-      return res.status(403).json({ error: 'Access denied' });
-    }
+      // First try Supabase token validation
+      try {
+        const url = `${process.env.SUPABASE_URL}/auth/v1/user`;
+        const response = await fetch(url, {
+          headers: {
+            'Authorization': `Bearer ${accessToken}`,
+            'apikey': process.env.SUPABASE_ANON_KEY || ''
+          }
+        });
 
-    // First try Supabase token validation
-    try {
-      const url = `${process.env.SUPABASE_URL}/auth/v1/user`;
-      const response = await fetch(url, {
-        headers: {
-          'Authorization': `Bearer ${accessToken}`,
-          'apikey': process.env.SUPABASE_ANON_KEY || ''
+        if (response.ok) {
+          const user = await response.json();
+
+          // Ensure user has a profile
+          const profile = await ensureUserProfile(user.id, user.email, user.user_metadata?.name, user.user_metadata?.avatar_url);
+
+          const enrichedUser = {
+            ...user,
+            is_admin: profile?.is_admin || false
+          };
+
+          setCachedUser(accessToken, enrichedUser);
+          req.user = enrichedUser;
+          return next();
         }
-      });
+      } catch (supabaseError) {
+        // Fallback to OAuth session validation when Supabase validation fails
+      }
 
-      if (response.ok) {
-        const user = await response.json();
+      // If Supabase validation failed, check OAuth session
+      try {
+        const oauthUser = await secureSessionStore.validateSession(accessToken);
+
+        if (oauthUser) {
+          console.log('OAuth user validated:', {
+            userId: oauthUser.user_id || oauthUser.id,
+            email: oauthUser.email,
+            provider: oauthUser.provider
+          });
+
+          // Use user_id if available (from validateSession), otherwise fall back to id
+          const userId = oauthUser.user_id || oauthUser.id;
+
+          // Ensure user has a profile (OAuth users have email, full_name, avatar_url directly)
+          const profile = await ensureUserProfile(userId, oauthUser.email, oauthUser.full_name, oauthUser.avatar_url);
+
+          // Create a normalized user object with consistent ID field
+          const normalizedUser = {
+            id: userId,
+            email: oauthUser.email,
+            full_name: oauthUser.full_name,
+            avatar_url: oauthUser.avatar_url,
+            provider: oauthUser.provider,
+            is_admin: profile?.is_admin || false
+          };
+
+          setCachedUser(accessToken, normalizedUser);
+          req.user = normalizedUser;
+          return next();
+        }
+      } catch (sessionError) {
+        console.error('OAuth session validation error:', sessionError);
+      }
+    }
+
+    // If we reach here, the access token was either missing, invalid, or expired.
+    // Try to refresh the session using the refresh token if available.
+    if (refreshToken) {
+      console.log('Access token invalid/expired. Attempting to refresh session using refresh token...');
+      try {
+        const { data: refreshData, error: refreshError } = await supabaseUserClient.auth.refreshSession({
+          refresh_token: refreshToken
+        });
+
+        if (refreshError || !refreshData.session || !refreshData.user) {
+          throw refreshError || new Error('Invalid refresh response');
+        }
+
+        const user = refreshData.user;
+        const newSession = refreshData.session;
 
         // Ensure user has a profile
         const profile = await ensureUserProfile(user.id, user.email, user.user_metadata?.name, user.user_metadata?.avatar_url);
@@ -232,50 +298,42 @@ export async function requireAuth(req, res, next) {
           is_admin: profile?.is_admin || false
         };
 
-        setCachedUser(accessToken, enrichedUser);
-        req.user = enrichedUser;
-        return next();
-      }
-    } catch (supabaseError) {
-      // Fallback to OAuth session validation when Supabase validation fails
-    }
-
-    // If Supabase validation failed, check OAuth session
-    try {
-      const oauthUser = await secureSessionStore.validateSession(accessToken);
-
-      if (oauthUser) {
-        console.log('OAuth user validated:', {
-          userId: oauthUser.user_id || oauthUser.id,
-          email: oauthUser.email,
-          provider: oauthUser.provider
-        });
-
-        // Use user_id if available (from validateSession), otherwise fall back to id
-        const userId = oauthUser.user_id || oauthUser.id;
-
-        // Ensure user has a profile (OAuth users have email, full_name, avatar_url directly)
-        const profile = await ensureUserProfile(userId, oauthUser.email, oauthUser.full_name, oauthUser.avatar_url);
-
-        // Create a normalized user object with consistent ID field
-        const normalizedUser = {
-          id: userId,
-          email: oauthUser.email,
-          full_name: oauthUser.full_name,
-          avatar_url: oauthUser.avatar_url,
-          provider: oauthUser.provider,
-          is_admin: profile?.is_admin || false
+        // Update response cookies with the new session tokens
+        const isProd = process.env.NODE_ENV === 'production';
+        const cookieOptions = {
+          httpOnly: true,
+          secure: isProd,
+          sameSite: isProd ? 'none' : 'lax',
+          path: '/',
         };
 
-        setCachedUser(accessToken, normalizedUser);
-        req.user = normalizedUser;
+        res.cookie('access_token', newSession.access_token, { 
+          ...cookieOptions, 
+          maxAge: newSession.expires_in * 1000 
+        });
+        
+        if (newSession.refresh_token) {
+          res.cookie('refresh_token', newSession.refresh_token, { 
+            ...cookieOptions, 
+            maxAge: 30 * 24 * 60 * 60 * 1000 
+          });
+        }
+
+        setCachedUser(newSession.access_token, enrichedUser);
+        req.user = enrichedUser;
+        console.log(`Successfully refreshed session for user: ${user.email}`);
         return next();
+
+      } catch (refreshErr) {
+        console.warn('Failed to refresh Supabase session:', refreshErr.message);
+        // Clear cookies to avoid repeatedly trying to refresh with a bad token
+        res.clearCookie('access_token', { path: '/' });
+        res.clearCookie('refresh_token', { path: '/' });
+        return res.status(401).json({ error: 'Session expired, please sign in again' });
       }
-    } catch (sessionError) {
-      console.error('OAuth session validation error:', sessionError);
     }
 
-    // No valid authentication found
+    // No valid authentication or refresh token found
     console.warn('No valid authentication found');
     return res.status(401).json({ error: 'Invalid or expired token' });
 
