@@ -1,15 +1,35 @@
 import { supabaseAdminClient, supabaseUserClient } from '../supabase/client.js';
 import secureSessionStore from '../services/sessionStore.js';
 
+// Helper to wrap a promise with a timeout
+function withTimeout(promise, ms, errorMessage = 'Request timed out') {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(errorMessage)), ms);
+    promise
+      .then(res => {
+        clearTimeout(timer);
+        resolve(res);
+      })
+      .catch(err => {
+        clearTimeout(timer);
+        reject(err);
+      });
+  });
+}
+
 // Helper function to ensure user profile exists
 async function ensureUserProfile(userId, userEmail = null, userName = null, userAvatar = null) {
   try {
-    // Check if profile exists
-    const { data: existingProfile, error: profileCheckError } = await supabaseAdminClient
-      .from('profiles')
-      .select('id, is_admin')
-      .eq('id', userId)
-      .single();
+    // Check if profile exists with a timeout
+    const { data: existingProfile, error: profileCheckError } = await withTimeout(
+      supabaseAdminClient
+        .from('profiles')
+        .select('id, is_admin')
+        .eq('id', userId)
+        .single(),
+      5000,
+      'Profile check timed out'
+    );
 
     if (existingProfile && !profileCheckError) {
       // Profile already exists, no need to create
@@ -21,8 +41,12 @@ async function ensureUserProfile(userId, userEmail = null, userName = null, user
     // Try to get user info from auth.users first
     let authUser = null;
     try {
-      const { data, error: authError } = await supabaseAdminClient.auth.admin.getUserById(userId);
-      if (!authError && data.user) {
+      const { data, error: authError } = await withTimeout(
+        supabaseAdminClient.auth.admin.getUserById(userId),
+        4000,
+        'GetUserById timed out'
+      );
+      if (!authError && data?.user) {
         authUser = data.user;
       }
     } catch (err) {
@@ -40,11 +64,15 @@ async function ensureUserProfile(userId, userEmail = null, userName = null, user
     };
 
     // Create profile
-    const { data: newProfile, error: profileError } = await supabaseAdminClient
-      .from('profiles')
-      .insert([profileData])
-      .select('id, is_admin')
-      .single();
+    const { data: newProfile, error: profileError } = await withTimeout(
+      supabaseAdminClient
+        .from('profiles')
+        .insert([profileData])
+        .select('id, is_admin')
+        .single(),
+      5000,
+      'Profile creation timed out'
+    );
 
     if (profileError) {
       console.error('❌ Failed to create profile for user:', userId, profileError.message);
@@ -212,12 +240,17 @@ export async function requireAuth(req, res, next) {
       // First try Supabase token validation
       try {
         const url = `${process.env.SUPABASE_URL}/auth/v1/user`;
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 5000); // 5 second timeout
+
         const response = await fetch(url, {
           headers: {
             'Authorization': `Bearer ${accessToken}`,
             'apikey': process.env.SUPABASE_ANON_KEY || ''
-          }
+          },
+          signal: controller.signal
         });
+        clearTimeout(timeoutId);
 
         if (response.ok) {
           const user = await response.json();
@@ -235,6 +268,7 @@ export async function requireAuth(req, res, next) {
           return next();
         }
       } catch (supabaseError) {
+        console.warn('Supabase token validation failed or timed out:', supabaseError.message);
         // Fallback to OAuth session validation when Supabase validation fails
       }
 
@@ -279,11 +313,15 @@ export async function requireAuth(req, res, next) {
     if (refreshToken) {
       console.log('Access token invalid/expired. Attempting to refresh session using refresh token...');
       try {
-        const { data: refreshData, error: refreshError } = await supabaseUserClient.auth.refreshSession({
-          refresh_token: refreshToken
-        });
+        const refreshResult = await withTimeout(
+          supabaseUserClient.auth.refreshSession({ refresh_token: refreshToken }),
+          8000,
+          'Supabase session refresh timed out'
+        );
 
-        if (refreshError || !refreshData.session || !refreshData.user) {
+        const { data: refreshData, error: refreshError } = refreshResult;
+
+        if (refreshError || !refreshData?.session || !refreshData?.user) {
           throw refreshError || new Error('Invalid refresh response');
         }
 
@@ -347,10 +385,11 @@ export async function requireAuth(req, res, next) {
 export async function requireAuthEnhanced(req, res, next) {
   try {
     const accessToken = req.cookies?.access_token;
+    const refreshToken = req.cookies?.refresh_token;
     const clientIP = getClientIP(req);
 
-    if (!accessToken) {
-      console.warn('No access token provided');
+    if (!accessToken && !refreshToken) {
+      console.warn('No access or refresh token provided');
       return res.status(401).json({ error: 'Authentication required' });
     }
 

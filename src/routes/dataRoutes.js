@@ -1,6 +1,8 @@
 import express from 'express';
 import { requireAuth } from '../middleware/authMiddleware.js';
 import chartDataService from '../services/chartDataService.js';
+import templateService from '../services/templateService.js';
+import formatService from '../services/formatService.js';
 import { supabaseAdminClient } from '../supabase/client.js';
 import sharp from 'sharp';
 
@@ -434,7 +436,8 @@ router.post('/upload-image', async (req, res) => {
     }
     const safeName = name.replace(/[^a-zA-Z0-9-]/g, '_');
     const safeFilename = `${safeName}.${finalExtension}`;
-    const path = `presets/${safeFilename}`;
+    const userId = req.user.id;
+    const path = `presets/${userId}/${safeFilename}`;
 
     const bucketName = 'format-assets';
 
@@ -472,10 +475,291 @@ router.post('/upload-image', async (req, res) => {
       .from(bucketName)
       .getPublicUrl(path);
 
+    // Save tracking record to public.user_uploaded_images
+    const { error: dbError } = await supabaseAdminClient
+      .from('user_uploaded_images')
+      .insert({
+        user_id: userId,
+        image_path: path,
+        image_url: publicUrl,
+        filename: safeFilename
+      });
+
+    if (dbError) {
+      console.error('Error inserting user image tracking record:', dbError);
+      throw dbError;
+    }
+
     res.status(200).json({ publicUrl });
   } catch (error) {
     console.error('Error uploading image to storage:', error);
     res.status(500).json({ error: 'Failed to upload image', details: error.message });
+  }
+});
+
+// =============================================
+// MY IMAGES MANAGEMENT ROUTES
+// =============================================
+
+// Get user's uploaded images and check what they are mapped to (charts, templates, formats)
+router.get('/my-images', async (req, res) => {
+  try {
+    const userId = req.user.id;
+
+    // 1. Fetch user's uploaded images
+    const { data: images, error: imagesError } = await supabaseAdminClient
+      .from('user_uploaded_images')
+      .select('*')
+      .eq('user_id', userId)
+      .order('created_at', { ascending: false });
+
+    if (imagesError) throw imagesError;
+    if (!images || images.length === 0) {
+      return res.json([]);
+    }
+
+    // 2. Fetch user's active conversations and their current snapshots (charts)
+    const { data: conversations, error: convsError } = await supabaseAdminClient
+      .from('conversations')
+      .select('id, title')
+      .eq('user_id', userId)
+      .eq('is_active', true);
+
+    if (convsError) throw convsError;
+
+    let snapshots = [];
+    if (conversations && conversations.length > 0) {
+      const convIds = conversations.map(c => c.id);
+      const { data: snaps, error: snapsError } = await supabaseAdminClient
+        .from('chart_snapshots')
+        .select('id, conversation_id, chart_config, template_structure')
+        .in('conversation_id', convIds)
+        .eq('is_current', true);
+      if (snapsError) throw snapsError;
+      snapshots = snaps || [];
+    }
+
+    // 3. Fetch user's templates
+    const { data: templates, error: templatesError } = await supabaseAdminClient
+      .from('user_templates')
+      .select('id, name, template_structure')
+      .eq('user_id', userId);
+
+    if (templatesError) throw templatesError;
+
+    // 4. Fetch user's formats
+    const { data: formats, error: formatsError } = await supabaseAdminClient
+      .from('format_blueprints')
+      .select('id, name, skeleton, thumbnail_url')
+      .eq('user_id', userId);
+
+    if (formatsError) throw formatsError;
+
+    // 5. Build usage mappings for each image
+    const imagesWithMappings = images.map(img => {
+      const filename = img.image_path.split('/').pop();
+      const imageUrl = img.image_url;
+
+      // Find mapped charts
+      const mappedCharts = [];
+      snapshots.forEach(snap => {
+        const snapString = JSON.stringify({
+          chart_config: snap.chart_config,
+          template_structure: snap.template_structure
+        });
+        if (snapString.includes(filename) || snapString.includes(imageUrl)) {
+          const conv = conversations.find(c => c.id === snap.conversation_id);
+          if (conv) {
+            mappedCharts.push({ id: conv.id, title: conv.title, snapshotId: snap.id });
+          }
+        }
+      });
+
+      // Find mapped templates
+      const mappedTemplates = [];
+      templates.forEach(tpl => {
+        const tplString = JSON.stringify(tpl.template_structure);
+        if (tplString.includes(filename) || tplString.includes(imageUrl)) {
+          mappedTemplates.push({ id: tpl.id, name: tpl.name });
+        }
+      });
+
+      // Find mapped formats
+      const mappedFormats = [];
+      formats.forEach(fmt => {
+        const fmtString = JSON.stringify({ skeleton: fmt.skeleton, thumbnail_url: fmt.thumbnail_url });
+        if (fmtString.includes(filename) || fmtString.includes(imageUrl)) {
+          mappedFormats.push({ id: fmt.id, name: fmt.name });
+        }
+      });
+
+      return {
+        ...img,
+        mappings: {
+          charts: mappedCharts,
+          templates: mappedTemplates,
+          formats: mappedFormats
+        }
+      };
+    });
+
+    res.json(imagesWithMappings);
+  } catch (error) {
+    console.error('Error fetching user images and mappings:', error);
+    res.status(500).json({ error: 'Failed to fetch images', details: error.message });
+  }
+});
+
+// Delete user image from storage and database, cascading deletion to associated charts, templates, and formats
+router.delete('/my-images/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const userId = req.user.id;
+
+    // 1. Fetch image record and verify ownership
+    const { data: img, error: imgError } = await supabaseAdminClient
+      .from('user_uploaded_images')
+      .select('*')
+      .eq('id', id)
+      .eq('user_id', userId)
+      .single();
+
+    if (imgError || !img) {
+      return res.status(404).json({ error: 'Image not found or unauthorized' });
+    }
+
+    const filename = img.image_path.split('/').pop();
+    const imageUrl = img.image_url;
+
+    // 2. Identify all associated charts (conversations)
+    const { data: conversations, error: convsError } = await supabaseAdminClient
+      .from('conversations')
+      .select('id, title')
+      .eq('user_id', userId)
+      .eq('is_active', true);
+
+    if (convsError) throw convsError;
+
+    const conversationsToDelete = [];
+    if (conversations && conversations.length > 0) {
+      const convIds = conversations.map(c => c.id);
+      const { data: snaps } = await supabaseAdminClient
+        .from('chart_snapshots')
+        .select('id, conversation_id, chart_config, template_structure')
+        .in('conversation_id', convIds)
+        .eq('is_current', true);
+
+      (snaps || []).forEach(snap => {
+        const snapString = JSON.stringify({
+          chart_config: snap.chart_config,
+          template_structure: snap.template_structure
+        });
+        if (snapString.includes(filename) || snapString.includes(imageUrl)) {
+          if (!conversationsToDelete.includes(snap.conversation_id)) {
+            conversationsToDelete.push(snap.conversation_id);
+          }
+        }
+      });
+    }
+
+    // 3. Identify all associated templates
+    const { data: templates, error: templatesError } = await supabaseAdminClient
+      .from('user_templates')
+      .select('id, name, template_structure')
+      .eq('user_id', userId);
+
+    if (templatesError) throw templatesError;
+
+    const templatesToDelete = [];
+    templates.forEach(tpl => {
+      const tplString = JSON.stringify(tpl.template_structure);
+      if (tplString.includes(filename) || tplString.includes(imageUrl)) {
+        templatesToDelete.push(tpl.id);
+      }
+    });
+
+    // 4. Identify all associated formats
+    const { data: formats, error: formatsError } = await supabaseAdminClient
+      .from('format_blueprints')
+      .select('id, name, skeleton, thumbnail_url')
+      .eq('user_id', userId);
+
+    if (formatsError) throw formatsError;
+
+    const formatsToDelete = [];
+    formats.forEach(fmt => {
+      const fmtString = JSON.stringify({ skeleton: fmt.skeleton, thumbnail_url: fmt.thumbnail_url });
+      if (fmtString.includes(filename) || fmtString.includes(imageUrl)) {
+        formatsToDelete.push(fmt.id);
+      }
+    });
+
+    // 5. Delete physical image file from Supabase Storage
+    const { error: storageError } = await supabaseAdminClient.storage
+      .from('format-assets')
+      .remove([img.image_path]);
+
+    if (storageError) {
+      console.warn('[StorageCleanup] Failed to delete image file from storage:', storageError);
+      // We continue deleting database records even if storage file delete fails
+    }
+
+    // 6. Delete image record from database
+    const { error: dbDeleteError } = await supabaseAdminClient
+      .from('user_uploaded_images')
+      .delete()
+      .eq('id', id);
+
+    if (dbDeleteError) throw dbDeleteError;
+
+    // 7. Cascade delete associated charts/conversations
+    const deletedCharts = [];
+    for (const convId of conversationsToDelete) {
+      try {
+        const conv = conversations.find(c => c.id === convId);
+        await chartDataService.deleteConversation(convId, userId);
+        deletedCharts.push(conv ? conv.title : convId);
+      } catch (err) {
+        console.error(`Failed to cascade delete conversation ${convId}:`, err);
+      }
+    }
+
+    // 8. Cascade delete associated templates
+    const deletedTemplates = [];
+    for (const tplId of templatesToDelete) {
+      try {
+        const tpl = templates.find(t => t.id === tplId);
+        await templateService.deleteTemplate(tplId, userId);
+        deletedTemplates.push(tpl ? tpl.name : tplId);
+      } catch (err) {
+        console.error(`Failed to cascade delete template ${tplId}:`, err);
+      }
+    }
+
+    // 9. Cascade delete associated formats
+    const deletedFormats = [];
+    for (const fmtId of formatsToDelete) {
+      try {
+        const fmt = formats.find(f => f.id === fmtId);
+        await formatService.deleteFormat(fmtId, userId);
+        deletedFormats.push(fmt ? fmt.name : fmtId);
+      } catch (err) {
+        console.error(`Failed to cascade delete format ${fmtId}:`, err);
+      }
+    }
+
+    res.json({
+      success: true,
+      deletedImage: img.filename,
+      cascade: {
+        charts: deletedCharts,
+        templates: deletedTemplates,
+        formats: deletedFormats
+      }
+    });
+  } catch (error) {
+    console.error('Error deleting image and cascading dependencies:', error);
+    res.status(500).json({ error: 'Failed to delete image', details: error.message });
   }
 });
 

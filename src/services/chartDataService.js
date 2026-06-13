@@ -171,6 +171,61 @@ class ChartDataService {
 
   async deleteConversation(conversationId, userId) {
     try {
+      // 1. Fetch all snapshots for this conversation before deletion
+      const { data: snapshots } = await supabaseAdminClient
+        .from('chart_snapshots')
+        .select('chart_config, template_structure')
+        .eq('conversation_id', conversationId);
+
+      // 2. Extract image paths
+      if (snapshots && snapshots.length > 0) {
+        const paths = [];
+        const bucketUrlPart = '/format-assets/';
+        
+        snapshots.forEach(snap => {
+          const checkShapes = (shapes) => {
+            if (Array.isArray(shapes)) {
+              shapes.forEach(shape => {
+                if (shape.type === 'deco-image' && shape.imageUrl && shape.imageUrl.includes(bucketUrlPart)) {
+                  const idx = shape.imageUrl.indexOf(bucketUrlPart);
+                  if (idx !== -1) {
+                    const path = shape.imageUrl.substring(idx + bucketUrlPart.length);
+                    if (path && !paths.includes(path)) {
+                      paths.push(path);
+                    }
+                  }
+                }
+              });
+            }
+          };
+
+          if (snap.chart_config && snap.chart_config.decorationShapes) {
+            checkShapes(snap.chart_config.decorationShapes);
+          }
+          if (snap.template_structure && snap.template_structure.decorations) {
+            checkShapes(snap.template_structure.decorations);
+          }
+        });
+
+        // 3. Delete files from Supabase Storage (Asynchronously in background)
+        if (paths.length > 0) {
+          supabaseAdminClient.storage
+            .from('format-assets')
+            .remove(paths)
+            .then(({ error: storageError }) => {
+              if (storageError) {
+                console.error('[StorageCleanup] Failed to delete orphaned files:', storageError);
+              } else {
+                console.log('[StorageCleanup] Deleted files from storage asynchronously:', paths);
+              }
+            })
+            .catch(err => {
+              console.error('[StorageCleanup] Error during async delete:', err);
+            });
+        }
+      }
+
+      // 4. Delete the conversation (will cascade delete snapshots/messages)
       const { error } = await supabaseAdminClient
         .from('conversations')
         .delete()
@@ -187,8 +242,61 @@ class ChartDataService {
 
   async deleteAllConversations(userId) {
     try {
-      // Delete all conversations for the user
-      // This will cascade delete related chart_snapshots and chat_messages due to foreign key constraints
+      // 1. Fetch all snapshots for all user's conversations
+      const { data: snapshots } = await supabaseAdminClient
+        .from('chart_snapshots')
+        .select('chart_config, template_structure, conversations!inner(user_id)')
+        .eq('conversations.user_id', userId);
+
+      // 2. Extract image paths
+      if (snapshots && snapshots.length > 0) {
+        const paths = [];
+        const bucketUrlPart = '/format-assets/';
+
+        snapshots.forEach(snap => {
+          const checkShapes = (shapes) => {
+            if (Array.isArray(shapes)) {
+              shapes.forEach(shape => {
+                if (shape.type === 'deco-image' && shape.imageUrl && shape.imageUrl.includes(bucketUrlPart)) {
+                  const idx = shape.imageUrl.indexOf(bucketUrlPart);
+                  if (idx !== -1) {
+                    const path = shape.imageUrl.substring(idx + bucketUrlPart.length);
+                    if (path && !paths.includes(path)) {
+                      paths.push(path);
+                    }
+                  }
+                }
+              });
+            }
+          };
+
+          if (snap.chart_config && snap.chart_config.decorationShapes) {
+            checkShapes(snap.chart_config.decorationShapes);
+          }
+          if (snap.template_structure && snap.template_structure.decorations) {
+            checkShapes(snap.template_structure.decorations);
+          }
+        });
+
+        // 3. Delete files from Supabase Storage (Asynchronously in background)
+        if (paths.length > 0) {
+          supabaseAdminClient.storage
+            .from('format-assets')
+            .remove(paths)
+            .then(({ error: storageError }) => {
+              if (storageError) {
+                console.error('[StorageCleanup] Failed to delete orphaned files:', storageError);
+              } else {
+                console.log('[StorageCleanup] Deleted files from storage asynchronously:', paths);
+              }
+            })
+            .catch(err => {
+              console.error('[StorageCleanup] Error during async delete:', err);
+            });
+        }
+      }
+
+      // 4. Delete all conversations for the user (will cascade delete snapshots/messages)
       const { error } = await supabaseAdminClient
         .from('conversations')
         .delete()

@@ -107,6 +107,11 @@ export async function signIn(req, res) {
 // Get current user
 export async function me(req, res) {
   try {
+    // If the middleware (requireAuth or requireAuthEnhanced) has already authenticated/refreshed the user, return it
+    if (req.user) {
+      return res.json({ user: req.user })
+    }
+
     const accessToken = req.cookies.access_token || req.headers.authorization?.replace('Bearer ', '')
 
     if (!accessToken) {
