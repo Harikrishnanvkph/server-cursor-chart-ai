@@ -7,6 +7,7 @@ import { OpenAI } from 'openai';
 export class DeepSeekAdapter {
   constructor() {
     this.serviceName = 'deepseek';
+    this.hasNativeSearch = false;
     this._client = null; // lazy-initialized on first use
   }
 

@@ -22,6 +22,7 @@ const DEFAULT_MODEL = 'gemini-2.5-flash';
 export class GeminiAdapter {
     constructor() {
         this.serviceName = 'gemini';
+        this.hasNativeSearch = true;
         this._genAI = null; // lazy-initialized on first use
     }
 
@@ -33,16 +34,80 @@ export class GeminiAdapter {
         return this._genAI;
     }
 
-    async generateContent({ systemPrompt, userPrompt, model }) {
+    async generateContent({ systemPrompt, userPrompt, model, webSearch }) {
         const modelName = MODEL_MAP[model] ?? model ?? DEFAULT_MODEL;
-        const genModel = this.genAI.getGenerativeModel({ model: modelName });
 
+        if (webSearch) {
+            // Directly call the REST API to ensure google_search tool works since local SDK version is outdated
+            const apiKey = process.env.GEMINI_API_KEY;
+            const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
+            
+            const payload = {
+                contents: [{
+                    parts: [{ text: userPrompt }]
+                }],
+                tools: [{ google_search: {} }]
+            };
+
+            if (systemPrompt) {
+                payload.systemInstruction = {
+                    parts: [{ text: systemPrompt }]
+                };
+            }
+
+            try {
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort(), 60000);
+
+                const response = await fetch(url, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload),
+                    signal: controller.signal
+                });
+
+                clearTimeout(timeoutId);
+
+                if (!response.ok) {
+                    let errorMessage = `Gemini API returned error ${response.status}`;
+                    try {
+                        const errJson = await response.json();
+                        if (errJson.error && errJson.error.message) {
+                            errorMessage = errJson.error.message;
+                        }
+                    } catch {
+                        try {
+                            const errText = await response.text();
+                            if (errText) errorMessage = errText;
+                        } catch {}
+                    }
+                    throw new Error(errorMessage);
+                }
+
+                const result = await response.json();
+                const content = result.candidates?.[0]?.content?.parts?.[0]?.text;
+
+                if (!content?.trim()) {
+                    throw new Error('Empty response from Gemini AI search grounding service');
+                }
+
+                return {
+                    content,
+                    tokensUsed: result.usageMetadata ? (result.usageMetadata.promptTokenCount || 0) + (result.usageMetadata.candidatesTokenCount || 0) : null,
+                    rawResponse: result,
+                };
+            } catch (error) {
+                throw this.handleApiError(error);
+            }
+        }
+
+        // Standard SDK call for non-search queries
+        const genModel = this.genAI.getGenerativeModel({ model: modelName });
         const combinedPrompt = systemPrompt
             ? `${systemPrompt}\n\nUser request: ${userPrompt}`
             : userPrompt;
 
         try {
-            // 30-second timeout using AbortController
             const controller = new AbortController();
             const timeoutId = setTimeout(() => controller.abort(), 60000);
 
@@ -68,20 +133,28 @@ export class GeminiAdapter {
                 throw innerError;
             }
         } catch (error) {
-            if (error.name === 'AbortError') {
-                throw new Error('Gemini API request timed out after 30 seconds.');
-            }
-            if (error.status === 401 || error.message?.includes('API key')) {
-                throw new Error('Invalid Gemini API key');
-            } else if (error.status === 429) {
-                throw new Error('Gemini API rate limit exceeded. Please try again in a moment.');
-            } else if (error.status >= 500) {
-                throw new Error('Gemini API server error. Please try again later.');
-            } else if (error.message?.includes('SAFETY')) {
-                throw new Error('Gemini blocked the request due to safety concerns.');
-            }
-            throw error;
+            throw this.handleApiError(error);
         }
+    }
+
+    handleApiError(error) {
+        if (error.name === 'AbortError') {
+            return new Error('Gemini API request timed out after 60 seconds.');
+        }
+        const msg = error.message || '';
+        if (error.status === 401 || msg.includes('API key') || msg.includes('API_KEY_INVALID')) {
+            return new Error('Invalid Gemini API key');
+        }
+        if (error.status === 429 || msg.includes('RESOURCE_EXHAUSTED') || msg.includes('credits are depleted') || msg.includes('rate limit')) {
+            return new Error('Gemini API rate limit or credit quota exceeded. Please check your billing/credits.');
+        }
+        if (error.status >= 500 || msg.includes('server error')) {
+            return new Error('Gemini API server error. Please try again later.');
+        }
+        if (msg.includes('SAFETY')) {
+            return new Error('Gemini blocked the request due to safety concerns.');
+        }
+        return error;
     }
 
     async validateApiKey() {

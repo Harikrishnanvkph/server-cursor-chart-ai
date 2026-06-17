@@ -185,7 +185,8 @@ app.post('/api/process-chart-enhanced', requireAuth, aiLimiter, async (req, res)
     currentChartState,
     messageHistory,
     templateStructure, // NEW: Template structure metadata for generating template text content
-    formatStructure
+    formatStructure,
+    webSearch // NEW
   } = req.body;
 
   try {
@@ -215,8 +216,8 @@ app.post('/api/process-chart-enhanced', requireAuth, aiLimiter, async (req, res)
     console.log(`🤖 Processing chart request using: ${service.toUpperCase()} (Model: ${model || 'default'})`);
 
     const aiResponse = (currentChartState && conversationId)
-      ? await svc.modify(input, currentChartState, messageHistory || [], model, templateStructure, formatStructure)
-      : await svc.generate(input, model, templateStructure, formatStructure);
+      ? await svc.modify(input, currentChartState, messageHistory || [], model, templateStructure, formatStructure, webSearch)
+      : await svc.generate(input, model, templateStructure, formatStructure, webSearch);
 
     // Determine if this is a creation or modification
     const isModification = !!(currentChartState && conversationId);

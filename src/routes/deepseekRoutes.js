@@ -13,14 +13,14 @@ const router = express.Router();
  */
 router.post('/process-chart', async (req, res) => {
   try {
-    const { input, model, conversationId, currentChartState, messageHistory } = req.body;
+    const { input, model, conversationId, currentChartState, messageHistory, webSearch } = req.body;
 
     if (!input) return res.status(400).json({ error: 'Input text is required' });
     if (!process.env.DEEPSEEK_API_KEY) return res.status(500).json({ error: 'DeepSeek API key not configured' });
 
     const aiResponse = currentChartState && conversationId
-      ? await modifyChartDataWithDeepSeek(input, currentChartState, messageHistory || [], model)
-      : await generateChartDataWithDeepSeek(input, model);
+      ? await modifyChartDataWithDeepSeek(input, currentChartState, messageHistory || [], model, null, null, webSearch)
+      : await generateChartDataWithDeepSeek(input, model, null, null, webSearch);
 
     if (!aiResponse.chartType || !aiResponse.chartData) {
       throw new Error('AI response missing required chart data');

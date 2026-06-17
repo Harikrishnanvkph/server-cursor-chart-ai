@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { searchService } from '../search/searchService.js';
 
 // Resolve paths relative to THIS file, not the working directory.
 // This fixes "ENOENT" errors on Vercel/serverless where cwd differs from local dev.
@@ -26,13 +27,25 @@ export class ChartProcessor {
    * @param {Object} templateStructure - Template structure metadata for generating template text content
    * @returns {Promise<Object>} - Generated chart configuration
    */
-  async generateChart(inputText, model, templateStructure = null, formatStructure = null) {
+  async generateChart(inputText, model, templateStructure = null, formatStructure = null, webSearch = false) {
     try {
       // Get AI context (with caching)
       const aiContext = await this.getAIContext();
 
+      let searchResults = null;
+      if (webSearch && !this.adapter.hasNativeSearch) {
+        const queryDecision = await searchService.determineSearchQuery(inputText, [], this.adapter.serviceName);
+        if (queryDecision !== 'NO_SEARCH') {
+          try {
+            searchResults = await searchService.search(queryDecision);
+          } catch (searchError) {
+            console.error('Non-blocking search error in generateChart:', searchError);
+          }
+        }
+      }
+
       // Construct prompts
-      const systemPrompt = this.buildSystemPrompt(aiContext, templateStructure, formatStructure);
+      const systemPrompt = this.buildSystemPrompt(aiContext, templateStructure, formatStructure, searchResults);
       const userPrompt = this.buildUserPrompt(inputText, templateStructure);
 
       // Make service-specific API call
@@ -42,7 +55,8 @@ export class ChartProcessor {
         model,
         maxTokens: 2500,  // Tuned: typical chart JSON is 500-1500 tokens
         temperature: 0.2,
-        topP: 0.85
+        topP: 0.85,
+        webSearch
       });
 
       // Process response
@@ -83,10 +97,22 @@ export class ChartProcessor {
    * @param {Object} templateStructure - Template structure metadata for generating template text content
    * @returns {Promise<Object>} - Modified chart configuration
    */
-  async modifyChart(inputText, currentChartState, messageHistory = [], model, templateStructure = null, formatStructure = null) {
+  async modifyChart(inputText, currentChartState, messageHistory = [], model, templateStructure = null, formatStructure = null, webSearch = false) {
     try {
       // Get modification context (with caching)
       const modificationContext = await this.getModificationContext();
+
+      let searchResults = null;
+      if (webSearch && !this.adapter.hasNativeSearch) {
+        const queryDecision = await searchService.determineSearchQuery(inputText, messageHistory, this.adapter.serviceName);
+        if (queryDecision !== 'NO_SEARCH') {
+          try {
+            searchResults = await searchService.search(queryDecision);
+          } catch (searchError) {
+            console.error('Non-blocking search error in modifyChart:', searchError);
+          }
+        }
+      }
 
       // Build modification prompt
       const contextPrompt = this.buildModificationPrompt(
@@ -95,7 +121,8 @@ export class ChartProcessor {
         messageHistory,
         inputText,
         templateStructure,
-        formatStructure
+        formatStructure,
+        searchResults
       );
 
       // Make service-specific API call with higher tokens for modifications
@@ -103,7 +130,8 @@ export class ChartProcessor {
         userPrompt: contextPrompt,
         model,
         maxTokens: 3500,  // Tuned: modifications rarely exceed 2000 tokens
-        temperature: 0.2
+        temperature: 0.2,
+        webSearch
       });
 
       // Process response
@@ -164,12 +192,25 @@ export class ChartProcessor {
    * @param {Object} templateStructure - Template structure metadata
    * @returns {string} - System prompt
    */
-  buildSystemPrompt(aiContext, templateStructure = null, formatStructure = null) {
+  buildSystemPrompt(aiContext, templateStructure = null, formatStructure = null, searchResults = null) {
     let prompt = `${aiContext}
 
 You are an expert chart data generator. Always respond with valid JSON.
 Focus on creating accurate, well-structured data with meaningful titles and axis labels.
 Do NOT include "options" or "chartConfig" — the frontend handles all chart configuration automatically.`;
+
+    if (searchResults) {
+      prompt += `
+
+=== LIVE WEB SEARCH GROUNDING DATA ===
+The following real-time search results are retrieved from the web regarding the user's request.
+You MUST use these facts, figures, and data points to generate accurate and current chart data.
+Do NOT make up or hallucinate numbers if they are present in these search results.
+
+Search Results:
+${searchResults}
+======================================`;
+    }
 
     if (templateStructure) {
       // Check if any sections require HTML
@@ -314,7 +355,7 @@ Generate contextually relevant content for each section based on the chart topic
    * @param {Object} templateStructure - Template structure metadata
    * @returns {string} - Modification prompt
    */
-  buildModificationPrompt(modificationContext, currentChartState, messageHistory, inputText, templateStructure = null, formatStructure = null) {
+  buildModificationPrompt(modificationContext, currentChartState, messageHistory, inputText, templateStructure = null, formatStructure = null, searchResults = null) {
     // Increased from 2→5 messages and 150→300 chars for better AI context
     const recentHistory = messageHistory.slice(-5).map(msg => {
       // Truncate long messages to first 300 characters
@@ -332,7 +373,22 @@ Generate contextually relevant content for each section based on the chart topic
 
     // F3: AI_Modification_Inform.txt (modificationContext) already covers all instructions
     // — no duplicate inline instructions needed here
-    let prompt = `${modificationContext}
+    let prompt = `${modificationContext}`;
+
+    if (searchResults) {
+      prompt += `
+
+=== LIVE WEB SEARCH GROUNDING DATA ===
+The following real-time search results are retrieved from the web regarding the user's request.
+You MUST use these facts, figures, and data points to modify the chart accurately with real data.
+Do NOT make up or hallucinate numbers if they are present in these search results.
+
+Search Results:
+${searchResults}
+======================================`;
+    }
+
+    prompt += `
 
 CURRENT CHART SUMMARY:
 ${chartSummary}
