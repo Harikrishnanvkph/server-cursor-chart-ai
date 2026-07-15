@@ -63,6 +63,7 @@ class SearchService {
 Rules:
 1. If the request is purely visual, formatting-related, or structural (e.g., changing colors, changing chart type like bar to pie, sorting data, updating text titles, styling, or requesting simple explanations of existing data), output exactly: NO_SEARCH
 2. If the request requires looking up new facts, figures, stock prices, or updated statistics from the web, output ONLY the search keywords (no punctuation, no explanation, no quotes). Max 5-6 words.
+3. If the user explicitly requests images, photos, logos, or flags of specific entities, ensure the generated search query includes the names of the entities followed by "official photo" or "logo" or "flag" (e.g. "Virat Kohli official photo") to help the search provider locate valid image URLs.
 
 Examples:
 - Request: "Make the bars blue" -> NO_SEARCH
@@ -70,7 +71,8 @@ Examples:
 - Request: "Add GDP of Germany in 2025" -> Germany GDP 2025
 - Request: "Show stock price of Apple this week" -> Apple stock price this week
 - Request: "Sort the data ascending" -> NO_SEARCH
-- Request: "Show the top 5 countries by population" -> top 5 countries by population`;
+- Request: "Show the top 5 countries by population" -> top 5 countries by population
+- Request: "Show Virat Kohli, Steve Smith, Joe Root with pictures" -> Virat Kohli Steve Smith Joe Root official photo`;
 
     const recentHistoryText = messageHistory.slice(-3).map(m => `${m.role}: ${m.content}`).join('\n');
     const userContent = `CONVERSATION HISTORY:\n${recentHistoryText}\n\nUSER REQUEST: ${inputText}\n\nDecision:`;

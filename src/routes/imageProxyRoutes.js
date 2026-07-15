@@ -6,6 +6,7 @@ const router = express.Router();
 
 router.get('/image', async (req, res) => {
     res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+    res.setHeader('Access-Control-Allow-Origin', '*');
     const { url: imageUrl, width, quality, format } = req.query;
 
     if (!imageUrl) {
@@ -43,10 +44,25 @@ router.get('/image', async (req, res) => {
                 filename = filename.replace(/^\d+px-/, '');
             }
 
-            // Route through the official file download API which doesn't aggressively 429/403
+            // Handle SVGs: if original URL pathname contains '.svg/', the original file is .svg
+            if (parsedUrl.pathname.toLowerCase().includes('.svg/')) {
+                const match = parsedUrl.pathname.match(/^(.*\.svg)\//i);
+                if (match) {
+                    const svgPathParts = match[1].split('/');
+                    filename = svgPathParts[svgPathParts.length - 1];
+                }
+            }
+
+            // Route through the official file download API of the SPECIFIC wikipedia/wikimedia domain
+            // (e.g. en.wikipedia.org or commons.wikimedia.org) to support local/fair-use uploads.
             // Decode the filename first to prevent double-encoding characters like %27 (single quotes)
-            finalFetchUrl = `https://commons.wikimedia.org/wiki/Special:FilePath/${encodeURIComponent(decodeURIComponent(filename))}`;
-            console.log(`[ImageProxy] Using Special:FilePath API for: ${decodeURIComponent(filename)}`);
+            const targetWikiHost = parsedUrl.hostname.includes('upload.wikimedia.org') ? 'commons.wikimedia.org' : parsedUrl.hostname;
+            
+            // Critical fallback: always request a width from Special:FilePath to prevent Wikipedia from throwing 429 Too Many Requests
+            const targetWidth = width ? parseInt(width, 10) : 500;
+            finalFetchUrl = `https://${targetWikiHost}/wiki/Special:FilePath/${encodeURIComponent(decodeURIComponent(filename))}?width=${targetWidth}`;
+            
+            console.log(`[ImageProxy] Using Special:FilePath API on ${targetWikiHost} for: ${decodeURIComponent(filename)} with width ${targetWidth}`);
         }
 
         const headers = {
@@ -70,7 +86,10 @@ router.get('/image', async (req, res) => {
         });
 
         if (!response.ok) {
-            console.error(`Upstream rejected ${finalFetchUrl} with ${response.status}`);
+            console.error(`[ImageProxy] Upstream rejected ${finalFetchUrl} with ${response.status}`);
+            if (response.status === 404) {
+                return res.status(404).json({ error: 'Image not found', details: `Upstream returned 404 for ${finalFetchUrl}` });
+            }
             throw new Error(`Upstream server responded with ${response.status} ${response.statusText}`);
         }
 

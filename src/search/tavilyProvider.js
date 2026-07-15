@@ -29,7 +29,8 @@ export class TavilyProvider {
           query: query,
           max_results: 5,
           search_depth: 'basic',
-          include_answer: false
+          include_answer: false,
+          include_images: true
         })
       });
 
@@ -56,7 +57,13 @@ Snippet: ${content}`;
         })
         .join('\n\n');
 
-      return formattedResults;
+      let imageSection = '';
+      if (data.images && data.images.length > 0) {
+        imageSection = '\n\n[Search Results Image Links (Direct Image URLs)]\n' + 
+          data.images.map(img => typeof img === 'string' ? `- ${img}` : `- ${img.url || img}`).join('\n');
+      }
+
+      return formattedResults + imageSection;
     } catch (error) {
       console.error('Tavily search provider error:', error);
       throw new Error(`Tavily search failed: ${error.message}`);

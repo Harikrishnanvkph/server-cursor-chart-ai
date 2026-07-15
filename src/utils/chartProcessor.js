@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import fetch from 'node-fetch';
 import { searchService } from '../search/searchService.js';
 
 // Resolve paths relative to THIS file, not the working directory.
@@ -77,6 +78,13 @@ export class ChartProcessor {
         chartData.user_message = `Chart generated successfully using ${this.adapter.serviceName}`;
       }
 
+      // Automatically resolve country flags or famous people photos programmatically
+      try {
+        await this.resolvePointImages(chartData, inputText);
+      } catch (err) {
+        console.error('Error resolving point images in generateChart:', err);
+      }
+
       // Add metadata
       chartData._metadata = this.buildMetadata(response, model);
 
@@ -137,6 +145,13 @@ export class ChartProcessor {
       // Process response
       const cleanedResponse = this.cleanResponse(response.content);
       const chartData = this.parseJSON(cleanedResponse, this.adapter.serviceName);
+
+      // Automatically resolve country flags or famous people photos programmatically
+      try {
+        await this.resolvePointImages(chartData, inputText);
+      } catch (err) {
+        console.error('Error resolving point images in modifyChart:', err);
+      }
 
       // Add metadata
       chartData._metadata = this.buildMetadata(response, model);
@@ -206,6 +221,7 @@ Do NOT include "options" or "chartConfig" — the frontend handles all chart con
 The following real-time search results are retrieved from the web regarding the user's request.
 You MUST use these facts, figures, and data points to generate accurate and current chart data.
 Do NOT make up or hallucinate numbers if they are present in these search results.
+If the search results contain any image links under "[Search Results Image Links (Direct Image URLs)]", you MUST use these exact URLs if the user requests images, icons, or flags on data points or within the text, instead of fabricating fake image links.
 
 Search Results:
 ${searchResults}
@@ -251,7 +267,7 @@ Please generate chart data in valid JSON format.`;
     // F4: Reinforce pointImages instructions when user mentions image-related keywords
     const imageKeywords = /\b(image|icon|picture|logo|photo|emoji|avatar|flag)\b/i;
     if (imageKeywords.test(inputText)) {
-      prompt += `\n\nIMPORTANT: The user wants images on data points. You MUST include "pointImages" (array of working image URLs) and "pointImageConfig" (array of config objects) in each dataset.`;
+      prompt += `\n\nIMPORTANT: The user wants images on data points. You MUST include "pointImages" (array of working image URLs), "pointImageConfig" (array of config objects), and "pointImageSearchQueries" (array of specific search terms for each label to help the backend search engine find correct images, e.g., "Blast 2026 Tamil movie" instead of just "Blast") in each dataset. All arrays must match labels length.`;
     }
 
     if (templateStructure) {
@@ -382,6 +398,7 @@ Generate contextually relevant content for each section based on the chart topic
 The following real-time search results are retrieved from the web regarding the user's request.
 You MUST use these facts, figures, and data points to modify the chart accurately with real data.
 Do NOT make up or hallucinate numbers if they are present in these search results.
+If the search results contain any image links under "[Search Results Image Links (Direct Image URLs)]", you MUST use these exact URLs if the user requests images, icons, or flags on data points or within the text, instead of fabricating fake image links.
 
 Search Results:
 ${searchResults}
@@ -853,6 +870,7 @@ USER'S CURRENT REQUEST: ${inputText}`;
         if (ds.stack) slim.stack = ds.stack;
         // Preserve pointImages so LLM doesn't drop them during modifications
         if (ds.pointImages) slim.pointImages = ds.pointImages;
+        if (ds.pointImageSearchQueries) slim.pointImageSearchQueries = ds.pointImageSearchQueries;
         if (ds.pointImageConfig) slim.pointImageConfig = ds.pointImageConfig;
         return slim;
       })
@@ -922,6 +940,315 @@ USER'S CURRENT REQUEST: ${inputText}`;
 
     return slim;
   }
+
+  /**
+   * Automatically resolve country flags or famous people photos programmatically
+   * based on data labels and user request prompt context.
+   */
+  async resolvePointImages(chartData, userPrompt) {
+    if (!chartData) return;
+
+    // Resolve target data container
+    let chartDataContainer = chartData.chartData || chartData.data;
+    if (!chartDataContainer || !chartDataContainer.datasets || !Array.isArray(chartDataContainer.datasets)) {
+      return;
+    }
+
+    const datasets = chartDataContainer.datasets;
+    const labels = chartDataContainer.labels || [];
+    if (!labels.length) return;
+
+    const promptLower = (userPrompt || "").toLowerCase();
+    const wantsFlags = /\b(flag|flags|country flag|country flags)\b/i.test(promptLower);
+    const wantsImages = /\b(image|images|icon|icons|picture|pictures|photo|photos|avatar|avatars|portrait|portraits|profile|profiles)\b/i.test(promptLower);
+
+    // Check if the LLM already returned pointImages
+    const hasPointImages = datasets.some(ds => ds.pointImages && Array.isArray(ds.pointImages));
+
+    // If no image/flag is requested, and the LLM didn't return any pointImages, do nothing
+    if (!wantsFlags && !wantsImages && !hasPointImages) {
+      return;
+    }
+
+    const fetchPromises = [];
+
+    datasets.forEach(ds => {
+      // Ensure pointImages array exists and matches the labels length
+      if (!ds.pointImages || !Array.isArray(ds.pointImages)) {
+        ds.pointImages = Array(labels.length).fill(null);
+      } else {
+        // Pad array if too short
+        while (ds.pointImages.length < labels.length) {
+          ds.pointImages.push(null);
+        }
+      }
+
+      // Ensure pointImageConfig exists and matches labels length
+      if (!ds.pointImageConfig || !Array.isArray(ds.pointImageConfig)) {
+        ds.pointImageConfig = Array(labels.length).fill(null).map(() => ({
+          type: "circle",
+          size: 24,
+          position: "center",
+          arrow: false
+        }));
+      } else {
+        while (ds.pointImageConfig.length < labels.length) {
+          ds.pointImageConfig.push({
+            type: "circle",
+            size: 24,
+            position: "center",
+            arrow: false
+          });
+        }
+      }
+
+      labels.forEach((label, idx) => {
+        const cleanLabel = String(label).trim();
+        const currentImg = ds.pointImages[idx];
+
+        // Helper to check if a string is a valid HTTP/S URL
+        const isUrl = (url) => typeof url === 'string' && (url.startsWith('http://') || url.startsWith('https://'));
+        const isWikipediaUrl = (url) => typeof url === 'string' && (url.includes('wikipedia.org') || url.includes('wikimedia.org'));
+        
+        const isDuplicate = currentImg && ds.pointImages.filter(img => img === currentImg).length > 2;
+        const isWiki = isWikipediaUrl(currentImg);
+
+        // 1. Resolve flag if user explicitly asked for flags OR if label is a country and wantsFlags is true
+        const countryCode = getCountryCode(cleanLabel);
+        if (countryCode && (wantsFlags || (wantsImages && !isUrl(currentImg)))) {
+          ds.pointImages[idx] = `https://flagcdn.com/w80/${countryCode}.png`;
+          return;
+        }
+
+        // 2. Resolve famous person profile image if wantsImages is true and we don't have a valid Wikipedia URL
+        // or if the URL returned was a duplicate/composite, or if it's currently empty/null/non-URL
+        if (wantsImages && (!currentImg || isDuplicate || !isUrl(currentImg) || !isWiki)) {
+          // Use LLM-generated search query if available, otherwise default to label
+          const refinedLabel = (ds.pointImageSearchQueries && ds.pointImageSearchQueries[idx])
+            ? String(ds.pointImageSearchQueries[idx]).trim()
+            : cleanLabel;
+
+          // Push promise to resolve the image via our robust famous person resolver
+          const promise = resolveFamousPersonImage(refinedLabel).then(resolvedUrl => {
+            if (resolvedUrl) {
+              ds.pointImages[idx] = resolvedUrl;
+            } else {
+              ds.pointImages[idx] = null;
+            }
+          });
+          fetchPromises.push(promise);
+        }
+      });
+    });
+
+    if (fetchPromises.length > 0) {
+      await Promise.all(fetchPromises);
+    }
+  }
+}
+
+async function fetchWikiImage(label) {
+  try {
+    // 1. Search Wikipedia for the closest page and retrieve its pageimage/thumbnail
+    const searchUrl = `https://en.wikipedia.org/w/api.php?action=query&generator=search&gsrsearch=${encodeURIComponent(label)}&gsrlimit=1&prop=pageimages&format=json&pithumbsize=500`;
+    const res = await fetch(searchUrl, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Antigravity/1.0 (Google DeepMind Team)' }
+    });
+    
+    if (res.ok) {
+      const data = await res.json();
+      if (data.query && data.query.pages) {
+        const pageId = Object.keys(data.query.pages)[0];
+        const page = data.query.pages[pageId];
+        if (page.thumbnail && page.thumbnail.source) {
+          return page.thumbnail.source;
+        }
+      }
+    }
+
+    // 2. Direct title match fallback (following redirects)
+    const directUrl = `https://en.wikipedia.org/w/api.php?action=query&titles=${encodeURIComponent(label)}&prop=pageimages&format=json&pithumbsize=500&redirects=1`;
+    const directRes = await fetch(directUrl, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Antigravity/1.0 (Google DeepMind Team)' }
+    });
+    
+    if (directRes.ok) {
+      const directData = await directRes.json();
+      if (directData.query && directData.query.pages) {
+        const pageId = Object.keys(directData.query.pages)[0];
+        const page = directData.query.pages[pageId];
+        if (page.thumbnail && page.thumbnail.source) {
+          return page.thumbnail.source;
+        }
+      }
+    }
+
+    return null;
+  } catch (e) {
+    console.error(`[WikiResolver] Error resolving image for "${label}":`, e.message);
+    return null;
+  }
+}
+
+async function resolveFamousPersonImage(cleanLabel) {
+  // 1. Try Wikipedia PageImages API first (cleanest, handles naming redirects)
+  let wikiUrl = await fetchWikiImage(cleanLabel);
+  if (wikiUrl) return wikiUrl;
+
+  // 2. Try Tavily Live Web Search Fallback (excluding Wikipedia/Wikimedia redirects)
+  let webUrl = await fetchTavilyImageFallback(cleanLabel);
+  if (webUrl) return webUrl;
+
+  // 3. Manual Wikipedia File check fallback
+  const cleanPersonName = cleanLabel.replace(/\s+(&|and)?\s*[Ff]amily\s*$/i, '').trim();
+  const formattedName = cleanPersonName
+    .split(/\s+/)
+    .map(word => word.charAt(0).toUpperCase() + word.slice(1))
+    .join('_');
+
+  // Try checking .jpg existence
+  const jpgFilename = `${formattedName}.jpg`;
+  if (await checkWikipediaFile(jpgFilename)) {
+    return `https://commons.wikimedia.org/wiki/Special:FilePath/${jpgFilename}`;
+  }
+
+  // Try checking .png existence
+  const pngFilename = `${formattedName}.png`;
+  if (await checkWikipediaFile(pngFilename)) {
+    return `https://commons.wikimedia.org/wiki/Special:FilePath/${pngFilename}`;
+  }
+
+  // Try checking .jpeg existence
+  const jpegFilename = `${formattedName}.jpeg`;
+  if (await checkWikipediaFile(jpegFilename)) {
+    return `https://commons.wikimedia.org/wiki/Special:FilePath/${jpegFilename}`;
+  }
+
+  return null;
+}
+
+async function checkWikipediaFile(name) {
+  const url = `https://commons.wikimedia.org/wiki/Special:FilePath/${encodeURIComponent(name)}?width=500`;
+  try {
+    const res = await fetch(url, {
+      method: 'HEAD',
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Sec-Fetch-Dest': 'document',
+        'Sec-Fetch-Mode': 'navigate',
+        'Sec-Fetch-Site': 'none'
+      },
+      timeout: 2000
+    });
+    return res.ok;
+  } catch (e) {
+    return false;
+  }
+}
+
+async function fetchTavilyImageFallback(label) {
+  const apiKey = process.env.TAVILY_API_KEY;
+  if (!apiKey) return null;
+
+  try {
+    let query = label;
+    if (!/\b(movie|film|song|music|game|book|novel|logo|brand|flag)\b/i.test(label)) {
+      const isCompany = /\b(inc|corp|co|limited|ltd|plc|gmbh|sa|group|company|corporation|brands|industries)\b/i.test(label);
+      query = label + (isCompany ? " logo" : " face profile photo");
+    }
+
+    const response = await fetch('https://api.tavily.com/search', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        api_key: apiKey,
+        query: query,
+        max_results: 3,
+        search_depth: 'basic',
+        include_images: true
+      })
+    });
+
+    if (response.ok) {
+      const data = await response.json();
+      if (data.images && data.images.length > 0) {
+        for (const imgUrl of data.images) {
+          if (typeof imgUrl === 'string' && imgUrl.startsWith('http')) {
+            if (!imgUrl.includes('wikipedia.org') && !imgUrl.includes('wikimedia.org')) {
+              return imgUrl;
+            }
+          }
+        }
+      }
+    }
+  } catch (e) {
+    console.error(`[WikiResolver] Tavily fallback failed for "${label}":`, e.message);
+  }
+  return null;
+}
+
+const COUNTRY_MAP = {
+  'united states': 'us', 'usa': 'us', 'united states of america': 'us', 'america': 'us',
+  'united kingdom': 'gb', 'uk': 'gb', 'great britain': 'gb', 'england': 'gb', 'scotland': 'gb',
+  'canada': 'ca',
+  'germany': 'de', 'deutschland': 'de',
+  'france': 'fr',
+  'italy': 'it', 'italia': 'it',
+  'japan': 'jp',
+  'china': 'cn',
+  'india': 'in',
+  'brazil': 'br', 'brasil': 'br',
+  'russia': 'ru', 'russian federation': 'ru',
+  'australia': 'au',
+  'spain': 'es', 'espana': 'es', 'españa': 'es',
+  'mexico': 'mx', 'méxico': 'mx',
+  'south korea': 'kr', 'korea': 'kr', 'republic of korea': 'kr',
+  'netherlands': 'nl', 'holland': 'nl',
+  'switzerland': 'ch',
+  'turkey': 'tr', 'türkiye': 'tr', 'turkiye': 'tr',
+  'saudi arabia': 'sa',
+  'sweden': 'se',
+  'poland': 'pl',
+  'belgium': 'be',
+  'norway': 'no',
+  'austria': 'at',
+  'denmark': 'dk',
+  'finland': 'fi',
+  'singapore': 'sg',
+  'new zealand': 'nz',
+  'ireland': 'ie',
+  'south africa': 'za',
+  'egypt': 'eg',
+  'united arab emirates': 'ae', 'uae': 'ae',
+  'argentina': 'ar',
+  'chile': 'cl',
+  'colombia': 'co',
+  'peru': 'pe', 'perú': 'pe',
+  'venezuela': 've',
+  'indonesia': 'id',
+  'malaysia': 'my',
+  'philippines': 'ph',
+  'thailand': 'th',
+  'vietnam': 'vn',
+  'pakistan': 'pk',
+  'bangladesh': 'bd',
+  'nigeria': 'ng',
+  'kenya': 'ke',
+  'morocco': 'ma',
+  'ukraine': 'ua',
+  'greece': 'gr',
+  'portugal': 'pt',
+  'hong kong': 'hk',
+  'taiwan': 'tw',
+  'czech republic': 'cz',
+  'romania': 'ro',
+  'hungary': 'hu',
+  'israel': 'il'
+};
+
+function getCountryCode(name) {
+  if (!name) return null;
+  return COUNTRY_MAP[name.toLowerCase().trim()] || null;
 }
 
 /**

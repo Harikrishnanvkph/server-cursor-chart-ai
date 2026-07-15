@@ -186,13 +186,23 @@ app.post('/api/process-chart-enhanced', requireAuth, aiLimiter, async (req, res)
     messageHistory,
     templateStructure, // NEW: Template structure metadata for generating template text content
     formatStructure,
-    webSearch // NEW
+    webSearch, // NEW
+    includeImages // NEW: Toggle to force image fetching
   } = req.body;
 
   try {
 
     if (!input) {
       return res.status(400).json({ error: 'Input text is required' });
+    }
+
+    // Intercept input to force images if toggle is on
+    let finalInput = input;
+    if (includeImages) {
+      const hasImageKeywords = /\b(image|images|icon|icons|picture|pictures|photo|photos|avatar|avatars|portrait|portraits|profile|profiles|flag|flags)\b/i.test(input.toLowerCase());
+      if (!hasImageKeywords) {
+        finalInput = input + " (with images)";
+      }
     }
 
     // Service registry — add new services here, no if/else needed
@@ -216,8 +226,8 @@ app.post('/api/process-chart-enhanced', requireAuth, aiLimiter, async (req, res)
     console.log(`🤖 Processing chart request using: ${service.toUpperCase()} (Model: ${model || 'default'})`);
 
     const aiResponse = (currentChartState && conversationId)
-      ? await svc.modify(input, currentChartState, messageHistory || [], model, templateStructure, formatStructure, webSearch)
-      : await svc.generate(input, model, templateStructure, formatStructure, webSearch);
+      ? await svc.modify(finalInput, currentChartState, messageHistory || [], model, templateStructure, formatStructure, webSearch)
+      : await svc.generate(finalInput, model, templateStructure, formatStructure, webSearch);
 
     // Determine if this is a creation or modification
     const isModification = !!(currentChartState && conversationId);

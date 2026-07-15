@@ -61,6 +61,6 @@ RULES:
 - chartConfig: PARTIAL — only changed properties. Merged into existing config.
 - chartType: "bar"|"line"|"pie"|"doughnut"|"scatter"|"bubble"|"radar"|"polarArea"|"horizontalBar"|"stackedBar"|"area"|"pie3d"|"doughnut3d"
 - "3D pie" = "pie3d", "3D doughnut" = "doughnut3d"
-- All arrays same length. Include pointImages/pointImageConfig only when relevant.
+- All arrays same length. Include pointImages/pointImageSearchQueries/pointImageConfig only when relevant.
 - New chart: generate fresh data, labels, config for the new topic.
 - Never "improve" or "enhance" anything unasked.

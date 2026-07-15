@@ -53,7 +53,8 @@ DO NOT include an "options" or "chartConfig" object. The frontend handles all ch
 
 POINT IMAGES (only when user explicitly requests images/icons on data points):
 Include these additional fields in each dataset:
-- "pointImages": Array of working image URLs (.png, .jpg, .jpeg, .webp, .svg only)
+- "pointImages": Array of working image URLs corresponding to each data point (.png, .jpg, .jpeg, .webp, .svg only). Use empty strings ("") or null for missing images.
+- "pointImageSearchQueries": Array of specific search terms for each data point to help the backend search engine find correct images (e.g. "Blast 2026 Tamil movie", "Youth 2002 Tamil movie Vijay", "Apple logo", "Matterhorn peak Switzerland"). Same length as labels.
 - "pointImageConfig": Array of objects like { "type": "circle", "size": 20, "position": "center", "arrow": false }
 
 CRITICAL: Use most recent data available.
