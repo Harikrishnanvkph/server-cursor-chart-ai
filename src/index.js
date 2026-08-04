@@ -101,6 +101,27 @@ const globalLimiter = rateLimit({
 
 app.use(globalLimiter);
 
+// CSRF Protection: validate Origin header on state-changing requests
+// - Safe methods (GET/HEAD/OPTIONS): always allowed
+// - No Origin header: request came through same-origin rewrite proxy → allowed
+// - Origin present and in allowedOrigins: legitimate cross-origin request → allowed
+// - Origin present but NOT in allowedOrigins: potential CSRF attack → blocked
+app.use((req, res, next) => {
+  if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) {
+    return next();
+  }
+  const origin = req.headers['origin'];
+  if (!origin) {
+    // No Origin = same-origin request via Next.js rewrite or non-browser client
+    return next();
+  }
+  if (allowedOrigins.includes(origin)) {
+    return next();
+  }
+  console.warn(`[CSRF] Blocked ${req.method} ${req.path} from origin: ${origin}`);
+  return res.status(403).json({ error: 'Request blocked' });
+});
+
 // Stricter rate limiter for AI endpoints (prevents credit abuse)
 const aiLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
@@ -260,8 +281,7 @@ app.post('/api/process-chart-enhanced', requireAuth, aiLimiter, async (req, res)
   } catch (error) {
     console.error(`Error processing chart request with ${service || 'google'}:`, error);
     res.status(500).json({
-      error: `Failed to process chart request with ${service || 'google'}`,
-      details: error.message
+      error: `Failed to process chart request`
     });
   }
 });

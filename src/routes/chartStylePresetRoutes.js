@@ -1,5 +1,5 @@
 import express from 'express';
-import { requireAuth } from '../middleware/authMiddleware.js';
+import { requireAuth, requireAdmin } from '../middleware/authMiddleware.js';
 import chartStylePresetService from '../services/chartStylePresetService.js';
 
 const router = express.Router();
@@ -129,7 +129,7 @@ router.delete('/chart-style-presets/:id', requireAuth, async (req, res) => {
 });
 
 // Toggle official status (admin only)
-router.patch('/chart-style-presets/:id/official', requireAuth, async (req, res) => {
+router.patch('/chart-style-presets/:id/official', requireAuth, requireAdmin, async (req, res) => {
   try {
     const { id } = req.params;
     const { isOfficial } = req.body;

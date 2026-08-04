@@ -4,17 +4,6 @@ import googleOAuthService from '../services/googleOAuthService.js'
 import secureSessionStore from '../services/sessionStore.js'
 import crypto from 'crypto'
 
-function decodeIdToken(idToken) {
-  const parts = idToken.split('.')
-  if (parts.length !== 3) {
-    throw new Error('Invalid JWT format')
-  }
-  const payloadBase64 = parts[1]
-  const base64 = payloadBase64.replace(/-/g, '+').replace(/_/g, '/')
-  const jsonString = Buffer.from(base64, 'base64').toString('utf8')
-  return JSON.parse(jsonString)
-}
-
 const isProd = process.env.NODE_ENV === 'production'
 
 function setSessionCookies(res, session) {
@@ -229,18 +218,9 @@ export async function googleCallback(req, res) {
     // Exchange code for tokens
     const tokens = await googleOAuthService.exchangeCodeForToken(code)
 
-    // Get user info from Google (decoded locally from id_token to avoid an extra 200ms network fetch)
-    let userInfo
-    if (tokens.id_token) {
-      try {
-        userInfo = decodeIdToken(tokens.id_token)
-      } catch (err) {
-        console.warn('Failed to decode id_token locally, falling back to API fetch:', err)
-        userInfo = await googleOAuthService.getUserInfo(tokens.access_token)
-      }
-    } else {
-      userInfo = await googleOAuthService.getUserInfo(tokens.access_token)
-    }
+    // Get user info from Google via verified API call
+    // (always uses the access_token validated by Google's servers)
+    const userInfo = await googleOAuthService.getUserInfo(tokens.access_token)
 
     // Create or get user session
     const session = await secureSessionStore.createSession(
@@ -305,15 +285,15 @@ export async function passwordForgot(req, res) {
 // Password reset
 export async function passwordReset(req, res) {
   try {
-    const { password, access_token } = req.body
+    const { password } = req.body
 
     if (!password) {
       return res.status(400).json({ error: 'New password required' })
     }
 
-    // The access_token should come from the reset email link
-    // It authenticates which user is performing the reset
-    const tokenToUse = access_token || req.cookies?.access_token || req.headers.authorization?.replace('Bearer ', '')
+    // The access_token should come from the reset email link (via cookie or Authorization header)
+    // Never accept tokens from request body — they may appear in proxy/server access logs
+    const tokenToUse = req.cookies?.access_token || req.headers.authorization?.replace('Bearer ', '')
 
     if (!tokenToUse) {
       return res.status(401).json({ error: 'Authentication token required for password reset' })

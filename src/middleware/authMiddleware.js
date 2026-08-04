@@ -1,5 +1,6 @@
 import { supabaseAdminClient, supabaseUserClient } from '../supabase/client.js';
 import secureSessionStore from '../services/sessionStore.js';
+import crypto from 'crypto';
 
 // Helper to wrap a promise with a timeout
 function withTimeout(promise, ms, errorMessage = 'Request timed out') {
@@ -87,16 +88,23 @@ async function ensureUserProfile(userId, userEmail = null, userName = null, user
   }
 }
 
-// Simple in-memory auth cache (token -> { user, expiresAt })
+// Simple in-memory auth cache (hashed token -> { user, expiresAt })
+// Tokens are SHA-256 hashed before storage so a memory dump doesn't expose raw tokens
 const authCache = new Map();
 const AUTH_CACHE_TTL_MS = 15 * 60 * 1000; // 15 minutes — reduced external Supabase calls by 3×
+const MAX_AUTH_CACHE_SIZE = 500;
+
+function hashToken(token) {
+  return crypto.createHash('sha256').update(token).digest('hex');
+}
 
 function getCachedUser(token) {
   if (!token) return null;
-  const entry = authCache.get(token);
+  const key = hashToken(token);
+  const entry = authCache.get(key);
   if (!entry) return null;
   if (Date.now() > entry.expiresAt) {
-    authCache.delete(token);
+    authCache.delete(key);
     return null;
   }
   return entry.user;
@@ -104,7 +112,13 @@ function getCachedUser(token) {
 
 function setCachedUser(token, user) {
   if (!token || !user) return;
-  authCache.set(token, { user, expiresAt: Date.now() + AUTH_CACHE_TTL_MS });
+  const key = hashToken(token);
+  // Evict oldest entry if cache is full to prevent unbounded memory growth
+  if (authCache.size >= MAX_AUTH_CACHE_SIZE) {
+    const oldestKey = authCache.keys().next().value;
+    if (oldestKey) authCache.delete(oldestKey);
+  }
+  authCache.set(key, { user, expiresAt: Date.now() + AUTH_CACHE_TTL_MS });
 }
 
 // Rate limiting configuration
@@ -431,11 +445,8 @@ export async function requireAdmin(req, res, next) {
       return res.status(401).json({ error: 'Authentication required' });
     }
 
-    // Check if user has admin privileges
-    // Support database is_admin property, JWT role metadata, or environment fallback email
-    const isAdmin = req.user.is_admin === true || 
-                    req.user.role === 'admin' || 
-                    req.user.email === process.env.ADMIN_EMAIL;
+    // Check if user has admin privileges (database flag only — no spoofable fallbacks)
+    const isAdmin = req.user.is_admin === true;
 
     if (!isAdmin) {
       return res.status(403).json({ error: 'Admin privileges required' });

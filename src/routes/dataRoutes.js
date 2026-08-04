@@ -151,10 +151,7 @@ router.get('/conversations/:id/messages', async (req, res) => {
     res.json(messages || []);
   } catch (error) {
     console.error('❌ Error fetching messages:', error.message);
-    res.status(500).json({
-      error: 'Failed to fetch messages',
-      details: error.message
-    });
+    res.status(500).json({ error: 'Failed to fetch messages' });
   }
 });
 
@@ -186,8 +183,7 @@ router.post('/chart-snapshots', async (req, res) => {
     console.error('Error saving chart snapshot:', error);
     const errorMessage = error.message || error.error || 'Failed to save chart snapshot';
     res.status(500).json({
-      error: errorMessage,
-      details: error.details || error.hint || null
+      error: 'Failed to save chart snapshot'
     });
   }
 });
@@ -217,8 +213,7 @@ router.put('/chart-snapshots/:id', async (req, res) => {
     console.error('Error updating chart snapshot:', error);
     const errorMessage = error.message || error.error || 'Failed to update chart snapshot';
     res.status(500).json({
-      error: errorMessage,
-      details: error.details || error.hint || null
+      error: 'Failed to update chart snapshot'
     });
   }
 });
@@ -493,7 +488,7 @@ router.post('/upload-image', async (req, res) => {
     res.status(200).json({ publicUrl });
   } catch (error) {
     console.error('Error uploading image to storage:', error);
-    res.status(500).json({ error: 'Failed to upload image', details: error.message });
+    res.status(500).json({ error: 'Failed to upload image' });
   }
 });
 
@@ -606,7 +601,7 @@ router.get('/my-images', async (req, res) => {
     res.json(imagesWithMappings);
   } catch (error) {
     console.error('Error fetching user images and mappings:', error);
-    res.status(500).json({ error: 'Failed to fetch images', details: error.message });
+    res.status(500).json({ error: 'Failed to fetch images' });
   }
 });
 
@@ -759,7 +754,7 @@ router.delete('/my-images/:id', async (req, res) => {
     });
   } catch (error) {
     console.error('Error deleting image and cascading dependencies:', error);
-    res.status(500).json({ error: 'Failed to delete image', details: error.message });
+    res.status(500).json({ error: 'Failed to delete image' });
   }
 });
 
