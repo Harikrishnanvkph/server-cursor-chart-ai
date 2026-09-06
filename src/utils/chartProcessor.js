@@ -35,13 +35,25 @@ export class ChartProcessor {
 
       let searchResults = null;
       if (webSearch && !this.adapter.hasNativeSearch) {
-        const queryDecision = await searchService.determineSearchQuery(inputText, [], this.adapter.serviceName);
-        if (queryDecision !== 'NO_SEARCH') {
-          try {
-            searchResults = await searchService.search(queryDecision);
-          } catch (searchError) {
-            console.error('Non-blocking search error in generateChart:', searchError);
+        let searchQuery = inputText;
+        try {
+          const queryDecision = await searchService.determineSearchQuery(inputText, [], this.adapter.serviceName);
+          if (queryDecision && queryDecision !== 'NO_SEARCH') {
+            searchQuery = queryDecision;
           }
+        } catch (queryErr) {
+          console.warn('⚠️ [WebSearch] Query optimizer error, falling back to user input:', queryErr.message);
+        }
+
+        // Ensure search query stays within Tavily API limit (350 chars)
+        if (searchQuery.length > 350) {
+          searchQuery = searchQuery.substring(0, 350);
+        }
+
+        try {
+          searchResults = await searchService.search(searchQuery);
+        } catch (searchError) {
+          console.error('❌ [WebSearch] Tavily search failed:', searchError.message);
         }
       }
 
@@ -112,13 +124,25 @@ export class ChartProcessor {
 
       let searchResults = null;
       if (webSearch && !this.adapter.hasNativeSearch) {
-        const queryDecision = await searchService.determineSearchQuery(inputText, messageHistory, this.adapter.serviceName);
-        if (queryDecision !== 'NO_SEARCH') {
-          try {
-            searchResults = await searchService.search(queryDecision);
-          } catch (searchError) {
-            console.error('Non-blocking search error in modifyChart:', searchError);
+        let searchQuery = inputText;
+        try {
+          const queryDecision = await searchService.determineSearchQuery(inputText, messageHistory, this.adapter.serviceName);
+          if (queryDecision && queryDecision !== 'NO_SEARCH') {
+            searchQuery = queryDecision;
           }
+        } catch (queryErr) {
+          console.warn('⚠️ [WebSearch] Query optimizer error, falling back to user input:', queryErr.message);
+        }
+
+        // Ensure search query stays within Tavily API limit (350 chars)
+        if (searchQuery.length > 350) {
+          searchQuery = searchQuery.substring(0, 350);
+        }
+
+        try {
+          searchResults = await searchService.search(searchQuery);
+        } catch (searchError) {
+          console.error('❌ [WebSearch] Tavily search failed:', searchError.message);
         }
       }
 
@@ -208,7 +232,11 @@ export class ChartProcessor {
    * @returns {string} - System prompt
    */
   buildSystemPrompt(aiContext, templateStructure = null, formatStructure = null, searchResults = null) {
+    const currentYear = new Date().getFullYear();
     let prompt = `${aiContext}
+
+CURRENT YEAR / TIME CONTEXT: ${currentYear} (Today's date context: Year ${currentYear})
+CRITICAL: When generating data for real-time or current requests, reflect real-world facts for ${currentYear} (or up to ${currentYear}). Do NOT restrict data to past years like 2024 or 2025 unless explicitly asked by the user.
 
 You are an expert chart data generator. Always respond with valid JSON.
 Focus on creating accurate, well-structured data with meaningful titles and axis labels.
@@ -218,10 +246,12 @@ Do NOT include "options" or "chartConfig" — the frontend handles all chart con
       prompt += `
 
 === LIVE WEB SEARCH GROUNDING DATA ===
-The following real-time search results are retrieved from the web regarding the user's request.
-You MUST use these facts, figures, and data points to generate accurate and current chart data.
-Do NOT make up or hallucinate numbers if they are present in these search results.
-If the search results contain any image links under "[Search Results Image Links (Direct Image URLs)]", you MUST use these exact URLs if the user requests images, icons, or flags on data points or within the text, instead of fabricating fake image links.
+The following real-time search results were retrieved from the web for this specific query.
+YOU MUST:
+1. Extract exact numerical data, figures, statistics, and dates directly from these search results.
+2. Maintain realistic values and proper units (e.g. $, %, millions, billions, kg, etc.) in titles and axis labels.
+3. Do NOT make up or hallucinate numbers when real figures are present in the search results below.
+4. If image links are provided under "[Search Results Image Links (Direct Image URLs)]", prioritize these exact URLs for logos, icons, or entity photos.
 
 Search Results:
 ${searchResults}
@@ -387,9 +417,10 @@ Generate contextually relevant content for each section based on the chart topic
     const slimData = this.slimChartData(currentChartState.chartData);
     const slimConfig = this.slimChartConfig(currentChartState.chartConfig);
 
-    // F3: AI_Modification_Inform.txt (modificationContext) already covers all instructions
-    // — no duplicate inline instructions needed here
-    let prompt = `${modificationContext}`;
+    const currentYear = new Date().getFullYear();
+    let prompt = `${modificationContext}
+
+CURRENT YEAR / TIME CONTEXT: ${currentYear} (Today's date context: Year ${currentYear})`;
 
     if (searchResults) {
       prompt += `
@@ -960,7 +991,7 @@ USER'S CURRENT REQUEST: ${inputText}`;
 
     const promptLower = (userPrompt || "").toLowerCase();
     const wantsFlags = /\b(flag|flags|country flag|country flags)\b/i.test(promptLower);
-    const wantsImages = /\b(image|images|icon|icons|picture|pictures|photo|photos|avatar|avatars|portrait|portraits|profile|profiles)\b/i.test(promptLower);
+    const wantsImages = /\b(image|images|icon|icons|picture|pictures|photo|photos|avatar|avatars|portrait|portraits|profile|profiles|flag|flags|logo|logos|brand|brands|emblem|emblems|symbol|symbols)\b/i.test(promptLower);
 
     // Check if the LLM already returned pointImages
     const hasPointImages = datasets.some(ds => ds.pointImages && Array.isArray(ds.pointImages));
@@ -1044,7 +1075,50 @@ USER'S CURRENT REQUEST: ${inputText}`;
     if (fetchPromises.length > 0) {
       await Promise.all(fetchPromises);
     }
+
+    // Final pass: normalize all Wikimedia/Wikipedia image URLs to official Special:FilePath format
+    // This prevents the "Error: Use thumbnail sizes listed on https://w.wiki/GHai" error from upload.wikimedia.org
+    datasets.forEach(ds => {
+      if (ds.pointImages && Array.isArray(ds.pointImages)) {
+        ds.pointImages = ds.pointImages.map(img => normalizeWikimediaUrl(img));
+      }
+    });
   }
+}
+
+function normalizeWikimediaUrl(url) {
+  if (!url || typeof url !== 'string') return url;
+  if (!url.includes('wikimedia.org') && !url.includes('wikipedia.org')) return url;
+
+  try {
+    const parsed = new URL(url);
+    const path = parsed.pathname;
+
+    let filename = path.substring(path.lastIndexOf('/') + 1);
+
+    // Strip thumbnail scaling prefix if present (e.g. 220px-Shiv_Nadar_2015.jpg -> Shiv_Nadar_2015.jpg)
+    if (/^\d+px-/.test(filename)) {
+      filename = filename.replace(/^\d+px-/, '');
+    }
+
+    // Handle SVG conversions (e.g., .../foo.svg/220px-foo.svg.png -> foo.svg)
+    if (path.toLowerCase().includes('.svg/')) {
+      const match = path.match(/^(.*\.svg)\//i);
+      if (match) {
+        const parts = match[1].split('/');
+        filename = parts[parts.length - 1];
+      }
+    }
+
+    if (filename) {
+      const cleanFilename = decodeURIComponent(filename);
+      const host = parsed.hostname.includes('upload.wikimedia.org') ? 'commons.wikimedia.org' : parsed.hostname;
+      return `https://${host}/wiki/Special:FilePath/${encodeURIComponent(cleanFilename)}?width=500`;
+    }
+  } catch (e) {
+    // If URL parsing fails, return original
+  }
+  return url;
 }
 
 async function fetchWikiImage(label) {
@@ -1061,7 +1135,7 @@ async function fetchWikiImage(label) {
         const pageId = Object.keys(data.query.pages)[0];
         const page = data.query.pages[pageId];
         if (page.thumbnail && page.thumbnail.source) {
-          return page.thumbnail.source;
+          return normalizeWikimediaUrl(page.thumbnail.source);
         }
       }
     }
@@ -1077,9 +1151,24 @@ async function fetchWikiImage(label) {
       if (directData.query && directData.query.pages) {
         const pageId = Object.keys(directData.query.pages)[0];
         const page = directData.query.pages[pageId];
-        if (page.thumbnail && page.thumbnail.source) {
-          return page.thumbnail.source;
+        if (page && page.thumbnail && page.thumbnail.source) {
+          return normalizeWikimediaUrl(page.thumbnail.source);
         }
+      }
+    }
+
+    // 3. MediaWiki REST API Summary fallback
+    const restUrl = `https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(label)}`;
+    const restRes = await fetch(restUrl, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Antigravity/1.0 (Google DeepMind Team)' }
+    });
+    if (restRes.ok) {
+      const restData = await restRes.json();
+      if (restData.thumbnail && restData.thumbnail.source) {
+        return normalizeWikimediaUrl(restData.thumbnail.source);
+      }
+      if (restData.originalimage && restData.originalimage.source) {
+        return normalizeWikimediaUrl(restData.originalimage.source);
       }
     }
 
@@ -1146,6 +1235,40 @@ async function checkWikipediaFile(name) {
   }
 }
 
+async function validateImageUrl(url, timeoutMs = 2500) {
+  if (!url || typeof url !== 'string' || !url.startsWith('http')) return false;
+
+  // Trusted fast paths
+  if (url.includes('wikimedia.org') || url.includes('wikipedia.org') || url.includes('flagcdn.com')) {
+    return true;
+  }
+
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+    const res = await fetch(url, {
+      method: 'HEAD',
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8'
+      },
+      signal: controller.signal
+    });
+    clearTimeout(timeoutId);
+
+    if (res.ok) {
+      const contentType = (res.headers.get('content-type') || '').toLowerCase();
+      if (contentType.includes('image/') || contentType.includes('octet-stream')) {
+        return true;
+      }
+    }
+    return false;
+  } catch (e) {
+    return false;
+  }
+}
+
 async function fetchTavilyImageFallback(label) {
   const apiKey = process.env.TAVILY_API_KEY;
   if (!apiKey) return null;
@@ -1153,8 +1276,8 @@ async function fetchTavilyImageFallback(label) {
   try {
     let query = label;
     if (!/\b(movie|film|song|music|game|book|novel|logo|brand|flag)\b/i.test(label)) {
-      const isCompany = /\b(inc|corp|co|limited|ltd|plc|gmbh|sa|group|company|corporation|brands|industries)\b/i.test(label);
-      query = label + (isCompany ? " logo" : " face profile photo");
+      const isCompany = /\b(inc|corp|co|limited|ltd|plc|gmbh|sa|group|company|corporation|brands|industries|apple|google|microsoft|amazon|meta|tesla|nvidia|samsung)\b/i.test(label);
+      query = label + (isCompany ? " logo png" : " face profile photo");
     }
 
     const response = await fetch('https://api.tavily.com/search', {
@@ -1163,7 +1286,7 @@ async function fetchTavilyImageFallback(label) {
       body: JSON.stringify({
         api_key: apiKey,
         query: query,
-        max_results: 3,
+        max_results: 5,
         search_depth: 'basic',
         include_images: true
       })
@@ -1172,10 +1295,14 @@ async function fetchTavilyImageFallback(label) {
     if (response.ok) {
       const data = await response.json();
       if (data.images && data.images.length > 0) {
-        for (const imgUrl of data.images) {
-          if (typeof imgUrl === 'string' && imgUrl.startsWith('http')) {
-            if (!imgUrl.includes('wikipedia.org') && !imgUrl.includes('wikimedia.org')) {
-              return imgUrl;
+        for (const imgItem of data.images) {
+          const rawUrl = typeof imgItem === 'string' ? imgItem : (imgItem.url || imgItem);
+          if (typeof rawUrl === 'string' && rawUrl.startsWith('http')) {
+            if (!rawUrl.includes('wikipedia.org') && !rawUrl.includes('wikimedia.org')) {
+              const isValid = await validateImageUrl(rawUrl);
+              if (isValid) {
+                return rawUrl;
+              }
             }
           }
         }

@@ -37,6 +37,9 @@ console.log('✅ All required environment variables are configured');
 const app = express();
 const port = process.env.PORT || 5000;
 
+// Trust first proxy (necessary when behind Next.js rewrite proxy or reverse proxy for express-rate-limit)
+app.set('trust proxy', 1);
+
 app.use(helmet({
   contentSecurityPolicy: {
     directives: {
@@ -220,7 +223,7 @@ app.post('/api/process-chart-enhanced', requireAuth, aiLimiter, async (req, res)
     // Intercept input to force images if toggle is on
     let finalInput = input;
     if (includeImages) {
-      const hasImageKeywords = /\b(image|images|icon|icons|picture|pictures|photo|photos|avatar|avatars|portrait|portraits|profile|profiles|flag|flags)\b/i.test(input.toLowerCase());
+      const hasImageKeywords = /\b(image|images|icon|icons|picture|pictures|photo|photos|avatar|avatars|portrait|portraits|profile|profiles|flag|flags|logo|logos|brand|brands|emblem|emblems|symbol|symbols)\b/i.test(input.toLowerCase());
       if (!hasImageKeywords) {
         finalInput = input + " (with images)";
       }
