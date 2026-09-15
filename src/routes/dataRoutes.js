@@ -5,6 +5,7 @@ import templateService from '../services/templateService.js';
 import formatService from '../services/formatService.js';
 import { supabaseAdminClient } from '../supabase/client.js';
 import sharp from 'sharp';
+import { canSaveCloudChart } from '../services/subscriptionService.js';
 
 const router = express.Router();
 
@@ -31,8 +32,8 @@ router.get('/shared/:shareId', async (req, res) => {
   }
 });
 
-// Apply auth middleware to all remaining routes
-router.use(requireAuth);
+// Note: requireAuth is applied in index.js when mounting this router (app.use('/api/data', requireAuth, dataRoutes))
+// No need to apply it again here — it was previously duplicated causing unnecessary middleware overhead
 
 // =============================================
 // CONVERSATION ROUTES
@@ -74,6 +75,16 @@ router.post('/conversations', async (req, res) => {
 
     if (!title) {
       return res.status(400).json({ error: 'Title is required' });
+    }
+
+    // Check cloud chart limit (10 for Free, 30 for Pro)
+    const saveCheck = await canSaveCloudChart(userId);
+    if (!saveCheck.allowed) {
+      return res.status(403).json({
+        error: saveCheck.error,
+        code: 'CLOUD_SAVE_LIMIT_REACHED',
+        subscription: saveCheck.subscription
+      });
     }
 
     const conversation = await chartDataService.createConversation(userId, title, description);

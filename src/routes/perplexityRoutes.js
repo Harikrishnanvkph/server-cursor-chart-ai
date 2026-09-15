@@ -5,6 +5,7 @@ import {
   getAvailablePerplexityModels,
   validatePerplexityApiKey
 } from '../services/perplexityService.js';
+import { canConsumeAiCredit, deductAiCredit } from '../services/subscriptionService.js';
 
 const router = express.Router();
 
@@ -31,6 +32,18 @@ router.post('/process-chart', async (req, res) => {
       return res.status(500).json({ error: 'Perplexity API key not configured' });
     }
 
+    const userId = req.user?.user_id || req.user?.id;
+    if (userId) {
+      const creditCheck = await canConsumeAiCredit(userId);
+      if (!creditCheck.allowed) {
+        return res.status(403).json({
+          error: creditCheck.error,
+          code: 'AI_CREDITS_EXHAUSTED',
+          subscription: creditCheck.subscription
+        });
+      }
+    }
+
     let aiResponse;
 
     // Determine if this is a modification or new chart
@@ -38,6 +51,11 @@ router.post('/process-chart', async (req, res) => {
       aiResponse = await modifyChartDataWithPerplexity(input, currentChartState, messageHistory || [], model);
     } else {
       aiResponse = await generateChartDataWithPerplexity(input, model);
+    }
+
+    let updatedSubscription = null;
+    if (userId) {
+      updatedSubscription = await deductAiCredit(userId);
     }
 
     // Format response to match frontend expectations
@@ -50,7 +68,8 @@ router.post('/process-chart', async (req, res) => {
       changes: aiResponse.changes || [],
       suggestions: aiResponse.suggestions || [],
       service: 'perplexity',
-      _metadata: aiResponse._metadata
+      _metadata: aiResponse._metadata,
+      subscription: updatedSubscription
     };
 
     // Validate that we have the minimum required data

@@ -2,6 +2,7 @@ import { supabaseUserClient, supabaseAdminClient, getSupabaseAuthUrls } from '..
 import { signInSchema, signUpSchema } from '../utils/validators.js'
 import googleOAuthService from '../services/googleOAuthService.js'
 import secureSessionStore from '../services/sessionStore.js'
+import { getUserSubscription, setSubscriptionTier } from '../services/subscriptionService.js'
 import crypto from 'crypto'
 
 const isProd = process.env.NODE_ENV === 'production'
@@ -68,17 +69,16 @@ export async function signIn(req, res) {
 
     let user = data.user
 
-    // Look up admin status from profiles table
+    // Look up admin status and subscription details (single query via getUserSubscription)
     try {
-      const { data: profile } = await supabaseAdminClient
-        .from('profiles')
-        .select('is_admin')
-        .eq('id', user.id)
-        .single()
-
-      user = { ...user, is_admin: profile?.is_admin || false }
+      const sub = await getUserSubscription(user.id)
+      if (sub) {
+        user = { ...user, ...sub }
+      } else {
+        user = { ...user, is_admin: false }
+      }
     } catch (profileError) {
-      console.warn('Failed to fetch admin status for user:', user.id, profileError?.message)
+      console.warn('Failed to fetch admin/subscription status for user:', user.id, profileError?.message)
       user = { ...user, is_admin: false }
     }
 
@@ -96,49 +96,92 @@ export async function signIn(req, res) {
 // Get current user
 export async function me(req, res) {
   try {
-    // If the middleware (requireAuth or requireAuthEnhanced) has already authenticated/refreshed the user, return it
-    if (req.user) {
-      return res.json({ user: req.user })
-    }
-
-    const accessToken = req.cookies.access_token || req.headers.authorization?.replace('Bearer ', '')
-
-    if (!accessToken) {
-      return res.status(401).json({ error: 'No access token provided' })
-    }
-
-    // Try to validate as OAuth session first
-    let user = await secureSessionStore.validateSession(accessToken)
+    let user = req.user
 
     if (!user) {
-      // Try Supabase auth as fallback
-      const { data: { user: supabaseUser }, error } = await supabaseUserClient.auth.getUser(accessToken)
-      if (error || !supabaseUser) {
-        return res.status(401).json({ error: 'Invalid or expired token' })
+      const accessToken = req.cookies.access_token || req.headers.authorization?.replace('Bearer ', '')
+
+      if (!accessToken) {
+        return res.status(401).json({ error: 'No access token provided' })
       }
-      user = supabaseUser
+
+      // Try to validate as OAuth session first
+      user = await secureSessionStore.validateSession(accessToken)
+
+      if (!user) {
+        // Try Supabase auth as fallback
+        const { data: { user: supabaseUser }, error } = await supabaseUserClient.auth.getUser(accessToken)
+        if (error || !supabaseUser) {
+          return res.status(401).json({ error: 'Invalid or expired token' })
+        }
+        user = supabaseUser
+      }
+
+      // getUserSubscription now returns is_admin alongside subscription fields
+      const userId = user.user_id || user.id
+      try {
+        const sub = await getUserSubscription(userId)
+        if (sub) {
+          user = { ...user, ...sub }
+        } else {
+          user = { ...user, is_admin: false }
+        }
+      } catch (profileError) {
+        console.warn('Failed to fetch admin/subscription status for user:', userId, profileError?.message)
+        user = { ...user, is_admin: false }
+      }
     }
 
-    // Look up admin status from profiles table
     const userId = user.user_id || user.id
-    try {
-      const { data: profile } = await supabaseAdminClient
-        .from('profiles')
-        .select('is_admin')
-        .eq('id', userId)
-        .single()
-
-      user = { ...user, is_admin: profile?.is_admin || false }
-    } catch (profileError) {
-      // If profile lookup fails, default to non-admin
-      console.warn('Failed to fetch admin status for user:', userId, profileError?.message)
-      user = { ...user, is_admin: false }
+    if (userId && !user.subscription_tier) {
+      // Only fetch if not already enriched above
+      try {
+        const sub = await getUserSubscription(userId)
+        if (sub) {
+          user = { ...user, ...sub }
+        }
+      } catch (subErr) {
+        console.warn('Error fetching subscription for user:', userId, subErr?.message)
+      }
     }
 
     res.json({ user })
   } catch (error) {
     console.error('Me endpoint error:', error)
     res.status(500).json({ error: 'Internal server error' })
+  }
+}
+
+// Upgrade user subscription to Pro
+// TODO: PAYMENT REQUIRED — This endpoint currently grants Pro tier instantly without
+// any payment verification. Before production, integrate Stripe Checkout and only
+// upgrade the user after receiving a verified `checkout.session.completed` webhook.
+export async function upgradeSubscription(req, res) {
+  try {
+    const userId = req.user?.user_id || req.user?.id
+    if (!userId) {
+      return res.status(401).json({ error: 'Authentication required' })
+    }
+    const updatedSub = await setSubscriptionTier(userId, 'pro')
+    res.json({ success: true, message: 'Upgraded to Pro successfully', subscription: updatedSub })
+  } catch (error) {
+    console.error('Upgrade subscription error:', error)
+    res.status(500).json({ error: error.message || 'Failed to upgrade subscription' })
+  }
+}
+
+// Downgrade user subscription to Free
+export async function downgradeSubscription(req, res) {
+  try {
+    const userId = req.user?.user_id || req.user?.id
+    if (!userId) {
+      return res.status(401).json({ error: 'Authentication required' })
+    }
+    const updatedSub = await setSubscriptionTier(userId, 'free')
+    res.json({ success: true, message: 'Downgraded to Free', subscription: updatedSub })
+  } catch (error) {
+    console.error('Downgrade subscription error:', error)
+    res.status(500).json({ error: error.message || 'Failed to downgrade subscription' })
   }
 }
 
@@ -387,10 +430,22 @@ export async function guestSignIn(req, res) {
       return res.status(400).json({ error: error.message })
     }
 
+    let guestUser = { ...data.user, full_name: 'Guest User' }
+
+    // Enrich with subscription data so guest users see credit pills and quotas
+    try {
+      const sub = await getUserSubscription(guestUser.id)
+      if (sub) {
+        guestUser = { ...guestUser, ...sub }
+      }
+    } catch (subErr) {
+      console.warn('Failed to fetch subscription for guest user:', subErr?.message)
+    }
+
     setSessionCookies(res, data.session)
     res.json({
       message: 'Signed in as guest',
-      user: { ...data.user, full_name: 'Guest User' },
+      user: guestUser,
     })
   } catch (error) {
     console.error('Guest sign-in error:', error)

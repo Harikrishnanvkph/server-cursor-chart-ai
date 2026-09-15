@@ -1,5 +1,5 @@
 import { Router } from 'express'
-import { signUp, signIn, me, signOut, googleStart, googleCallback, passwordForgot, passwordReset, resendVerification, guestSignIn } from '../controllers/authController.js'
+import { signUp, signIn, me, signOut, googleStart, googleCallback, passwordForgot, passwordReset, resendVerification, guestSignIn, upgradeSubscription, downgradeSubscription } from '../controllers/authController.js'
 import { requireAuth, rateLimitMiddleware, requireAuthEnhanced } from '../middleware/authMiddleware.js'
 
 const router = Router()
@@ -22,6 +22,10 @@ router.post('/resend-verification', resendVerification)
 // Protected routes (require authentication)
 router.get('/me', requireAuthEnhanced, me)
 router.post('/signout', requireAuthEnhanced, signOut)
+
+// Subscription management endpoints
+router.post('/subscription/upgrade', requireAuthEnhanced, upgradeSubscription)
+router.post('/subscription/downgrade', requireAuthEnhanced, downgradeSubscription)
 
 // Example protected route template
 router.get('/protected/ping', requireAuthEnhanced, (req, res) => {

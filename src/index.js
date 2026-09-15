@@ -13,7 +13,8 @@ import openrouterRoutes from './routes/openrouterRoutes.js';
 import deepseekRoutes from './routes/deepseekRoutes.js';
 import geminiRoutes from './routes/geminiRoutes.js';
 import imageProxyRoutes from './routes/imageProxyRoutes.js';
-import { requireAuth, requireAdmin, rateLimitMiddleware, getSecurityStats, blockIP, unblockIP } from './middleware/authMiddleware.js'
+import { requireAuth, requireAdmin, rateLimitMiddleware, getSecurityStats, blockIP, unblockIP } from './middleware/authMiddleware.js';
+import { canConsumeAiCredit, deductAiCredit } from './services/subscriptionService.js';
 
 // Check required environment variables
 const requiredEnvVars = [
@@ -63,16 +64,17 @@ app.use(cookieParser());
 app.use(compression({ threshold: '1kb' }));
 app.use(express.json({ limit: '10mb' })); // Limit request body size
 
-// CORS with enhanced security
 const allowedOrigins = [
   'http://localhost:3000',
   'http://localhost:3001',
   'http://localhost:3002',
   'http://localhost:3003',
-  'http://192.168.1.3:3000' //this is temporary for mobile testing only
+  'https://aichartor.com',
+  'https://www.aichartor.com',
+  'http://192.168.1.3:3000' // temporary for mobile testing only
 ];
 
-if (process.env.FRONTEND_URL) {
+if (process.env.FRONTEND_URL && !allowedOrigins.includes(process.env.FRONTEND_URL)) {
   allowedOrigins.push(process.env.FRONTEND_URL);
 }
 
@@ -220,6 +222,19 @@ app.post('/api/process-chart-enhanced', requireAuth, aiLimiter, async (req, res)
       return res.status(400).json({ error: 'Input text is required' });
     }
 
+    // Check user AI credit limit
+    const userId = req.user?.user_id || req.user?.id;
+    if (userId) {
+      const creditCheck = await canConsumeAiCredit(userId);
+      if (!creditCheck.allowed) {
+        return res.status(403).json({
+          error: creditCheck.error,
+          code: 'AI_CREDITS_EXHAUSTED',
+          subscription: creditCheck.subscription
+        });
+      }
+    }
+
     // Intercept input to force images if toggle is on
     let finalInput = input;
     if (includeImages) {
@@ -253,6 +268,12 @@ app.post('/api/process-chart-enhanced', requireAuth, aiLimiter, async (req, res)
       ? await svc.modify(finalInput, currentChartState, messageHistory || [], model, templateStructure, formatStructure, webSearch)
       : await svc.generate(finalInput, model, templateStructure, formatStructure, webSearch);
 
+    // Deduct 1 credit if chart data was generated or modified
+    let updatedSubscription = null;
+    if (userId && (aiResponse.chartData || aiResponse.data)) {
+      updatedSubscription = await deductAiCredit(userId);
+    }
+
     // Determine if this is a creation or modification
     const isModification = !!(currentChartState && conversationId);
 
@@ -277,6 +298,7 @@ app.post('/api/process-chart-enhanced', requireAuth, aiLimiter, async (req, res)
       subtitle: aiResponse.subtitle || null,
       xAxisTitle: aiResponse.xAxisTitle || null,
       yAxisTitle: aiResponse.yAxisTitle || null,
+      subscription: updatedSubscription
     };
 
     res.json(result);

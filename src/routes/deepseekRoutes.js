@@ -5,6 +5,7 @@ import {
   getAvailableDeepSeekModels,
   validateDeepSeekApiKey
 } from '../services/deepseekService.js';
+import { canConsumeAiCredit, deductAiCredit } from '../services/subscriptionService.js';
 
 const router = express.Router();
 
@@ -18,12 +19,29 @@ router.post('/process-chart', async (req, res) => {
     if (!input) return res.status(400).json({ error: 'Input text is required' });
     if (!process.env.DEEPSEEK_API_KEY) return res.status(500).json({ error: 'DeepSeek API key not configured' });
 
+    const userId = req.user?.user_id || req.user?.id;
+    if (userId) {
+      const creditCheck = await canConsumeAiCredit(userId);
+      if (!creditCheck.allowed) {
+        return res.status(403).json({
+          error: creditCheck.error,
+          code: 'AI_CREDITS_EXHAUSTED',
+          subscription: creditCheck.subscription
+        });
+      }
+    }
+
     const aiResponse = currentChartState && conversationId
       ? await modifyChartDataWithDeepSeek(input, currentChartState, messageHistory || [], model, null, null, webSearch)
       : await generateChartDataWithDeepSeek(input, model, null, null, webSearch);
 
     if (!aiResponse.chartType || !aiResponse.chartData) {
       throw new Error('AI response missing required chart data');
+    }
+
+    let updatedSubscription = null;
+    if (userId) {
+      updatedSubscription = await deductAiCredit(userId);
     }
 
     res.json({
@@ -35,7 +53,8 @@ router.post('/process-chart', async (req, res) => {
       changes: aiResponse.changes || [],
       suggestions: aiResponse.suggestions || [],
       service: 'deepseek',
-      _metadata: aiResponse._metadata
+      _metadata: aiResponse._metadata,
+      subscription: updatedSubscription
     });
 
   } catch (error) {
