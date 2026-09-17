@@ -1,4 +1,5 @@
 import { supabaseAdminClient } from '../supabase/client.js';
+import { randomUUID } from 'node:crypto';
 
 class ChartDataService {
 
@@ -134,8 +135,9 @@ class ChartDataService {
         .select(`
           *,
           chat_messages(*),
-          chart_snapshots(*)
+          chart_snapshots!left(*)
         `)
+        .eq('chart_snapshots.is_current', true)
         .eq('id', conversationId)
         .eq('user_id', userId)
         .single();
@@ -403,7 +405,7 @@ class ChartDataService {
       }
 
       // Generate a new share_id and save it
-      const newShareId = crypto.randomUUID();
+      const newShareId = randomUUID();
       const { data: updatedSnapshot, error: updateError } = await supabaseAdminClient
         .from('chart_snapshots')
         .update({ share_id: newShareId })

@@ -149,6 +149,7 @@ import dataRoutes from './routes/dataRoutes.js'
 import templateRoutes from './routes/templateRoutes.js'
 import formatRoutes from './routes/formatRoutes.js'
 import chartStylePresetRoutes from './routes/chartStylePresetRoutes.js'
+import sharedChartRoutes from './routes/sharedChartRoutes.js'
 app.use('/auth', authRoutes)
 
 // Chart processing endpoints (require auth + stricter AI rate limit)
@@ -160,6 +161,7 @@ app.use('/api/deepseek', requireAuth, aiLimiter, deepseekRoutes);
 // Format and chart style preset routes (have both public and authenticated endpoints - must be BEFORE auth-protected routes)
 app.use('/api/data', formatRoutes);
 app.use('/api/data', chartStylePresetRoutes);
+app.use('/api/data', sharedChartRoutes);
 
 // Protected API endpoints (require authentication)
 app.use('/api/data', requireAuth, dataRoutes);

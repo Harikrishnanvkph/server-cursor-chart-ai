@@ -10,32 +10,6 @@ import { canSaveCloudChart } from '../services/subscriptionService.js';
 const router = express.Router();
 
 // =============================================
-// PUBLIC SHARE ROUTES
-// =============================================
-
-// Get shared chart data (UNAUTHENTICATED)
-router.get('/shared/:shareId', async (req, res) => {
-  try {
-    const { shareId } = req.params;
-    if (!shareId) {
-      return res.status(400).json({ error: 'Share ID is required' });
-    }
-
-    const sharedChart = await chartDataService.getSharedChart(shareId);
-    res.json(sharedChart);
-  } catch (error) {
-    if (error.message === 'Shared chart not found') {
-      return res.status(404).json({ error: 'Shared chart not found' });
-    }
-    console.error('Error fetching shared chart:', error);
-    res.status(500).json({ error: 'Failed to fetch shared chart' });
-  }
-});
-
-// Note: requireAuth is applied in index.js when mounting this router (app.use('/api/data', requireAuth, dataRoutes))
-// No need to apply it again here — it was previously duplicated causing unnecessary middleware overhead
-
-// =============================================
 // CONVERSATION ROUTES
 // =============================================
 
@@ -561,19 +535,29 @@ router.get('/my-images', async (req, res) => {
 
     if (formatsError) throw formatsError;
 
-    // 5. Build usage mappings for each image
+    // 5. Pre-stringify entities ONCE to avoid O(N×M) repeated serialization
+    const snapSearchData = snapshots.map(snap => ({
+      snap,
+      searchStr: JSON.stringify({ chart_config: snap.chart_config, template_structure: snap.template_structure })
+    }));
+    const tplSearchData = (templates || []).map(tpl => ({
+      tpl,
+      searchStr: JSON.stringify(tpl.template_structure)
+    }));
+    const fmtSearchData = (formats || []).map(fmt => ({
+      fmt,
+      searchStr: JSON.stringify({ skeleton: fmt.skeleton, thumbnail_url: fmt.thumbnail_url })
+    }));
+
+    // Build usage mappings for each image using pre-computed strings
     const imagesWithMappings = images.map(img => {
       const filename = img.image_path.split('/').pop();
       const imageUrl = img.image_url;
 
       // Find mapped charts
       const mappedCharts = [];
-      snapshots.forEach(snap => {
-        const snapString = JSON.stringify({
-          chart_config: snap.chart_config,
-          template_structure: snap.template_structure
-        });
-        if (snapString.includes(filename) || snapString.includes(imageUrl)) {
+      snapSearchData.forEach(({ snap, searchStr }) => {
+        if (searchStr.includes(filename) || searchStr.includes(imageUrl)) {
           const conv = conversations.find(c => c.id === snap.conversation_id);
           if (conv) {
             mappedCharts.push({ id: conv.id, title: conv.title, snapshotId: snap.id });
@@ -583,18 +567,16 @@ router.get('/my-images', async (req, res) => {
 
       // Find mapped templates
       const mappedTemplates = [];
-      templates.forEach(tpl => {
-        const tplString = JSON.stringify(tpl.template_structure);
-        if (tplString.includes(filename) || tplString.includes(imageUrl)) {
+      tplSearchData.forEach(({ tpl, searchStr }) => {
+        if (searchStr.includes(filename) || searchStr.includes(imageUrl)) {
           mappedTemplates.push({ id: tpl.id, name: tpl.name });
         }
       });
 
       // Find mapped formats
       const mappedFormats = [];
-      formats.forEach(fmt => {
-        const fmtString = JSON.stringify({ skeleton: fmt.skeleton, thumbnail_url: fmt.thumbnail_url });
-        if (fmtString.includes(filename) || fmtString.includes(imageUrl)) {
+      fmtSearchData.forEach(({ fmt, searchStr }) => {
+        if (searchStr.includes(filename) || searchStr.includes(imageUrl)) {
           mappedFormats.push({ id: fmt.id, name: fmt.name });
         }
       });
