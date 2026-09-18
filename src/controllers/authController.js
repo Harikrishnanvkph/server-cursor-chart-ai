@@ -3,6 +3,7 @@ import { signInSchema, signUpSchema } from '../utils/validators.js'
 import googleOAuthService from '../services/googleOAuthService.js'
 import secureSessionStore from '../services/sessionStore.js'
 import { getUserSubscription, setSubscriptionTier } from '../services/subscriptionService.js'
+import { invalidateCachedUser } from '../middleware/authMiddleware.js'
 import crypto from 'crypto'
 
 const isProd = process.env.NODE_ENV === 'production'
@@ -191,6 +192,9 @@ export async function signOut(req, res) {
     const accessToken = req.cookies.access_token || req.headers.authorization?.replace('Bearer ', '')
 
     if (accessToken) {
+      // Invalidate in-memory auth cache immediately
+      invalidateCachedUser(accessToken)
+
       // Try to delete OAuth session
       await secureSessionStore.deleteSession(accessToken)
 

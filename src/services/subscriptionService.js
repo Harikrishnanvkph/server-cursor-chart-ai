@@ -150,8 +150,10 @@ export async function deductAiCredit(userId) {
     const remaining = data.out_credits_remaining ?? data.ai_credits_remaining ?? Math.max(0, limit - used);
 
     if (!data.success) {
-      // Credits exhausted — return current state
+      // Credits exhausted — return current state with explicit failure flags
       return {
+        success: false,
+        exhausted: true,
         subscription_tier: 'unknown',
         ai_credits_used: used,
         ai_credits_limit: limit,

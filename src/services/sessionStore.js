@@ -7,6 +7,25 @@ class SecureSessionStore {
     this.rateLimitMap = new Map();
     this.maxFailedAttempts = 5;
     this.lockoutDuration = 15 * 60 * 1000; // 15 minutes
+    this.maxMapSize = 1000;
+
+    // Periodic cleanup of in-memory maps to prevent memory leaks
+    setInterval(() => {
+      const now = Date.now();
+      for (const [key, val] of this.rateLimitMap.entries()) {
+        if (now - val.firstAttempt > this.lockoutDuration) {
+          this.rateLimitMap.delete(key);
+        }
+      }
+      if (this._sessionLastWrite) {
+        const cutoff = now - 30 * 60 * 1000;
+        for (const [sessionId, lastWrite] of this._sessionLastWrite.entries()) {
+          if (lastWrite < cutoff) {
+            this._sessionLastWrite.delete(sessionId);
+          }
+        }
+      }
+    }, 15 * 60 * 1000).unref();
   }
 
   /**
@@ -40,6 +59,10 @@ class SecureSessionStore {
    * Record failed attempt
    */
   recordFailedAttempt(identifier) {
+    if (this.rateLimitMap.size >= this.maxMapSize) {
+      const oldest = this.rateLimitMap.keys().next().value;
+      if (oldest) this.rateLimitMap.delete(oldest);
+    }
     const attempts = this.rateLimitMap.get(identifier) || { count: 0, firstAttempt: Date.now() };
     attempts.count++;
     this.rateLimitMap.set(identifier, attempts);
@@ -195,6 +218,10 @@ class SecureSessionStore {
       const lastWrite = this._sessionLastWrite?.get(session.id) || 0;
       if (Date.now() - lastWrite > SESSION_WRITE_THROTTLE_MS) {
         if (!this._sessionLastWrite) this._sessionLastWrite = new Map();
+        if (this._sessionLastWrite.size >= this.maxMapSize) {
+          const oldest = this._sessionLastWrite.keys().next().value;
+          if (oldest) this._sessionLastWrite.delete(oldest);
+        }
         this._sessionLastWrite.set(session.id, Date.now());
         // Fire-and-forget — don't await, don't block the request
         supabaseAdminClient

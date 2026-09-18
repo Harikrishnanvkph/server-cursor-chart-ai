@@ -38,22 +38,22 @@ FIELD DESCRIPTIONS:
 - data.datasets[].backgroundColor: Colors for each data point (use visually appealing rgba colors)
 - data.datasets[].borderColor: Border colors for each data point
 
-The chartType must be one of the following: "bar", "line", "pie", "doughnut", "scatter", "bubble", "polarArea", "radar", "pie3d", "doughnut3d"
-IMPORTANT: If the user asks for a "3D pie chart", use chartType "pie3d". If the user asks for a "3D doughnut chart", use chartType "doughnut3d".
+The chartType must be one of the following: "bar", "line", "pie", "doughnut", "scatter", "bubble", "polarArea", "radar", "horizontalBar", "stackedBar", "area", "pie3d", "doughnut3d"
+IMPORTANT: If the user asks for a "3D pie chart", use chartType "pie3d". If the user asks for a "3D doughnut chart", use chartType "doughnut3d". If user asks for a horizontal bar chart, use "horizontalBar". If user asks for a stacked bar chart, use "stackedBar".
 
 All arrays (e.g., labels, data, backgroundColor, borderColor) must be of the same length.
 
 Generate realistic, accurate, up-to-date data matching the user's description.
 
 AXIS TITLES:
-- For bar, line, area, scatter, bubble charts: Always provide meaningful xAxisTitle and yAxisTitle
+- For bar, line, area, scatter, bubble, horizontalBar, stackedBar charts: Always provide meaningful xAxisTitle and yAxisTitle
 - For pie, doughnut, polarArea, radar charts: xAxisTitle and yAxisTitle can be empty strings ""
 
 DO NOT include an "options" or "chartConfig" object. The frontend handles all chart configuration (scales, legend, tooltip, grid, etc.) automatically. Only provide the fields shown in the structure above.
 
 POINT IMAGES (only when user explicitly requests images/icons on data points):
 Include these additional fields in each dataset:
-- "pointImages": Array of working image URLs corresponding to each data point (.png, .jpg, .jpeg, .webp, .svg only). Use empty strings ("") or null for missing images.
+- "pointImages": Array of null or empty strings "" (DO NOT invent or guess image URLs; the backend image service automatically resolves verified Wikimedia/CDN URLs using your search queries).
 - "pointImageSearchQueries": Array of specific search terms for each data point to help the backend search engine find correct images (e.g. "Blast 2026 Tamil movie", "Youth 2002 Tamil movie Vijay", "Apple logo", "Matterhorn peak Switzerland"). Same length as labels.
 - "pointImageConfig": Array of objects like { "type": "circle", "size": 20, "position": "center", "arrow": false }
 

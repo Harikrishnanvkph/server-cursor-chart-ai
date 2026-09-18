@@ -40,13 +40,16 @@ export class GeminiAdapter {
         if (webSearch) {
             // Directly call the REST API to ensure google_search tool works since local SDK version is outdated
             const apiKey = process.env.GEMINI_API_KEY;
-            const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
+            const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent`;
             
             const payload = {
                 contents: [{
                     parts: [{ text: userPrompt }]
                 }],
-                tools: [{ google_search: {} }]
+                tools: [{ google_search: {} }],
+                generationConfig: {
+                    responseMimeType: 'application/json'
+                }
             };
 
             if (systemPrompt) {
@@ -61,7 +64,10 @@ export class GeminiAdapter {
 
                 const response = await fetch(url, {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'x-goog-api-key': apiKey
+                    },
                     body: JSON.stringify(payload),
                     signal: controller.signal
                 });
@@ -101,8 +107,13 @@ export class GeminiAdapter {
             }
         }
 
-        // Standard SDK call for non-search queries
-        const genModel = this.genAI.getGenerativeModel({ model: modelName });
+        // Standard SDK call for non-search queries with JSON mode
+        const genModel = this.genAI.getGenerativeModel({
+            model: modelName,
+            generationConfig: {
+                responseMimeType: 'application/json'
+            }
+        });
         const combinedPrompt = systemPrompt
             ? `${systemPrompt}\n\nUser request: ${userPrompt}`
             : userPrompt;

@@ -11,8 +11,8 @@ const perplexityProcessor = createChartProcessor(createPerplexityAdapter());
  * @param {Object} templateStructure - Template structure metadata for generating template text content
  * @returns {Promise<Object>} - Generated chart configuration
  */
-export async function generateChartDataWithPerplexity(inputText, model = 'sonar-pro', templateStructure = null) {
-  return await perplexityProcessor.generateChart(inputText, model, templateStructure);
+export async function generateChartDataWithPerplexity(inputText, model = 'sonar-pro', templateStructure = null, formatStructure = null, webSearch = false) {
+  return await perplexityProcessor.generateChart(inputText, model, templateStructure, formatStructure, webSearch);
 }
 
 /**
@@ -22,10 +22,12 @@ export async function generateChartDataWithPerplexity(inputText, model = 'sonar-
  * @param {Array} messageHistory - Conversation history
  * @param {string} model - Perplexity model to use
  * @param {Object} templateStructure - Template structure metadata for generating template text content
+ * @param {Object} formatStructure - Format structure metadata
+ * @param {boolean} webSearch - Whether to perform web search
  * @returns {Promise<Object>} - Modified chart configuration
  */
-export async function modifyChartDataWithPerplexity(inputText, currentChartState, messageHistory = [], model = 'sonar-pro', templateStructure = null) {
-  return await perplexityProcessor.modifyChart(inputText, currentChartState, messageHistory, model, templateStructure);
+export async function modifyChartDataWithPerplexity(inputText, currentChartState, messageHistory = [], model = 'sonar-pro', templateStructure = null, formatStructure = null, webSearch = false) {
+  return await perplexityProcessor.modifyChart(inputText, currentChartState, messageHistory, model, templateStructure, formatStructure, webSearch);
 }
 
 /**

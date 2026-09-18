@@ -38,22 +38,27 @@ export class ChartProcessor {
         let searchQuery = inputText;
         try {
           const queryDecision = await searchService.determineSearchQuery(inputText, [], this.adapter.serviceName);
-          if (queryDecision && queryDecision !== 'NO_SEARCH') {
+          if (queryDecision === 'NO_SEARCH') {
+            searchQuery = null;
+            console.log('ℹ️ [WebSearch] Query optimizer determined NO_SEARCH is needed for generation.');
+          } else if (queryDecision) {
             searchQuery = queryDecision;
           }
         } catch (queryErr) {
           console.warn('⚠️ [WebSearch] Query optimizer error, falling back to user input:', queryErr.message);
         }
 
-        // Ensure search query stays within Tavily API limit (350 chars)
-        if (searchQuery.length > 350) {
-          searchQuery = searchQuery.substring(0, 350);
-        }
+        if (searchQuery) {
+          // Ensure search query stays within Tavily API limit (350 chars)
+          if (searchQuery.length > 350) {
+            searchQuery = searchQuery.substring(0, 350);
+          }
 
-        try {
-          searchResults = await searchService.search(searchQuery);
-        } catch (searchError) {
-          console.error('❌ [WebSearch] Tavily search failed:', searchError.message);
+          try {
+            searchResults = await searchService.search(searchQuery);
+          } catch (searchError) {
+            console.error('❌ [WebSearch] Tavily search failed:', searchError.message);
+          }
         }
       }
 
@@ -127,22 +132,27 @@ export class ChartProcessor {
         let searchQuery = inputText;
         try {
           const queryDecision = await searchService.determineSearchQuery(inputText, messageHistory, this.adapter.serviceName);
-          if (queryDecision && queryDecision !== 'NO_SEARCH') {
+          if (queryDecision === 'NO_SEARCH') {
+            searchQuery = null;
+            console.log('ℹ️ [WebSearch] Query optimizer determined NO_SEARCH is needed for modification.');
+          } else if (queryDecision) {
             searchQuery = queryDecision;
           }
         } catch (queryErr) {
           console.warn('⚠️ [WebSearch] Query optimizer error, falling back to user input:', queryErr.message);
         }
 
-        // Ensure search query stays within Tavily API limit (350 chars)
-        if (searchQuery.length > 350) {
-          searchQuery = searchQuery.substring(0, 350);
-        }
+        if (searchQuery) {
+          // Ensure search query stays within Tavily API limit (350 chars)
+          if (searchQuery.length > 350) {
+            searchQuery = searchQuery.substring(0, 350);
+          }
 
-        try {
-          searchResults = await searchService.search(searchQuery);
-        } catch (searchError) {
-          console.error('❌ [WebSearch] Tavily search failed:', searchError.message);
+          try {
+            searchResults = await searchService.search(searchQuery);
+          } catch (searchError) {
+            console.error('❌ [WebSearch] Tavily search failed:', searchError.message);
+          }
         }
       }
 
@@ -517,11 +527,22 @@ USER'S CURRENT REQUEST: ${inputText}`;
       throw new Error('AI service could not generate chart data - please try rephrasing your request');
     }
 
-    // Remove ```json and``` if they exist
-    if (cleaned.startsWith('```json')) {
-      cleaned = cleaned.replace(/^```json\s*/, '').replace(/\s*```$/, '');
-    } else if (cleaned.startsWith('```')) {
-      cleaned = cleaned.replace(/^```\s*/, '').replace(/\s*```$/, '');
+    // 1. Extract JSON from markdown code fence anywhere in the response
+    const codeBlockMatch = cleaned.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
+    if (codeBlockMatch && codeBlockMatch[1]) {
+      cleaned = codeBlockMatch[1].trim();
+    } else {
+      // Strip unclosed opening code fence if present
+      cleaned = cleaned.replace(/^```(?:json)?\s*/i, '');
+      // 2. Extract substring between first { and last }
+      const firstBrace = cleaned.indexOf('{');
+      const lastBrace = cleaned.lastIndexOf('}');
+      if (firstBrace !== -1 && lastBrace > firstBrace) {
+        cleaned = cleaned.substring(firstBrace, lastBrace + 1).trim();
+      } else if (firstBrace !== -1) {
+        // Incomplete/truncated response: take from first brace for attemptJSONRepair
+        cleaned = cleaned.substring(firstBrace).trim();
+      }
     }
 
     // Additional cleanup - remove any remaining backticks at start/end
@@ -578,6 +599,12 @@ USER'S CURRENT REQUEST: ${inputText}`;
   attemptJSONRepair(jsonText) {
     try {
       let repaired = jsonText.trim();
+
+      // Strip any conversational preamble before the first {
+      const firstBrace = repaired.indexOf('{');
+      if (firstBrace > 0) {
+        repaired = repaired.substring(firstBrace);
+      }
 
       // FIRST: Fix HTML content issues - newlines and unescaped characters inside strings
       repaired = this.fixHTMLInJSON(repaired);

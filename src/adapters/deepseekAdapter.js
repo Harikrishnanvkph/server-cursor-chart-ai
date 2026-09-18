@@ -35,6 +35,7 @@ export class DeepSeekAdapter {
         messages,
         max_tokens: maxTokens || 4096,
         temperature: temperature ?? 0.3,
+        response_format: { type: 'json_object' },
         stream: false
       }, {
         signal: AbortSignal.timeout(60000) // 60-second timeout

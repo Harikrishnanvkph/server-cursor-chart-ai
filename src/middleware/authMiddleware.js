@@ -121,6 +121,12 @@ function setCachedUser(token, user) {
   authCache.set(key, { user, expiresAt: Date.now() + AUTH_CACHE_TTL_MS });
 }
 
+export function invalidateCachedUser(token) {
+  if (!token) return;
+  const key = hashToken(token);
+  authCache.delete(key);
+}
+
 // Rate limiting configuration
 const RATE_LIMIT_WINDOW = 15 * 60 * 1000; // 15 minutes
 const MAX_REQUESTS_PER_WINDOW = 100; // Max requests per IP per window

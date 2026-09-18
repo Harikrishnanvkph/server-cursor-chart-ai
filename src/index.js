@@ -8,6 +8,7 @@ import rateLimit from 'express-rate-limit';
 import { generateChartDataWithGemini, modifyChartDataWithGemini } from './services/geminiService.js';
 import { generateChartDataWithOpenRouter, modifyChartDataWithOpenRouter } from './services/openrouterService.js';
 import { generateChartDataWithDeepSeek, modifyChartDataWithDeepSeek } from './services/deepseekService.js';
+import { generateChartDataWithPerplexity, modifyChartDataWithPerplexity } from './services/perplexityService.js';
 import perplexityRoutes from './routes/perplexityRoutes.js';
 import openrouterRoutes from './routes/openrouterRoutes.js';
 import deepseekRoutes from './routes/deepseekRoutes.js';
@@ -62,7 +63,12 @@ app.use(helmet({
 
 app.use(cookieParser());
 app.use(compression({ threshold: '1kb' }));
-app.use(express.json({ limit: '10mb' })); // Limit request body size
+app.use(express.json({
+  limit: '10mb',
+  verify: (req, res, buf) => {
+    req.rawBody = buf.toString('utf8');
+  }
+})); // Capture verbatim raw body for payment webhook verification
 
 const allowedOrigins = [
   'http://localhost:3000',
@@ -70,9 +76,13 @@ const allowedOrigins = [
   'http://localhost:3002',
   'http://localhost:3003',
   'https://aichartor.com',
-  'https://www.aichartor.com',
-  'http://192.168.1.3:3000' // temporary for mobile testing only
+  'https://www.aichartor.com'
 ];
+
+// Allow local LAN testing IP only in non-production environments
+if (process.env.NODE_ENV !== 'production') {
+  allowedOrigins.push('http://192.168.1.3:3000');
+}
 
 if (process.env.FRONTEND_URL && !allowedOrigins.includes(process.env.FRONTEND_URL)) {
   allowedOrigins.push(process.env.FRONTEND_URL);
@@ -106,25 +116,58 @@ const globalLimiter = rateLimit({
 
 app.use(globalLimiter);
 
-// CSRF Protection: validate Origin header on state-changing requests
+// CSRF Protection: validate Origin/Referer header on state-changing requests
 // - Safe methods (GET/HEAD/OPTIONS): always allowed
-// - No Origin header: request came through same-origin rewrite proxy → allowed
-// - Origin present and in allowedOrigins: legitimate cross-origin request → allowed
-// - Origin present but NOT in allowedOrigins: potential CSRF attack → blocked
+// - State-changing methods (POST/PUT/PATCH/DELETE):
+//   - Origin present and in allowedOrigins: allowed
+//   - Origin missing: inspect Referer origin against allowedOrigins
+//   - Sec-Fetch-Site 'same-origin': allowed
+//   - In dev: allow requests missing both for API testing/tools
+//   - In prod: block untrusted requests to prevent CSRF when cookies (sameSite: 'none') are used
 app.use((req, res, next) => {
   if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) {
     return next();
   }
+
+  // Webhooks from third-party payment providers (Razorpay, Dodo) don't send browser Origin/Referer
+  if (req.path.includes('/webhook')) {
+    return next();
+  }
+
   const origin = req.headers['origin'];
-  if (!origin) {
-    // No Origin = same-origin request via Next.js rewrite or non-browser client
+  if (origin) {
+    if (allowedOrigins.includes(origin)) {
+      return next();
+    }
+    console.warn(`[CSRF] Blocked ${req.method} ${req.path} from origin: ${origin}`);
+    return res.status(403).json({ error: 'Request blocked by CSRF policy' });
+  }
+
+  const referer = req.headers['referer'];
+  if (referer) {
+    try {
+      const refererOrigin = new URL(referer).origin;
+      if (allowedOrigins.includes(refererOrigin)) {
+        return next();
+      }
+      console.warn(`[CSRF] Blocked ${req.method} ${req.path} with invalid referer origin: ${refererOrigin}`);
+      return res.status(403).json({ error: 'Request blocked by CSRF policy' });
+    } catch {
+      return res.status(403).json({ error: 'Request blocked by CSRF policy' });
+    }
+  }
+
+  if (req.headers['sec-fetch-site'] === 'same-origin') {
     return next();
   }
-  if (allowedOrigins.includes(origin)) {
+
+  // Allow non-browser tools in local development
+  if (process.env.NODE_ENV !== 'production') {
     return next();
   }
-  console.warn(`[CSRF] Blocked ${req.method} ${req.path} from origin: ${origin}`);
-  return res.status(403).json({ error: 'Request blocked' });
+
+  console.warn(`[CSRF] Blocked ${req.method} ${req.path}: Missing Origin and Referer`);
+  return res.status(403).json({ error: 'Request blocked by CSRF policy' });
 });
 
 // Stricter rate limiter for AI endpoints (prevents credit abuse)
@@ -150,7 +193,10 @@ import templateRoutes from './routes/templateRoutes.js'
 import formatRoutes from './routes/formatRoutes.js'
 import chartStylePresetRoutes from './routes/chartStylePresetRoutes.js'
 import sharedChartRoutes from './routes/sharedChartRoutes.js'
+import paymentRoutes from './routes/paymentRoutes.js'
 app.use('/auth', authRoutes)
+app.use('/payments', paymentRoutes)
+app.use('/api/payments', paymentRoutes)
 
 // Chart processing endpoints (require auth + stricter AI rate limit)
 app.use('/api/gemini', requireAuth, aiLimiter, geminiRoutes);
@@ -248,7 +294,7 @@ app.post('/api/process-chart-enhanced', requireAuth, aiLimiter, async (req, res)
 
     // Service registry — add new services here, no if/else needed
     const SERVICE_REGISTRY = {
-      perplexity: { generate: generateChartDataWithGemini, modify: modifyChartDataWithGemini, apiKey: 'GEMINI_API_KEY' },
+      perplexity: { generate: generateChartDataWithPerplexity, modify: modifyChartDataWithPerplexity, apiKey: 'PERPLEXITY_API_KEY' },
       gemini: { generate: generateChartDataWithGemini, modify: modifyChartDataWithGemini, apiKey: 'GEMINI_API_KEY' },
       openrouter: { generate: generateChartDataWithOpenRouter, modify: modifyChartDataWithOpenRouter, apiKey: 'OPENROUTER_API_KEY' },
       deepseek: { generate: generateChartDataWithDeepSeek, modify: modifyChartDataWithDeepSeek, apiKey: 'DEEPSEEK_API_KEY' },
@@ -274,6 +320,14 @@ app.post('/api/process-chart-enhanced', requireAuth, aiLimiter, async (req, res)
     let updatedSubscription = null;
     if (userId && (aiResponse.chartData || aiResponse.data)) {
       updatedSubscription = await deductAiCredit(userId);
+      // Quota gate: if credit deduction failed due to quota exhaustion during generation, block the response
+      if (updatedSubscription && (updatedSubscription.exhausted || updatedSubscription.success === false)) {
+        return res.status(403).json({
+          error: 'Monthly AI credit limit reached.',
+          code: 'AI_CREDITS_EXHAUSTED',
+          subscription: updatedSubscription
+        });
+      }
     }
 
     // Determine if this is a creation or modification
