@@ -69,7 +69,7 @@ router.post('/process-chart', async (req, res) => {
 router.get('/models', (req, res) => {
     try {
         const models = getAvailableGeminiModels();
-        res.json({ models, total: models.length, recommended: 'gemini-2.5-flash' });
+        res.json({ models, total: models.length, recommended: 'gemini-3.5-flash-lite' });
     } catch (error) {
         res.status(500).json({ error: 'Failed to fetch models', details: error.message });
     }

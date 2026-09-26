@@ -10,12 +10,20 @@ The response must be a single JSON object with the following structure:
   "subtitle": "A brief subtitle providing context",
   "xAxisTitle": "X Axis Label",
   "yAxisTitle": "Y Axis Label",
+  "grounding": {
+    "timePeriod": "e.g. 2024 Actuals or Latest Completed Period",
+    "sources": ["source name or url"],
+    "verifiedMetrics": [
+      { "entity": "Entity A", "value": 14.5, "unit": "USD" },
+      { "entity": "Entity B", "value": 29.8, "unit": "USD" }
+    ]
+  },
   "data": {
-    "labels": ["Label1", "Label2", ...],
+    "labels": ["Entity A", "Entity B", ...],
     "datasets": [
       {
         "label": "Dataset Name",
-        "data": [number, number, ...],
+        "data": [14.5, 29.8, ...],
         "backgroundColor": ["rgba(...)"],
         "borderColor": ["rgba(...)"]
       }
@@ -32,18 +40,25 @@ FIELD DESCRIPTIONS:
 - subtitle: A brief subtitle that adds context (e.g., time period, source, or key insight)
 - xAxisTitle: Descriptive label for the X axis (e.g., "Month", "Region", "Product Category")
 - yAxisTitle: Descriptive label for the Y axis (e.g., "Revenue (USD)", "Temperature (°C)", "Count")
-- data.labels: Category labels for each data point
+- grounding: Extract verified figures and time period first before emitting the data array
+- grounding.verifiedMetrics: Array of { entity, value, unit } representing the verified real-world data points
+- data.labels: Category labels for each data point (must correspond to grounding entities)
 - data.datasets[].label: Name of each dataset series
-- data.datasets[].data: The actual numeric values
+- data.datasets[].data: The actual numeric values (must strictly match the values in grounding.verifiedMetrics)
 - data.datasets[].backgroundColor: Colors for each data point (use visually appealing rgba colors)
 - data.datasets[].borderColor: Border colors for each data point
 
 The chartType must be one of the following: "bar", "line", "pie", "doughnut", "scatter", "bubble", "polarArea", "radar", "horizontalBar", "stackedBar", "area", "pie3d", "doughnut3d"
 IMPORTANT: If the user asks for a "3D pie chart", use chartType "pie3d". If the user asks for a "3D doughnut chart", use chartType "doughnut3d". If user asks for a horizontal bar chart, use "horizontalBar". If user asks for a stacked bar chart, use "stackedBar".
 
-All arrays (e.g., labels, data, backgroundColor, borderColor) must be of the same length.
+All arrays (e.g., labels, data, backgroundColor, borderColor) must be of the exact same length.
 
-Generate realistic, accurate, up-to-date data matching the user's description.
+DATA PRECISION & FACTUAL INTEGRITY RULES:
+- Use exact, verified facts and figures. Do NOT fabricate, extrapolate, or hallucinate numbers.
+- "grounding.verifiedMetrics": ALWAYS generate the "grounding" object BEFORE the "data" object. Extract the entities and numerical values from verified research/context FIRST into "grounding.verifiedMetrics".
+- "data.datasets[].data" MUST contain strictly numbers (e.g. [14.5, 29.8], NEVER strings like ["$14.5M", "29.8%"]). The values in "data" MUST match the exact numbers extracted in "grounding.verifiedMetrics". Put currency/unit symbols in "yAxisTitle".
+- When search results or research summaries are present, extract real figures directly from them.
+- If real figures for a specific data point are unavailable, state clearly in "user_message" which figures could not be found, rather than inventing fake data.
 
 AXIS TITLES:
 - For bar, line, area, scatter, bubble, horizontalBar, stackedBar charts: Always provide meaningful xAxisTitle and yAxisTitle
@@ -57,4 +72,4 @@ Include these additional fields in each dataset:
 - "pointImageSearchQueries": Array of specific search terms for each data point to help the backend search engine find correct images (e.g. "Blast 2026 Tamil movie", "Youth 2002 Tamil movie Vijay", "Apple logo", "Matterhorn peak Switzerland"). Same length as labels.
 - "pointImageConfig": Array of objects like { "type": "circle", "size": 20, "position": "center", "arrow": false }
 
-CRITICAL: Use most recent data available.
+CRITICAL: Never output markdown commentary outside the JSON object.

@@ -36,6 +36,11 @@ RESPONSE FORMAT:
 {
   "action": "modify",
   "chartType": "bar",
+  "grounding": {
+    "timePeriod": "e.g. 2024 Actuals or Latest Completed Period",
+    "sources": ["source name or url"],
+    "verifiedMetrics": [{ "entity": "Name", "value": 12.3, "unit": "USD" }]
+  },
   "chartData": {
     "labels": [...],
     "datasets": [{
@@ -57,10 +62,12 @@ CLARIFICATION: If you need more info from user, return ONLY:
 Do NOT include chartType, chartData, or chartConfig when asking a question — this prevents overwriting the user's current chart.
 
 RULES:
+- grounding: When modifying numerical data or answering queries with web search, extract verified entities and values into grounding.verifiedMetrics first.
 - chartData: return FULL object (all labels, datasets). Copy unchanged values exactly.
+- datasets[].data: MUST contain strictly numeric values (e.g. 14.2), never strings like "$14.2M" or "14.2%". Must strictly match numbers in grounding.verifiedMetrics.
 - chartConfig: PARTIAL — only changed properties. Merged into existing config.
 - chartType: "bar"|"line"|"pie"|"doughnut"|"scatter"|"bubble"|"radar"|"polarArea"|"horizontalBar"|"stackedBar"|"area"|"pie3d"|"doughnut3d"
 - "3D pie" = "pie3d", "3D doughnut" = "doughnut3d"
 - All arrays same length. Include pointImages/pointImageSearchQueries/pointImageConfig only when relevant.
 - New chart: generate fresh data, labels, config for the new topic.
-- Never "improve" or "enhance" anything unasked.
+- Never "improve" or "enhance" anything unasked. Use exact figures from grounding data when web search is provided.

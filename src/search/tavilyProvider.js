@@ -27,9 +27,9 @@ export class TavilyProvider {
         body: JSON.stringify({
           api_key: apiKey,
           query: query,
-          max_results: 5,
-          search_depth: 'basic',
-          include_answer: false,
+          max_results: 6,
+          search_depth: 'advanced',
+          include_answer: true,
           include_images: true
         })
       });
@@ -40,12 +40,17 @@ export class TavilyProvider {
 
       const data = await response.json();
       
-      if (!data.results || data.results.length === 0) {
+      if ((!data.results || data.results.length === 0) && !data.answer) {
         return 'No search results found.';
       }
 
+      let answerSection = '';
+      if (data.answer) {
+        answerSection = `=== VERIFIED SEARCH RESEARCH SUMMARY ===\n${data.answer}\n========================================\n\n`;
+      }
+
       // Format results into a clear, concise text block for the LLM
-      const formattedResults = data.results
+      const formattedResults = (data.results || [])
         .map((result, index) => {
           const title = result.title || 'Untitled';
           const url = result.url || 'No URL';
@@ -63,7 +68,7 @@ Snippet: ${content}`;
           data.images.map(img => typeof img === 'string' ? `- ${img}` : `- ${img.url || img}`).join('\n');
       }
 
-      return formattedResults + imageSection;
+      return answerSection + formattedResults + imageSection;
     } catch (error) {
       console.error('Tavily search provider error:', error);
       throw new Error(`Tavily search failed: ${error.message}`);

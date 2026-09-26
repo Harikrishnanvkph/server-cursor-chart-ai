@@ -7,6 +7,7 @@ import { OpenAI } from 'openai';
 export class PerplexityAdapter {
   constructor() {
     this.serviceName = 'perplexity';
+    this.hasNativeSearch = true;
     this._client = null; // lazy-initialized on first use
   }
 

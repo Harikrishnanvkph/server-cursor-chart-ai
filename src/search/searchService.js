@@ -1,10 +1,12 @@
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import { OpenAI } from 'openai';
 import { createTavilyProvider } from './tavilyProvider.js';
+import { createBraveProvider } from './braveProvider.js';
 
 // Provider Registry
 const PROVIDERS = {
   tavily: createTavilyProvider,
+  brave: createBraveProvider,
   // Future providers like exa can be mapped here:
   // exa: createExaProvider
 };
@@ -51,6 +53,23 @@ class SearchService {
   }
 
   /**
+   * Search using a specific provider by name (overrides the default)
+   * @param {string} query - The search query string
+   * @param {string} providerName - Provider key ('tavily' | 'brave')
+   * @returns {Promise<string>} - Formatted search results
+   */
+  async searchWithProvider(query, providerName) {
+    const creator = PROVIDERS[providerName];
+    if (!creator) {
+      console.warn(`⚠️ Unknown search provider '${providerName}', falling back to default`);
+      return this.search(query);
+    }
+    const provider = creator();
+    console.log(`🔍 Web search query via ${provider.name}: "${query}"`);
+    return await provider.search(query);
+  }
+
+  /**
    * Evaluates if a search is needed, and returns either a search query or "NO_SEARCH"
    * @param {string} serviceName - The service being used ('deepseek' or 'gemini')
    * @returns {Promise<string>} - The search query or "NO_SEARCH"
@@ -61,13 +80,14 @@ class SearchService {
 
 Rules:
 1. If the request is purely visual, formatting-related, or structural (e.g., changing colors, changing chart type like bar to pie, sorting data, updating text titles, styling, or requesting simple explanations of existing data), output exactly: NO_SEARCH
-2. If the request requires looking up new facts, figures, stock prices, or updated statistics from the web, output ONLY the search keywords (no punctuation, no explanation, no quotes). Include "${currentYear}" if the request asks for current, latest, or realtime data. Max 6-8 words.
+2. If the request requires looking up new facts, figures, stock prices, or updated statistics from the web, output ONLY the search keywords (no punctuation, no explanation, no quotes). Include specific entity names, metrics (e.g. revenue, GDP, market cap), and relevant years/dates. Keep concise but complete (max 10-15 words). Include "${currentYear}" if the request asks for current, latest, or realtime data.
 3. If the user explicitly requests images, photos, logos, or flags of specific entities, ensure the generated search query includes the names of the entities followed by "official photo" or "logo" or "flag" (e.g. "Virat Kohli official photo") to help the search provider locate valid image URLs.
 
 Examples:
 - Request: "Make the bars blue" -> NO_SEARCH
 - Request: "Change the chart to a line chart" -> NO_SEARCH
 - Request: "Add GDP of Germany" -> Germany GDP ${currentYear}
+- Request: "Compare revenue of Apple, Microsoft, Alphabet in 2025" -> Apple Microsoft Alphabet revenue 2025
 - Request: "Show latest realtime data for tech companies" -> top tech companies revenue ${currentYear}
 - Request: "Show stock price of Apple this week" -> Apple stock price ${currentYear}
 - Request: "Sort the data ascending" -> NO_SEARCH
@@ -103,7 +123,7 @@ Examples:
     // 2. Fallback to Gemini if available
     if (process.env.GEMINI_API_KEY) {
       try {
-        const model = this.genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
+        const model = this.genAI.getGenerativeModel({ model: 'gemini-3.5-flash-lite' });
         const result = await model.generateContent(`${systemPrompt}\n\n${userContent}`);
         const decision = result.response.text().trim();
         console.log(`🤖 Search Query Generator (Gemini) Decision: "${decision}"`);

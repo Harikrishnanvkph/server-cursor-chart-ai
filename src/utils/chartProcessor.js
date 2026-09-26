@@ -3,6 +3,25 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import fetch from 'node-fetch';
 import { searchService } from '../search/searchService.js';
+import { validateAndSanitizeChartData } from './validators.js';
+
+// Fast in-memory cache for resolved entity and Wikipedia images to eliminate redundant network calls
+const imageResolutionCache = new Map();
+const MAX_IMAGE_CACHE_SIZE = 500;
+
+function getCachedImage(key) {
+  if (!key) return null;
+  return imageResolutionCache.get(key.toLowerCase().trim()) || null;
+}
+
+function setCachedImage(key, url) {
+  if (!key) return;
+  if (imageResolutionCache.size >= MAX_IMAGE_CACHE_SIZE) {
+    const oldestKey = imageResolutionCache.keys().next().value;
+    if (oldestKey) imageResolutionCache.delete(oldestKey);
+  }
+  imageResolutionCache.set(key.toLowerCase().trim(), url);
+}
 
 // Resolve paths relative to THIS file, not the working directory.
 // This fixes "ENOENT" errors on Vercel/serverless where cwd differs from local dev.
@@ -28,12 +47,13 @@ export class ChartProcessor {
    * @param {Object} templateStructure - Template structure metadata for generating template text content
    * @returns {Promise<Object>} - Generated chart configuration
    */
-  async generateChart(inputText, model, templateStructure = null, formatStructure = null, webSearch = false) {
+  async generateChart(inputText, model, templateStructure = null, formatStructure = null, webSearch = false, searchProvider = null) {
     try {
       // Get AI context (with caching)
       const aiContext = await this.getAIContext();
 
       let searchResults = null;
+      let searchWarning = null;
       if (webSearch && !this.adapter.hasNativeSearch) {
         let searchQuery = inputText;
         try {
@@ -55,9 +75,12 @@ export class ChartProcessor {
           }
 
           try {
-            searchResults = await searchService.search(searchQuery);
+            searchResults = searchProvider
+              ? await searchService.searchWithProvider(searchQuery, searchProvider)
+              : await searchService.search(searchQuery);
           } catch (searchError) {
-            console.error('❌ [WebSearch] Tavily search failed:', searchError.message);
+            console.error('❌ [WebSearch] Search failed:', searchError.message);
+            searchWarning = 'Live search was temporarily unavailable. Generated using available knowledge base.';
           }
         }
       }
@@ -81,18 +104,16 @@ export class ChartProcessor {
       const cleanedResponse = this.cleanResponse(response.content);
       const chartData = this.parseJSON(cleanedResponse, this.adapter.serviceName);
 
-      // Validate required fields in chart data
-      if (!chartData.chartType) {
-        throw new Error('AI response missing chartType field');
-      }
-
-      if (!chartData.data && !chartData.chartData) {
-        throw new Error('AI response missing chart data');
-      }
+      // Sanitize and strictly validate chart structure and numeric values
+      validateAndSanitizeChartData(chartData);
 
       // Ensure user_message exists
       if (!chartData.user_message) {
         chartData.user_message = `Chart generated successfully using ${this.adapter.serviceName}`;
+      }
+
+      if (searchWarning) {
+        chartData.searchWarning = searchWarning;
       }
 
       // Automatically resolve country flags or famous people photos programmatically
@@ -122,12 +143,13 @@ export class ChartProcessor {
    * @param {Object} templateStructure - Template structure metadata for generating template text content
    * @returns {Promise<Object>} - Modified chart configuration
    */
-  async modifyChart(inputText, currentChartState, messageHistory = [], model, templateStructure = null, formatStructure = null, webSearch = false) {
+  async modifyChart(inputText, currentChartState, messageHistory = [], model, templateStructure = null, formatStructure = null, webSearch = false, searchProvider = null) {
     try {
       // Get modification context (with caching)
       const modificationContext = await this.getModificationContext();
 
       let searchResults = null;
+      let searchWarning = null;
       if (webSearch && !this.adapter.hasNativeSearch) {
         let searchQuery = inputText;
         try {
@@ -149,9 +171,12 @@ export class ChartProcessor {
           }
 
           try {
-            searchResults = await searchService.search(searchQuery);
+            searchResults = searchProvider
+              ? await searchService.searchWithProvider(searchQuery, searchProvider)
+              : await searchService.search(searchQuery);
           } catch (searchError) {
-            console.error('❌ [WebSearch] Tavily search failed:', searchError.message);
+            console.error('❌ [WebSearch] Search failed:', searchError.message);
+            searchWarning = 'Live search was temporarily unavailable. Modified using available knowledge base.';
           }
         }
       }
@@ -179,6 +204,15 @@ export class ChartProcessor {
       // Process response
       const cleanedResponse = this.cleanResponse(response.content);
       const chartData = this.parseJSON(cleanedResponse, this.adapter.serviceName);
+
+      // Sanitize and validate modified chart data if chartData is present
+      if (chartData.chartData || chartData.data) {
+        validateAndSanitizeChartData(chartData);
+      }
+
+      if (searchWarning) {
+        chartData.searchWarning = searchWarning;
+      }
 
       // Automatically resolve country flags or famous people photos programmatically
       try {
@@ -245,8 +279,11 @@ export class ChartProcessor {
     const currentYear = new Date().getFullYear();
     let prompt = `${aiContext}
 
-CURRENT YEAR / TIME CONTEXT: ${currentYear} (Today's date context: Year ${currentYear})
-CRITICAL: When generating data for real-time or current requests, reflect real-world facts for ${currentYear} (or up to ${currentYear}). Do NOT restrict data to past years like 2024 or 2025 unless explicitly asked by the user.
+TEMPORAL CONTEXT & FACTUAL INTEGRITY:
+- Today's date context: Year ${currentYear}.
+- Real-world reporting rule: For full-year or periodic statistics (e.g. annual corporate revenue, box office totals, GDP, sports champions, census data), data for ${currentYear} is frequently ongoing, incomplete, or not yet officially concluded.
+- YOU MUST use the latest officially reported COMPLETED period with verified figures (e.g. ${currentYear - 1}, ${currentYear - 2}, or latest verified quarterly/YTD data for ${currentYear}).
+- NEVER invent, simulate, or fabricate numbers for uncompleted future periods. Always explicitly label the exact period in the chart subtitle (e.g., "Full Year ${currentYear - 1} Actuals" or "As of Q2 ${currentYear}").
 
 You are an expert chart data generator. Always respond with valid JSON.
 Focus on creating accurate, well-structured data with meaningful titles and axis labels.
@@ -430,7 +467,8 @@ Generate contextually relevant content for each section based on the chart topic
     const currentYear = new Date().getFullYear();
     let prompt = `${modificationContext}
 
-CURRENT YEAR / TIME CONTEXT: ${currentYear} (Today's date context: Year ${currentYear})`;
+TEMPORAL CONTEXT & FACTUAL INTEGRITY:
+- Today's date context: Year ${currentYear}. Use the most recent verified completed figures (e.g. ${currentYear - 1} or latest ${currentYear} reported period). NEVER fabricate future or ongoing unreleased numbers.`;
 
     if (searchResults) {
       prompt += `
@@ -462,13 +500,10 @@ ${recentHistory}
 USER'S CURRENT REQUEST: ${inputText}`;
 
     if (templateStructure) {
-      prompt += ',\n  "templateContent": { /* updated text/HTML for template areas */ }';
+      prompt += '\n\nNote: Template layout is active. If text modifications are requested, include the updated text/HTML inside "templateContent".';
     } else if (formatStructure) {
-      prompt += ',\n  "formatContent": { /* updated text for format zones */ }';
+      prompt += '\n\nNote: Format layout is active. If text modifications are requested, include the updated text inside "formatContent".';
     }
-
-    prompt += `\n
-  }`;
 
     if (templateStructure) {
       // List available template text areas
@@ -1207,40 +1242,60 @@ async function fetchWikiImage(label) {
 }
 
 async function resolveFamousPersonImage(cleanLabel) {
-  // 1. Try Wikipedia PageImages API first (cleanest, handles naming redirects)
-  let wikiUrl = await fetchWikiImage(cleanLabel);
-  if (wikiUrl) return wikiUrl;
+  if (!cleanLabel) return null;
+  const cached = getCachedImage(cleanLabel);
+  if (cached) return cached;
 
-  // 2. Try Tavily Live Web Search Fallback (excluding Wikipedia/Wikimedia redirects)
-  let webUrl = await fetchTavilyImageFallback(cleanLabel);
-  if (webUrl) return webUrl;
+  const resolveWithNetwork = async () => {
+    // 1. Try Wikipedia PageImages API first (cleanest, handles naming redirects)
+    let wikiUrl = await fetchWikiImage(cleanLabel);
+    if (wikiUrl) return wikiUrl;
 
-  // 3. Manual Wikipedia File check fallback
-  const cleanPersonName = cleanLabel.replace(/\s+(&|and)?\s*[Ff]amily\s*$/i, '').trim();
-  const formattedName = cleanPersonName
-    .split(/\s+/)
-    .map(word => word.charAt(0).toUpperCase() + word.slice(1))
-    .join('_');
+    // 2. Try Tavily Live Web Search Fallback (excluding Wikipedia/Wikimedia redirects)
+    let webUrl = await fetchTavilyImageFallback(cleanLabel);
+    if (webUrl) return webUrl;
 
-  // Try checking .jpg existence
-  const jpgFilename = `${formattedName}.jpg`;
-  if (await checkWikipediaFile(jpgFilename)) {
-    return `https://commons.wikimedia.org/wiki/Special:FilePath/${jpgFilename}`;
+    // 3. Manual Wikipedia File check fallback
+    const cleanPersonName = cleanLabel.replace(/\s+(&|and)?\s*[Ff]amily\s*$/i, '').trim();
+    const formattedName = cleanPersonName
+      .split(/\s+/)
+      .map(word => word.charAt(0).toUpperCase() + word.slice(1))
+      .join('_');
+
+    // Try checking .jpg existence
+    const jpgFilename = `${formattedName}.jpg`;
+    if (await checkWikipediaFile(jpgFilename)) {
+      return `https://commons.wikimedia.org/wiki/Special:FilePath/${jpgFilename}`;
+    }
+
+    // Try checking .png existence
+    const pngFilename = `${formattedName}.png`;
+    if (await checkWikipediaFile(pngFilename)) {
+      return `https://commons.wikimedia.org/wiki/Special:FilePath/${pngFilename}`;
+    }
+
+    // Try checking .jpeg existence
+    const jpegFilename = `${formattedName}.jpeg`;
+    if (await checkWikipediaFile(jpegFilename)) {
+      return `https://commons.wikimedia.org/wiki/Special:FilePath/${jpegFilename}`;
+    }
+
+    return null;
+  };
+
+  try {
+    const resultUrl = await Promise.race([
+      resolveWithNetwork(),
+      new Promise(resolve => setTimeout(() => resolve(null), 3000))
+    ]);
+
+    if (resultUrl) {
+      setCachedImage(cleanLabel, resultUrl);
+    }
+    return resultUrl;
+  } catch (err) {
+    return null;
   }
-
-  // Try checking .png existence
-  const pngFilename = `${formattedName}.png`;
-  if (await checkWikipediaFile(pngFilename)) {
-    return `https://commons.wikimedia.org/wiki/Special:FilePath/${pngFilename}`;
-  }
-
-  // Try checking .jpeg existence
-  const jpegFilename = `${formattedName}.jpeg`;
-  if (await checkWikipediaFile(jpegFilename)) {
-    return `https://commons.wikimedia.org/wiki/Special:FilePath/${jpegFilename}`;
-  }
-
-  return null;
 }
 
 async function checkWikipediaFile(name) {

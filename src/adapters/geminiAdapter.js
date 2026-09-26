@@ -2,17 +2,21 @@ import { GoogleGenerativeAI } from '@google/generative-ai';
 
 const MODEL_MAP = {
     // Perplexity names → Gemini equivalents
-    'sonar-pro': 'gemini-2.5-pro',
-    'sonar-medium': 'gemini-2.5-flash',
-    'sonar': 'gemini-2.5-flash',
-    'mistral-7b': 'gemini-2.5-flash',
-    'codellama-34b': 'gemini-2.5-pro',
-    'llama-2-70b': 'gemini-2.5-pro',
+    'sonar-pro': 'gemini-3.1-pro',
+    'sonar-medium': 'gemini-3.5-flash-lite',
+    'sonar': 'gemini-3.5-flash-lite',
+    'mistral-7b': 'gemini-3.5-flash-lite',
+    'codellama-34b': 'gemini-3.1-pro',
+    'llama-2-70b': 'gemini-3.1-pro',
     // Intent-based names
-    'modification': 'gemini-2.5-pro',
+    'modification': 'gemini-3.1-pro',
+    // Legacy model redirects
+    'gemini-2.5-flash': 'gemini-3.5-flash-lite',
+    'gemini-2.5-pro': 'gemini-3.1-pro',
+    'gemini-2.0-flash': 'gemini-3.5-flash-lite',
 };
 
-const DEFAULT_MODEL = 'gemini-2.5-flash';
+const DEFAULT_MODEL = 'gemini-3.5-flash-lite';
 
 /**
  * Gemini Adapter
@@ -42,14 +46,14 @@ export class GeminiAdapter {
             const apiKey = process.env.GEMINI_API_KEY;
             const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent`;
             
+            const promptWithJsonDirective = `${userPrompt}\n\nCRITICAL: Your response must be ONLY a valid JSON object wrapped in \`\`\`json ... \`\`\` markdown code block. Do NOT include any commentary outside the code block.`;
+            
             const payload = {
                 contents: [{
-                    parts: [{ text: userPrompt }]
+                    parts: [{ text: promptWithJsonDirective }]
                 }],
-                tools: [{ google_search: {} }],
-                generationConfig: {
-                    responseMimeType: 'application/json'
-                }
+                tools: [{ google_search: {} }]
+                // Note: responseMimeType: 'application/json' is intentionally omitted because Gemini API rejects search grounding tool when responseMimeType is set.
             };
 
             if (systemPrompt) {
@@ -91,7 +95,11 @@ export class GeminiAdapter {
                 }
 
                 const result = await response.json();
-                const content = result.candidates?.[0]?.content?.parts?.[0]?.text;
+                const candidate = result.candidates?.[0];
+                const content = (candidate?.content?.parts || [])
+                    .map(p => p.text || '')
+                    .filter(Boolean)
+                    .join('\n');
 
                 if (!content?.trim()) {
                     throw new Error('Empty response from Gemini AI search grounding service');
@@ -101,6 +109,7 @@ export class GeminiAdapter {
                     content,
                     tokensUsed: result.usageMetadata ? (result.usageMetadata.promptTokenCount || 0) + (result.usageMetadata.candidatesTokenCount || 0) : null,
                     rawResponse: result,
+                    groundingMetadata: candidate?.groundingMetadata || null
                 };
             } catch (error) {
                 throw this.handleApiError(error);
@@ -181,9 +190,9 @@ export class GeminiAdapter {
 
     getAvailableModels() {
         return [
-            { id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash', description: 'Fast — best for new charts', cost_tier: 'standard' },
-            { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro', description: 'Most capable — best for modifications', cost_tier: 'premium' },
-            { id: 'gemini-2.0-flash', name: 'Gemini 2.0 Flash', description: 'Balanced speed and quality', cost_tier: 'standard' },
+            { id: 'gemini-3.5-flash-lite', name: 'Gemini 3.5 Flash-Lite', description: 'Fast, low-cost & search grounded', cost_tier: 'standard' },
+            { id: 'gemini-3.8-flash', name: 'Gemini 3.8 Flash', description: 'High capability workhorse', cost_tier: 'standard' },
+            { id: 'gemini-3.1-pro', name: 'Gemini 3.1 Pro', description: 'Deep reasoning & complex modifications', cost_tier: 'premium' },
         ];
     }
 

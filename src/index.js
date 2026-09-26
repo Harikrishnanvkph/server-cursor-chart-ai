@@ -261,6 +261,7 @@ app.post('/api/process-chart-enhanced', requireAuth, aiLimiter, async (req, res)
     templateStructure, // NEW: Template structure metadata for generating template text content
     formatStructure,
     webSearch, // NEW
+    searchProvider, // NEW: Override search provider ('brave' | 'tavily')
     includeImages // NEW: Toggle to force image fetching
   } = req.body;
 
@@ -313,8 +314,8 @@ app.post('/api/process-chart-enhanced', requireAuth, aiLimiter, async (req, res)
     console.log(`🤖 Processing chart request using: ${service.toUpperCase()} (Model: ${model || 'default'})`);
 
     const aiResponse = (currentChartState && conversationId)
-      ? await svc.modify(finalInput, currentChartState, messageHistory || [], model, templateStructure, formatStructure, webSearch)
-      : await svc.generate(finalInput, model, templateStructure, formatStructure, webSearch);
+      ? await svc.modify(finalInput, currentChartState, messageHistory || [], model, templateStructure, formatStructure, webSearch, searchProvider)
+      : await svc.generate(finalInput, model, templateStructure, formatStructure, webSearch, searchProvider);
 
     // Deduct 1 credit if chart data was generated or modified
     let updatedSubscription = null;
@@ -354,6 +355,8 @@ app.post('/api/process-chart-enhanced', requireAuth, aiLimiter, async (req, res)
       subtitle: aiResponse.subtitle || null,
       xAxisTitle: aiResponse.xAxisTitle || null,
       yAxisTitle: aiResponse.yAxisTitle || null,
+      searchWarning: aiResponse.searchWarning || null,
+      grounding: aiResponse.grounding || null,
       subscription: updatedSubscription
     };
 
