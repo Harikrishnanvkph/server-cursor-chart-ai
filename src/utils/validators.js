@@ -210,6 +210,109 @@ function sanitizeFormatContent(rawBundle, chartResponse, dataContainer) {
   bundle.body = bundle.narratives.editorial || bundle.narratives.summary;
   bundle.callout = bundle.callouts.keyInsight;
 
+  // 8. Content Bank (10 Categorized Text Blocks, 3 Titles, 3 Subtitles, 3 Catchy Phrases, General Images, Sources)
+  const rawBank = (chartResponse.contentBank && typeof chartResponse.contentBank === 'object')
+    ? chartResponse.contentBank
+    : (bundle.contentBank && typeof bundle.contentBank === 'object')
+    ? bundle.contentBank
+    : {};
+
+  // 8a. 3 Titles
+  const bankTitles = Array.isArray(rawBank.titles) && rawBank.titles.length >= 3
+    ? rawBank.titles.slice(0, 3).map((t, idx) => ({
+        id: `t${idx + 1}`,
+        style: t.style || (idx === 0 ? 'punchy' : idx === 1 ? 'analytical' : 'provocative'),
+        text: String(t.text || (idx === 0 ? bundle.titles.punchy : idx === 1 ? bundle.titles.standard : bundle.titles.detailed))
+      }))
+    : [
+        { id: 't1', style: 'punchy', text: bundle.titles.punchy },
+        { id: 't2', style: 'analytical', text: bundle.titles.standard },
+        { id: 't3', style: 'provocative', text: `${bundle.titles.punchy}: Critical Analysis` }
+      ];
+
+  // 8b. 3 Subtitles
+  const bankSubtitles = Array.isArray(rawBank.subtitles) && rawBank.subtitles.length >= 3
+    ? rawBank.subtitles.slice(0, 3).map((s, idx) => ({
+        id: `s${idx + 1}`,
+        style: s.style || (idx === 0 ? 'short' : idx === 1 ? 'standard' : 'detailed'),
+        text: String(s.text || (idx === 0 ? bundle.subtitles.short : idx === 1 ? fallbackSubtitle : bundle.subtitles.detailed))
+      }))
+    : [
+        { id: 's1', style: 'short', text: bundle.subtitles.short },
+        { id: 's2', style: 'standard', text: `${fallbackSubtitle} across primary segments` },
+        { id: 's3', style: 'detailed', text: bundle.subtitles.detailed }
+      ];
+
+  // 8c. 3 Catchy Phrases
+  const bankPhrases = Array.isArray(rawBank.catchyPhrases) && rawBank.catchyPhrases.length >= 3
+    ? rawBank.catchyPhrases.slice(0, 3).map((cp, idx) => ({
+        id: `cp${idx + 1}`,
+        phrase: String(cp.phrase || cp.text || (idx === 0 ? bundle.callouts.keyInsight : idx === 1 ? bundle.callouts.takeaway : bundle.narratives.summary))
+      }))
+    : [
+        { id: 'cp1', phrase: bundle.callouts.keyInsight },
+        { id: 'cp2', phrase: bundle.callouts.takeaway },
+        { id: 'cp3', phrase: `Leading the trend: ${dataContainer.labels[0] || 'Top segment'} surges ahead.` }
+      ];
+
+  // 8d. 10 Categorized Text Blocks
+  const DEFAULT_CATEGORIES = [
+    { name: 'Executive Summary', length: 'short', fallback: bundle.narratives.summary },
+    { name: 'Market Drivers', length: 'medium', fallback: `Primary catalysts include accelerating adoption and infrastructural investments across ${dataContainer.labels.slice(0, 3).join(', ')}.` },
+    { name: 'Key Comparison', length: 'medium', fallback: `${dataContainer.labels[0] || 'The leading segment'} commands the highest share, outperforming secondary peers by a significant margin.` },
+    { name: 'Strategic Takeaway', length: 'short', fallback: bundle.callouts.takeaway },
+    { name: 'Historical Context', length: 'medium', fallback: `Over the past cycles, historical patterns demonstrate steady expansion culminating in the current distribution.` },
+    { name: 'Bullet Points', length: 'list', fallback: 'Key takeaways summary', isBullets: true },
+    { name: 'Consumer Behavior', length: 'long', fallback: `User engagement patterns reflect heightened reliance on primary channels, driving substantive activity across top demographic cohorts.` },
+    { name: 'Industry Impact', length: 'medium', fallback: `Cross-sector implications indicate competitive realignment as industry participants adapt to shifting market share.` },
+    { name: 'Underlying Factors', length: 'medium', fallback: `Technological integration, accessibility, and macroeconomic conditions serve as foundational pillars behind these figures.` },
+    { name: 'Outlook & Risks', length: 'short', fallback: `Future momentum remains subject to regulatory adjustments and supply chain equilibrium over the upcoming quarters.` }
+  ];
+
+  let rawBlocks = Array.isArray(rawBank.textBlocks) ? rawBank.textBlocks : [];
+  const bankBlocks = DEFAULT_CATEGORIES.map((def, idx) => {
+    const raw = rawBlocks[idx] || {};
+    const textVal = String(raw.text || def.fallback);
+    const block = {
+      id: `b${idx + 1}`,
+      category: raw.category || def.name,
+      length: raw.length || def.length,
+      text: textVal
+    };
+    if (def.isBullets || Array.isArray(raw.bullets)) {
+      block.bullets = Array.isArray(raw.bullets) && raw.bullets.length > 0
+        ? raw.bullets.map(b => String(b))
+        : bundle.narratives.bulletPoints;
+    }
+    return block;
+  });
+
+  // 8e. Sources
+  const bankSources = Array.isArray(rawBank.sources) && rawBank.sources.length > 0
+    ? rawBank.sources.map(s => String(s))
+    : [bundle.source];
+
+  // 8f. General Image Queries & Images
+  const bankImageQueries = Array.isArray(rawBank.generalImageQueries) && rawBank.generalImageQueries.length >= 3
+    ? rawBank.generalImageQueries.slice(0, 3).map(q => String(q))
+    : bundle.visualKeywords.length >= 3
+    ? bundle.visualKeywords.slice(0, 3)
+    : [fallbackTitle, `${fallbackTitle} technology`, `${fallbackTitle} digital visual`];
+
+  const contentBank = {
+    titles: bankTitles,
+    subtitles: bankSubtitles,
+    catchyPhrases: bankPhrases,
+    textBlocks: bankBlocks,
+    sources: bankSources,
+    generalImageQueries: bankImageQueries,
+    generalImages: Array.isArray(rawBank.generalImages) ? rawBank.generalImages : [],
+    sliceImages: Array.isArray(rawBank.sliceImages) ? rawBank.sliceImages : []
+  };
+
+  bundle.contentBank = contentBank;
+  chartResponse.contentBank = contentBank;
+
   return bundle;
 }
 

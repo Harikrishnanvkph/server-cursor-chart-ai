@@ -123,6 +123,29 @@ export class ChartProcessor {
         console.error('Error resolving point images in generateChart:', err);
       }
 
+      // Collect slice images into contentBank
+      try {
+        const ds0 = chartData.chartData?.datasets?.[0] || chartData.data?.datasets?.[0];
+        const labels = chartData.chartData?.labels || chartData.data?.labels || [];
+        if (ds0 && Array.isArray(ds0.pointImages) && ds0.pointImages.some(img => Boolean(img))) {
+          const sliceImgs = labels.map((label, idx) => ({
+            label: String(label || `Slice ${idx + 1}`),
+            imageUrl: ds0.pointImages[idx] || null
+          })).filter(item => Boolean(item.imageUrl));
+
+          if (sliceImgs.length > 0) {
+            if (!chartData.contentBank) chartData.contentBank = {};
+            chartData.contentBank.sliceImages = sliceImgs;
+            if (chartData.formatContent) {
+              if (!chartData.formatContent.contentBank) chartData.formatContent.contentBank = {};
+              chartData.formatContent.contentBank.sliceImages = sliceImgs;
+            }
+          }
+        }
+      } catch (err) {
+        console.error('Error collecting slice images into contentBank:', err);
+      }
+
       // Add metadata
       chartData._metadata = this.buildMetadata(response, model);
 
@@ -219,6 +242,29 @@ export class ChartProcessor {
         await this.resolvePointImages(chartData, inputText);
       } catch (err) {
         console.error('Error resolving point images in modifyChart:', err);
+      }
+
+      // Collect slice images into contentBank
+      try {
+        const ds0 = chartData.chartData?.datasets?.[0] || chartData.data?.datasets?.[0];
+        const labels = chartData.chartData?.labels || chartData.data?.labels || [];
+        if (ds0 && Array.isArray(ds0.pointImages) && ds0.pointImages.some(img => Boolean(img))) {
+          const sliceImgs = labels.map((label, idx) => ({
+            label: String(label || `Slice ${idx + 1}`),
+            imageUrl: ds0.pointImages[idx] || null
+          })).filter(item => Boolean(item.imageUrl));
+
+          if (sliceImgs.length > 0) {
+            if (!chartData.contentBank) chartData.contentBank = {};
+            chartData.contentBank.sliceImages = sliceImgs;
+            if (chartData.formatContent) {
+              if (!chartData.formatContent.contentBank) chartData.formatContent.contentBank = {};
+              chartData.formatContent.contentBank.sliceImages = sliceImgs;
+            }
+          }
+        }
+      } catch (err) {
+        console.error('Error collecting slice images into contentBank:', err);
       }
 
       // Add metadata

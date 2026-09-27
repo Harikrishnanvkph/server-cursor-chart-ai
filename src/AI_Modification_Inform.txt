@@ -32,8 +32,8 @@ TEMPLATE TEXT AREAS (only when template is active):
 - HTML content on single line in JSON. Use <p>,<h3>,<ul>,<li>,<img>,<strong>,<em>
 - If no template active and user asks about text areas → respond they need a template
 
-FORMAT CONTENT BUNDLE (when format layout, textboxes, or narratives are modified):
-- When user asks to change titles, summary, editorial narrative, bullet points, or stats in format mode: return the updated fields inside "formatContent" (e.g. formatContent.titles, formatContent.narratives, formatContent.stats).
+FORMAT CONTENT BUNDLE & CONTENT BANK:
+- When user asks to change titles, summary, editorial narrative, bullet points, phrases, or stats in format mode: return the updated fields inside "formatContent" and/or "contentBank" (e.g. contentBank.textBlocks, contentBank.catchyPhrases, formatContent.titles).
 
 RESPONSE FORMAT:
 {
@@ -57,6 +57,7 @@ RESPONSE FORMAT:
   "chartConfig": { only changed properties },
   "templateContent": { only changed fields },
   "formatContent": { only changed fields },
+  "contentBank": { only changed fields },
   "user_message": "What was changed",
   "changes": ["change1"]
 }

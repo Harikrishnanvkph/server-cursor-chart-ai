@@ -29,6 +29,44 @@ The response must be a single JSON object with the following structure:
       }
     ]
   },
+  "contentBank": {
+    "titles": [
+      { "id": "t1", "style": "punchy", "text": "Short punchy title (<= 35 chars)" },
+      { "id": "t2", "style": "analytical", "text": "Standard informative title (<= 65 chars)" },
+      { "id": "t3", "style": "provocative", "text": "Intriguing or question-based title (<= 90 chars)" }
+    ],
+    "subtitles": [
+      { "id": "s1", "style": "short", "text": "Brief context or timeframe (<= 50 chars)" },
+      { "id": "s2", "style": "standard", "text": "Clear scope and measurement metrics (<= 85 chars)" },
+      { "id": "s3", "style": "detailed", "text": "Full context and scope (<= 120 chars)" }
+    ],
+    "catchyPhrases": [
+      { "id": "cp1", "phrase": "First impactful takeaway phrase." },
+      { "id": "cp2", "phrase": "Second punchy quote or memorable finding." },
+      { "id": "cp3", "phrase": "Third key contrast or forward-looking callout." }
+    ],
+    "textBlocks": [
+      { "id": "b1", "category": "Executive Summary", "length": "short", "text": "One punchy sentence summarizing the core insight." },
+      { "id": "b2", "category": "Market Drivers", "length": "medium", "text": "Two to three sentences analyzing underlying growth drivers or catalysts." },
+      { "id": "b3", "category": "Key Comparison", "length": "medium", "text": "Detailed comparison highlighting top performer vs competitors or averages." },
+      { "id": "b4", "category": "Strategic Takeaway", "length": "short", "text": "Practical business or strategic conclusion drawn from the data." },
+      { "id": "b5", "category": "Historical Trend", "length": "medium", "text": "Contextual background on how this data evolved over recent years." },
+      { "id": "b6", "category": "Bullet Points", "length": "list", "text": "Key takeaways summary", "bullets": [
+        "First key data point with exact number",
+        "Second notable comparison or metric",
+        "Third crucial implication"
+      ]},
+      { "id": "b7", "category": "Consumer Behavior", "length": "long", "text": "Analysis of user, customer, or demographic trends observed in the data." },
+      { "id": "b8", "category": "Industry Impact", "length": "medium", "text": "How this data impacts broader ecosystem, pricing, or adoption." },
+      { "id": "b9", "category": "Underlying Factors", "length": "medium", "text": "Technical, economic, or regulatory factors shaping the distribution." },
+      { "id": "b10", "category": "Outlook & Risks", "length": "short", "text": "Future projection, potential bottleneck, or upcoming catalyst." }
+    ],
+    "sources": [
+      "Source: Name of verified data source",
+      "Source: Secondary industry or research publication"
+    ],
+    "generalImageQueries": ["3 distinct search queries for contextual Unsplash images"]
+  },
   "formatContent": {
     "titles": {
       "punchy": "Short punchy title (<= 35 chars)",
