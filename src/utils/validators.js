@@ -122,7 +122,95 @@ export function validateAndSanitizeChartData(chartResponse) {
   chartResponse.data = dataContainer;
   chartResponse.chartData = dataContainer;
 
+  // Sanitize and ensure formatContent resource bundle
+  chartResponse.formatContent = sanitizeFormatContent(chartResponse.formatContent, chartResponse, dataContainer);
+
   return chartResponse;
+}
+
+/**
+ * Sanitize and normalize formatContent resource bundle
+ * Guarantees a valid, crash-proof tiered bundle for frontend layout engines
+ */
+function sanitizeFormatContent(rawBundle, chartResponse, dataContainer) {
+  const fallbackTitle = chartResponse.title || 'Data Insights';
+  const fallbackSubtitle = chartResponse.subtitle || 'Analysis Overview';
+  const bundle = (rawBundle && typeof rawBundle === 'object') ? { ...rawBundle } : {};
+
+  // 1. Titles
+  const rawTitles = bundle.titles && typeof bundle.titles === 'object' ? bundle.titles : {};
+  bundle.titles = {
+    punchy: String(rawTitles.punchy || fallbackTitle).substring(0, 45),
+    standard: String(rawTitles.standard || bundle.title || fallbackTitle).substring(0, 80),
+    detailed: String(rawTitles.detailed || rawTitles.standard || fallbackTitle).substring(0, 130)
+  };
+
+  // 2. Subtitles
+  const rawSubs = bundle.subtitles && typeof bundle.subtitles === 'object' ? bundle.subtitles : {};
+  bundle.subtitles = {
+    short: String(rawSubs.short || bundle.subtitle || fallbackSubtitle).substring(0, 70),
+    detailed: String(rawSubs.detailed || rawSubs.short || fallbackSubtitle).substring(0, 150)
+  };
+
+  // 3. Narratives
+  const rawNarratives = bundle.narratives && typeof bundle.narratives === 'object' ? bundle.narratives : {};
+  const bulletPoints = Array.isArray(rawNarratives.bulletPoints) && rawNarratives.bulletPoints.length > 0
+    ? rawNarratives.bulletPoints.map(b => String(b))
+    : [`Key metric reported: ${dataContainer.labels[0] || 'Primary'}`, `Secondary comparison across categories`];
+
+  bundle.narratives = {
+    summary: String(rawNarratives.summary || bundle.body || `Overview of ${fallbackTitle} showing key variations across categories.`),
+    editorial: String(rawNarratives.editorial || bundle.body || rawNarratives.summary || `The distribution demonstrates significant trends across ${dataContainer.labels.length} categories, highlighting core drivers and comparative metrics.`),
+    bulletPoints: bulletPoints
+  };
+
+  // 4. Stats
+  let stats = Array.isArray(bundle.stats) ? bundle.stats : [];
+  stats = stats
+    .filter(s => s && typeof s === 'object')
+    .map((s, idx) => ({
+      value: String(s.value ?? ''),
+      label: String(s.label ?? `Metric ${idx + 1}`),
+      trend: ['up', 'down', 'flat'].includes(s.trend) ? s.trend : 'flat',
+      priority: typeof s.priority === 'number' ? s.priority : idx + 1
+    }));
+
+  if (stats.length === 0) {
+    const firstDs = dataContainer.datasets[0];
+    const dataArr = firstDs?.data || [];
+    if (dataArr.length > 0) {
+      const maxVal = Math.max(...dataArr);
+      const maxIdx = dataArr.indexOf(maxVal);
+      stats.push({
+        value: String(maxVal),
+        label: dataContainer.labels[maxIdx] || 'Top Value',
+        trend: 'up',
+        priority: 1
+      });
+    }
+  }
+  bundle.stats = stats;
+
+  // 5. Callouts
+  const rawCallouts = bundle.callouts && typeof bundle.callouts === 'object' ? bundle.callouts : {};
+  bundle.callouts = {
+    keyInsight: String(rawCallouts.keyInsight || bundle.callout || 'Notable variation observed across primary indicators.'),
+    takeaway: String(rawCallouts.takeaway || 'Strategic focus recommended for high-performing segments.')
+  };
+
+  // 6. Source & Visual Keywords
+  bundle.source = String(bundle.source || chartResponse.grounding?.sources?.[0] || 'Verified Data Report');
+  bundle.visualKeywords = Array.isArray(bundle.visualKeywords)
+    ? bundle.visualKeywords.map(k => String(k))
+    : Array.isArray(bundle.keywords) ? bundle.keywords.map(k => String(k)) : [fallbackTitle];
+
+  // 7. Backward compatibility fields
+  bundle.title = bundle.titles.standard;
+  bundle.subtitle = bundle.subtitles.short;
+  bundle.body = bundle.narratives.editorial || bundle.narratives.summary;
+  bundle.callout = bundle.callouts.keyInsight;
+
+  return bundle;
 }
 
 

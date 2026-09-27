@@ -29,6 +29,36 @@ The response must be a single JSON object with the following structure:
       }
     ]
   },
+  "formatContent": {
+    "titles": {
+      "punchy": "Short punchy title (<= 35 chars)",
+      "standard": "Standard informative title (<= 65 chars)",
+      "detailed": "Comprehensive analytical title (<= 110 chars)"
+    },
+    "subtitles": {
+      "short": "Brief context (<= 50 chars)",
+      "detailed": "Full context and scope (<= 120 chars)"
+    },
+    "narratives": {
+      "summary": "One punchy sentence summarizing the core insight.",
+      "editorial": "Two to three sentences providing context, drivers, and implications.",
+      "bulletPoints": [
+        "First key data takeaway with exact numbers",
+        "Second notable comparison or trend",
+        "Third forward-looking or underlying factor"
+      ]
+    },
+    "stats": [
+      { "value": "14.5", "label": "Top Metric Name", "trend": "up", "priority": 1 },
+      { "value": "29.8", "label": "Second Metric Name", "trend": "down", "priority": 2 }
+    ],
+    "callouts": {
+      "keyInsight": "The most significant finding or anomaly in the data.",
+      "takeaway": "Actionable conclusion or implication."
+    },
+    "source": "Source: Name of verified data source",
+    "visualKeywords": ["3-4 specific search terms for contextual Unsplash images"]
+  },
   "user_message": "A message for the user about the chart data."
 }
 
@@ -47,6 +77,14 @@ FIELD DESCRIPTIONS:
 - data.datasets[].data: The actual numeric values (must strictly match the values in grounding.verifiedMetrics)
 - data.datasets[].backgroundColor: Colors for each data point (use visually appealing rgba colors)
 - data.datasets[].borderColor: Border colors for each data point
+- formatContent: Tiered semantic content bundle used to populate infographics, multi-format templates, and textboxes.
+  * formatContent.titles: { punchy, standard, detailed } matching the strict character length limits.
+  * formatContent.subtitles: { short, detailed } for varying header heights.
+  * formatContent.narratives: { summary, editorial, bulletPoints } providing multi-length narrative options.
+  * formatContent.stats: Array of 2-4 key metrics extracted from the data, sorted by importance (priority 1, 2, ...).
+  * formatContent.callouts: Key insight and takeaway.
+  * formatContent.source: Clear attribution of data provenance.
+  * formatContent.visualKeywords: 3-4 specific photographic queries for relevant background imagery.
 
 The chartType must be one of the following: "bar", "line", "pie", "doughnut", "scatter", "bubble", "polarArea", "radar", "horizontalBar", "stackedBar", "area", "pie3d", "doughnut3d"
 IMPORTANT: If the user asks for a "3D pie chart", use chartType "pie3d". If the user asks for a "3D doughnut chart", use chartType "doughnut3d". If user asks for a horizontal bar chart, use "horizontalBar". If user asks for a stacked bar chart, use "stackedBar".

@@ -327,6 +327,28 @@ CRITICAL JSON FORMATTING RULE FOR HTML:
       }
     }
 
+    // Always instruct the AI to generate the formatContent resource bundle for rich layouts
+    prompt += `
+
+CONTENT RESOURCE BUNDLE (formatContent):
+You MUST always include a comprehensive "formatContent" object in your JSON response. This provides layout-agnostic content blocks used by the frontend to populate infographics, social cards, presentations, and dashboards across different aspect ratios and text container sizes.
+Ensure:
+1. "formatContent.titles": Provide "punchy" (<= 35 chars, concise/punchy), "standard" (<= 65 chars), and "detailed" (<= 110 chars) versions.
+2. "formatContent.subtitles": Provide "short" (<= 50 chars) and "detailed" (<= 120 chars) versions.
+3. "formatContent.narratives": Provide "summary" (1 punchy sentence), "editorial" (2-3 analytical sentences), and "bulletPoints" (array of 3 distinct takeaway strings with exact numbers).
+4. "formatContent.stats": Array of 2-4 key metrics from the data, each with { "value": string, "label": string, "trend": "up"|"down"|"flat", "priority": number }.
+5. "formatContent.callouts": { "keyInsight": string, "takeaway": string }.
+6. "formatContent.source": Clear data source attribution string.
+7. "formatContent.visualKeywords": Array of 3-4 specific search keywords for relevant contextual imagery.`;
+
+    if (formatStructure) {
+      prompt += `
+
+FORMAT LAYOUT SPECIFICS:
+Active format: "${formatStructure.formatName}" (${formatStructure.category || 'infographic'}, ${formatStructure.dimensions?.width}x${formatStructure.dimensions?.height}).
+Tailor the tone and content of "formatContent" to fit the ${formatStructure.theme?.mood || 'professional'} theme.`;
+    }
+
     return prompt;
   }
 
