@@ -46,11 +46,11 @@ export class OpenRouterAdapter {
     const response = await this.client.chat.completions.create({
       model: model || 'openai/gpt-4o-mini',
       messages: messages,
-      max_tokens: maxTokens || 2000,
+      max_tokens: maxTokens || 8192,
       temperature: temperature || 0.3,
       top_p: topP || 0.9
     }, {
-      signal: AbortSignal.timeout(60000) // 60-second timeout
+      signal: AbortSignal.timeout(120000) // 120-second timeout for large format responses
     });
 
     return {

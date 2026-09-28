@@ -196,9 +196,13 @@ setInterval(() => {
   }
 }, 15 * 60 * 1000);
 
-// Rate limiting middleware — uses sliding window counter (O(1) per request)
 function rateLimitMiddleware(req, res, next) {
   const clientIP = getClientIP(req);
+
+  const isLocal = clientIP === '127.0.0.1' || clientIP === '::1' || clientIP === '::ffff:127.0.0.1' || clientIP === 'localhost';
+  if (process.env.NODE_ENV !== 'production' && isLocal) {
+    return next();
+  }
 
   // Check if IP is permanently blocked
   if (BLOCKED_IPS.has(clientIP)) {
@@ -235,6 +239,16 @@ function rateLimitMiddleware(req, res, next) {
   next();
 }
 
+// In-flight refresh deduplication map to prevent Supabase Refresh Token Rotation race conditions
+const inFlightRefreshes = new Map();
+
+// Helper to determine if a token is a standard JWT (e.g. Supabase) vs an opaque OAuth token (e.g. Google ya29.*)
+function isJwtFormat(token) {
+  if (!token || typeof token !== 'string') return false;
+  const parts = token.split('.');
+  return parts.length === 3;
+}
+
 // Authentication middleware
 export async function requireAuth(req, res, next) {
   try {
@@ -257,59 +271,55 @@ export async function requireAuth(req, res, next) {
         return res.status(403).json({ error: 'Access denied' });
       }
 
-      // First try Supabase token validation
-      try {
-        const url = `${process.env.SUPABASE_URL}/auth/v1/user`;
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 5000); // 5 second timeout
+      // Only attempt Supabase token validation if the token matches JWT structure
+      // (Google OAuth tokens starting with "ya29." are not Supabase JWTs; querying Supabase with them
+      // always fails with 401/403 after a 200-2000ms network penalty).
+      if (isJwtFormat(accessToken)) {
+        try {
+          const url = `${process.env.SUPABASE_URL}/auth/v1/user`;
+          const controller = new AbortController();
+          const timeoutId = setTimeout(() => controller.abort(), 5000); // 5 second timeout
 
-        const response = await fetch(url, {
-          headers: {
-            'Authorization': `Bearer ${accessToken}`,
-            'apikey': process.env.SUPABASE_ANON_KEY || ''
-          },
-          signal: controller.signal
-        });
-        clearTimeout(timeoutId);
+          const response = await fetch(url, {
+            headers: {
+              'Authorization': `Bearer ${accessToken}`,
+              'apikey': process.env.SUPABASE_ANON_KEY || ''
+            },
+            signal: controller.signal
+          });
+          clearTimeout(timeoutId);
 
-        if (response.ok) {
-          const user = await response.json();
+          if (response.ok) {
+            const user = await response.json();
 
-          // Ensure user has a profile
-          const profile = await ensureUserProfile(user.id, user.email, user.user_metadata?.name, user.user_metadata?.avatar_url);
+            // Ensure user has a profile
+            const profile = await ensureUserProfile(user.id, user.email, user.user_metadata?.name, user.user_metadata?.avatar_url);
 
-          const enrichedUser = {
-            ...user,
-            is_admin: profile?.is_admin || false
-          };
+            const enrichedUser = {
+              ...user,
+              is_admin: profile?.is_admin || false
+            };
 
-          setCachedUser(accessToken, enrichedUser);
-          req.user = enrichedUser;
-          return next();
+            setCachedUser(accessToken, enrichedUser);
+            req.user = enrichedUser;
+            return next();
+          }
+        } catch (supabaseError) {
+          console.warn('Supabase token validation failed or timed out:', supabaseError.message);
+          // Fallback to OAuth session validation when Supabase validation fails
         }
-      } catch (supabaseError) {
-        console.warn('Supabase token validation failed or timed out:', supabaseError.message);
-        // Fallback to OAuth session validation when Supabase validation fails
       }
 
-      // If Supabase validation failed, check OAuth session
+      // Check OAuth session in database
       try {
         const oauthUser = await secureSessionStore.validateSession(accessToken);
 
         if (oauthUser) {
-          console.log('OAuth user validated:', {
-            userId: oauthUser.user_id || oauthUser.id,
-            email: oauthUser.email,
-            provider: oauthUser.provider
-          });
-
-          // Use user_id if available (from validateSession), otherwise fall back to id
           const userId = oauthUser.user_id || oauthUser.id;
 
-          // Ensure user has a profile (OAuth users have email, full_name, avatar_url directly)
+          // Ensure user has a profile
           const profile = await ensureUserProfile(userId, oauthUser.email, oauthUser.full_name, oauthUser.avatar_url);
 
-          // Create a normalized user object with consistent ID field
           const normalizedUser = {
             id: userId,
             email: oauthUser.email,
@@ -333,12 +343,20 @@ export async function requireAuth(req, res, next) {
     if (refreshToken) {
       console.log('Access token invalid/expired. Attempting to refresh session using refresh token...');
       try {
-        const refreshResult = await withTimeout(
-          supabaseUserClient.auth.refreshSession({ refresh_token: refreshToken }),
-          8000,
-          'Supabase session refresh timed out'
-        );
+        // Mutex: Deduplicate in-flight refresh requests for the same refresh token
+        // to prevent concurrent requests from failing under Supabase Refresh Token Rotation.
+        let refreshPromise = inFlightRefreshes.get(refreshToken);
+        if (!refreshPromise) {
+          refreshPromise = withTimeout(
+            supabaseUserClient.auth.refreshSession({ refresh_token: refreshToken }),
+            10000,
+            'Supabase session refresh timed out'
+          );
+          inFlightRefreshes.set(refreshToken, refreshPromise);
+          refreshPromise.finally(() => inFlightRefreshes.delete(refreshToken));
+        }
 
+        const refreshResult = await refreshPromise;
         const { data: refreshData, error: refreshError } = refreshResult;
 
         if (refreshError || !refreshData?.session || !refreshData?.user) {
@@ -365,9 +383,11 @@ export async function requireAuth(req, res, next) {
           path: '/',
         };
 
+        // Align access_token cookie lifetime to 15 days so browser does not discard it after 1 hour
+        const sessionLifetimeMs = 15 * 24 * 60 * 60 * 1000;
         res.cookie('access_token', newSession.access_token, { 
           ...cookieOptions, 
-          maxAge: newSession.expires_in * 1000 
+          maxAge: sessionLifetimeMs 
         });
         
         if (newSession.refresh_token) {
@@ -384,10 +404,24 @@ export async function requireAuth(req, res, next) {
 
       } catch (refreshErr) {
         console.warn('Failed to refresh Supabase session:', refreshErr.message);
-        // Clear cookies to avoid repeatedly trying to refresh with a bad token
-        res.clearCookie('access_token', { path: '/' });
-        res.clearCookie('refresh_token', { path: '/' });
-        return res.status(401).json({ error: 'Session expired, please sign in again' });
+
+        const errMsg = String(refreshErr?.message || '').toLowerCase();
+        const isDefinitiveAuthFailure =
+          errMsg.includes('invalid') ||
+          errMsg.includes('revoked') ||
+          errMsg.includes('already used') ||
+          errMsg.includes('not found') ||
+          errMsg.includes('invalid_grant');
+
+        // Only clear cookies if token is proven definitively invalid or revoked.
+        // DO NOT clear cookies on network timeouts or temporary server blips!
+        if (isDefinitiveAuthFailure) {
+          res.clearCookie('access_token', { path: '/' });
+          res.clearCookie('refresh_token', { path: '/' });
+          return res.status(401).json({ error: 'Session expired, please sign in again', code: 'SESSION_REVOKED' });
+        }
+
+        return res.status(503).json({ error: 'Authentication service temporarily unavailable. Please retry.', code: 'AUTH_TIMEOUT' });
       }
     }
 

@@ -68,7 +68,7 @@ export class PerplexityAdapter {
         top_p: topP || 0.9,
         stream: false  // Ensure we get complete responses
       }, {
-        signal: AbortSignal.timeout(60000) // 60-second timeout
+        signal: AbortSignal.timeout(120000) // 120-second timeout for large format responses
       });
 
       const content = response.choices[0]?.message?.content;

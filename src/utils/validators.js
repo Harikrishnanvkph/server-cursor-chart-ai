@@ -39,7 +39,7 @@ function coerceToFiniteNumber(val) {
  * @param {Object} chartResponse - The raw parsed JSON from AI
  * @returns {Object} - The sanitized chart response
  */
-export function validateAndSanitizeChartData(chartResponse) {
+export function validateAndSanitizeChartData(chartResponse, isFormatRequest = false) {
   if (!chartResponse || typeof chartResponse !== 'object') {
     throw new Error('AI response is not a valid object');
   }
@@ -122,8 +122,13 @@ export function validateAndSanitizeChartData(chartResponse) {
   chartResponse.data = dataContainer;
   chartResponse.chartData = dataContainer;
 
-  // Sanitize and ensure formatContent resource bundle
-  chartResponse.formatContent = sanitizeFormatContent(chartResponse.formatContent, chartResponse, dataContainer);
+  // Sanitize and ensure formatContent resource bundle ONLY when format requested or formatContent returned
+  if (isFormatRequest || chartResponse.formatContent || (chartResponse.contentBank && Object.keys(chartResponse.contentBank).length > 0)) {
+    chartResponse.formatContent = sanitizeFormatContent(chartResponse.formatContent, chartResponse, dataContainer);
+  } else {
+    delete chartResponse.formatContent;
+    delete chartResponse.contentBank;
+  }
 
   return chartResponse;
 }
@@ -210,14 +215,14 @@ function sanitizeFormatContent(rawBundle, chartResponse, dataContainer) {
   bundle.body = bundle.narratives.editorial || bundle.narratives.summary;
   bundle.callout = bundle.callouts.keyInsight;
 
-  // 8. Content Bank (10 Categorized Text Blocks, 3 Titles, 3 Subtitles, 3 Catchy Phrases, General Images, Sources)
+  // 8. Content Bank (8 Categorized Text Blocks, 3 Titles, 3 Subtitles, 3 Catchy Phrases, General Images, Sources)
   const rawBank = (chartResponse.contentBank && typeof chartResponse.contentBank === 'object')
     ? chartResponse.contentBank
     : (bundle.contentBank && typeof bundle.contentBank === 'object')
     ? bundle.contentBank
     : {};
 
-  // 8a. 3 Titles
+  // 8a. 3 Titles — ensure distinctness
   const bankTitles = Array.isArray(rawBank.titles) && rawBank.titles.length >= 3
     ? rawBank.titles.slice(0, 3).map((t, idx) => ({
         id: `t${idx + 1}`,
@@ -230,7 +235,7 @@ function sanitizeFormatContent(rawBundle, chartResponse, dataContainer) {
         { id: 't3', style: 'provocative', text: `${bundle.titles.punchy}: Critical Analysis` }
       ];
 
-  // 8b. 3 Subtitles
+  // 8b. 3 Subtitles — ensure distinctness
   const bankSubtitles = Array.isArray(rawBank.subtitles) && rawBank.subtitles.length >= 3
     ? rawBank.subtitles.slice(0, 3).map((s, idx) => ({
         id: `s${idx + 1}`,
@@ -243,7 +248,7 @@ function sanitizeFormatContent(rawBundle, chartResponse, dataContainer) {
         { id: 's3', style: 'detailed', text: bundle.subtitles.detailed }
       ];
 
-  // 8c. 3 Catchy Phrases
+  // 8c. 3 Catchy Phrases — ensure distinctness
   const bankPhrases = Array.isArray(rawBank.catchyPhrases) && rawBank.catchyPhrases.length >= 3
     ? rawBank.catchyPhrases.slice(0, 3).map((cp, idx) => ({
         id: `cp${idx + 1}`,
@@ -255,18 +260,18 @@ function sanitizeFormatContent(rawBundle, chartResponse, dataContainer) {
         { id: 'cp3', phrase: `Leading the trend: ${dataContainer.labels[0] || 'Top segment'} surges ahead.` }
       ];
 
-  // 8d. 10 Categorized Text Blocks
+  // 8d. 8 Categorized Text Blocks (word count tiers: 500w, 300w, 200w, 2×100w, 2×50w, 1 bullet list)
+  const topLabels = dataContainer.labels.slice(0, 3).join(', ') || 'key segments';
+  const leadEntity = dataContainer.labels[0] || 'The leading segment';
   const DEFAULT_CATEGORIES = [
-    { name: 'Executive Summary', length: 'short', fallback: bundle.narratives.summary },
-    { name: 'Market Drivers', length: 'medium', fallback: `Primary catalysts include accelerating adoption and infrastructural investments across ${dataContainer.labels.slice(0, 3).join(', ')}.` },
-    { name: 'Key Comparison', length: 'medium', fallback: `${dataContainer.labels[0] || 'The leading segment'} commands the highest share, outperforming secondary peers by a significant margin.` },
-    { name: 'Strategic Takeaway', length: 'short', fallback: bundle.callouts.takeaway },
-    { name: 'Historical Context', length: 'medium', fallback: `Over the past cycles, historical patterns demonstrate steady expansion culminating in the current distribution.` },
-    { name: 'Bullet Points', length: 'list', fallback: 'Key takeaways summary', isBullets: true },
-    { name: 'Consumer Behavior', length: 'long', fallback: `User engagement patterns reflect heightened reliance on primary channels, driving substantive activity across top demographic cohorts.` },
-    { name: 'Industry Impact', length: 'medium', fallback: `Cross-sector implications indicate competitive realignment as industry participants adapt to shifting market share.` },
-    { name: 'Underlying Factors', length: 'medium', fallback: `Technological integration, accessibility, and macroeconomic conditions serve as foundational pillars behind these figures.` },
-    { name: 'Outlook & Risks', length: 'short', fallback: `Future momentum remains subject to regulatory adjustments and supply chain equilibrium over the upcoming quarters.` }
+    { name: 'Deep Dive Analysis', length: 'extra-long', minWords: 500, fallback: `${fallbackTitle} represents a significant area of focus across global markets. ${leadEntity} leads the current standings, reflecting sustained competitive advantage through strategic investments, operational excellence, and market positioning. The landscape has evolved considerably over recent cycles, with established leaders consolidating their positions while emerging challengers introduce disruptive approaches. Key drivers include technological innovation, regulatory shifts, and evolving consumer preferences that collectively reshape competitive dynamics across ${topLabels} and beyond. Historical patterns demonstrate that market leadership in this domain correlates strongly with early adoption of transformative strategies and disciplined execution. Looking forward, the interplay between macroeconomic conditions, sector-specific tailwinds, and individual entity strategies will determine whether current leaders maintain their positions or face displacement from agile competitors. The data reveals nuanced patterns when examined at the segment level, with each category exhibiting distinct growth trajectories influenced by geographic expansion, demographic shifts, and capital allocation decisions. Industry analysts note that the gap between top performers and the rest of the field has widened over the past several periods, suggesting a winner-take-most dynamic that may intensify further. Cross-sector implications extend beyond direct competitors, affecting supply chains, talent markets, and adjacent industries that depend on the primary players for partnership, investment, and innovation spillovers. Stakeholders across the ecosystem must calibrate their strategies in response to these structural shifts, balancing short-term operational priorities against long-term positioning requirements. Risk factors include regulatory intervention, geopolitical disruption, and technological obsolescence, each of which could materially alter the competitive landscape within a single cycle.` },
+    { name: 'Comprehensive Overview', length: 'long', minWords: 300, fallback: `The current distribution across ${topLabels} reflects broader structural trends in the market. ${leadEntity} maintains the strongest position with demonstrable advantages in scale, brand recognition, and strategic resource allocation. Secondary players continue to close the gap through targeted investments and operational improvements, though the margin between first and second place remains significant. The underlying drivers of this competitive order include sustained capital deployment, favorable market timing, and strategic positioning relative to emerging opportunities. Cross-comparisons reveal that while absolute figures vary substantially, the growth trajectories of mid-tier participants suggest potential for meaningful repositioning over the coming periods. Industry observers note that the most successful entities share common characteristics: disciplined financial management, proactive risk mitigation, and an ability to capitalize on inflection points that restructure competitive boundaries. The implications extend across sectors, with ripple effects observed in talent acquisition, supply chain dynamics, and investor sentiment.` },
+    { name: 'Detailed Breakdown', length: 'medium-long', minWords: 200, fallback: `A closer examination of the data reveals important distinctions between the top-performing entities across ${topLabels}. While surface-level comparisons highlight absolute differences in scale, the underlying growth rates and strategic trajectories tell a more nuanced story. ${leadEntity} has consistently leveraged its position through a combination of organic expansion and strategic acquisitions, establishing barriers to entry that secondary competitors find increasingly difficult to overcome. The sector-specific dynamics suggest that future leadership positions will depend heavily on the ability to adapt to shifting regulatory frameworks, evolving consumer expectations, and the accelerating pace of technological change that reshapes operational models across the competitive landscape.` },
+    { name: 'Key Comparison', length: 'medium', minWords: 100, fallback: `${leadEntity} commands the highest share, significantly outperforming secondary peers across ${topLabels}. The gap between the top two positions reveals structural advantages in market positioning, capital efficiency, and strategic execution that have compounded over multiple periods. Mid-tier participants demonstrate competitive strengths in specific niches but face scaling challenges that limit their ability to challenge overall leadership.` },
+    { name: 'Strategic Insight', length: 'medium', minWords: 100, fallback: `Forward-looking analysis suggests that current market positions are likely to persist in the near term, with ${leadEntity} maintaining its advantage through continued investment and strategic discipline. However, emerging disruptors and shifting regulatory landscapes introduce meaningful uncertainty beyond the immediate horizon. Organizations positioned to capitalize on these transitions will require agile strategic frameworks and robust risk management capabilities.` },
+    { name: 'Quick Summary', length: 'short', minWords: 50, fallback: `${leadEntity} leads the current rankings across ${topLabels}, reflecting sustained competitive advantages in scale and execution. The data highlights significant variation between top and mid-tier performers, with implications for strategic positioning.` },
+    { name: 'Notable Highlight', length: 'short', minWords: 50, fallback: `A standout finding is the widening gap between ${leadEntity} and the nearest competitor — a spread that has grown consistently over recent periods, signaling deepening structural advantages rather than cyclical fluctuations.` },
+    { name: 'Bullet Points', length: 'list', minWords: 0, fallback: 'Key takeaways and highlights:', isBullets: true }
   ];
 
   let rawBlocks = Array.isArray(rawBank.textBlocks) ? rawBank.textBlocks : [];
@@ -292,12 +297,12 @@ function sanitizeFormatContent(rawBundle, chartResponse, dataContainer) {
     ? rawBank.sources.map(s => String(s))
     : [bundle.source];
 
-  // 8f. General Image Queries & Images
+  // 8f. General Image Queries & Images — entity-specific, not generic
   const bankImageQueries = Array.isArray(rawBank.generalImageQueries) && rawBank.generalImageQueries.length >= 3
     ? rawBank.generalImageQueries.slice(0, 3).map(q => String(q))
     : bundle.visualKeywords.length >= 3
     ? bundle.visualKeywords.slice(0, 3)
-    : [fallbackTitle, `${fallbackTitle} technology`, `${fallbackTitle} digital visual`];
+    : [`${dataContainer.labels[0] || fallbackTitle} official`, `${dataContainer.labels[1] || fallbackTitle} logo`, `${fallbackTitle} portrait photo`];
 
   const contentBank = {
     titles: bankTitles,

@@ -33,12 +33,12 @@ export class DeepSeekAdapter {
       const response = await this.client.chat.completions.create({
         model: resolvedModel,
         messages,
-        max_tokens: maxTokens || 4096,
+        max_tokens: Math.min(maxTokens || 4096, 8192),
         temperature: temperature ?? 0.3,
         response_format: { type: 'json_object' },
         stream: false
       }, {
-        signal: AbortSignal.timeout(60000) // 60-second timeout
+        signal: AbortSignal.timeout(120000) // 120-second timeout for large format responses
       });
 
       const content = response.choices[0]?.message?.content;
@@ -50,7 +50,7 @@ export class DeepSeekAdapter {
         rawResponse: response
       };
     } catch (error) {
-      if (error.name === 'AbortError' || error.name === 'TimeoutError') throw new Error('DeepSeek API request timed out after 30 seconds.');
+      if (error.name === 'AbortError' || error.name === 'TimeoutError') throw new Error('DeepSeek API request timed out after 120 seconds.');
       if (error.status === 401) throw new Error('Invalid DeepSeek API key');
       if (error.status === 429) throw new Error('DeepSeek API rate limit exceeded. Please try again.');
       if (error.status >= 500) throw new Error('DeepSeek API server error. Please try again later.');

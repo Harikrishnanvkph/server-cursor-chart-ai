@@ -90,11 +90,13 @@ export class ChartProcessor {
       const userPrompt = this.buildUserPrompt(inputText, templateStructure);
 
       // Make service-specific API call
+      // Format requests need significantly more tokens for the content bank (500w+300w+200w+... text blocks)
+      const maxTokens = formatStructure ? 8000 : 2500;
       const response = await this.adapter.generateContent({
         systemPrompt,
         userPrompt,
         model,
-        maxTokens: 2500,  // Tuned: typical chart JSON is 500-1500 tokens
+        maxTokens,
         temperature: 0.2,
         topP: 0.85,
         webSearch
@@ -105,7 +107,7 @@ export class ChartProcessor {
       const chartData = this.parseJSON(cleanedResponse, this.adapter.serviceName);
 
       // Sanitize and strictly validate chart structure and numeric values
-      validateAndSanitizeChartData(chartData);
+      validateAndSanitizeChartData(chartData, Boolean(formatStructure));
 
       // Ensure user_message exists
       if (!chartData.user_message) {
@@ -123,27 +125,29 @@ export class ChartProcessor {
         console.error('Error resolving point images in generateChart:', err);
       }
 
-      // Collect slice images into contentBank
-      try {
-        const ds0 = chartData.chartData?.datasets?.[0] || chartData.data?.datasets?.[0];
-        const labels = chartData.chartData?.labels || chartData.data?.labels || [];
-        if (ds0 && Array.isArray(ds0.pointImages) && ds0.pointImages.some(img => Boolean(img))) {
-          const sliceImgs = labels.map((label, idx) => ({
-            label: String(label || `Slice ${idx + 1}`),
-            imageUrl: ds0.pointImages[idx] || null
-          })).filter(item => Boolean(item.imageUrl));
+      // Collect slice images into contentBank (only if format layout requested or formatContent exists)
+      if (formatStructure || chartData.formatContent) {
+        try {
+          const ds0 = chartData.chartData?.datasets?.[0] || chartData.data?.datasets?.[0];
+          const labels = chartData.chartData?.labels || chartData.data?.labels || [];
+          if (ds0 && Array.isArray(ds0.pointImages) && ds0.pointImages.some(img => Boolean(img))) {
+            const sliceImgs = labels.map((label, idx) => ({
+              label: String(label || `Slice ${idx + 1}`),
+              imageUrl: ds0.pointImages[idx] || null
+            })).filter(item => Boolean(item.imageUrl));
 
-          if (sliceImgs.length > 0) {
-            if (!chartData.contentBank) chartData.contentBank = {};
-            chartData.contentBank.sliceImages = sliceImgs;
-            if (chartData.formatContent) {
-              if (!chartData.formatContent.contentBank) chartData.formatContent.contentBank = {};
-              chartData.formatContent.contentBank.sliceImages = sliceImgs;
+            if (sliceImgs.length > 0) {
+              if (!chartData.contentBank) chartData.contentBank = {};
+              chartData.contentBank.sliceImages = sliceImgs;
+              if (chartData.formatContent) {
+                if (!chartData.formatContent.contentBank) chartData.formatContent.contentBank = {};
+                chartData.formatContent.contentBank.sliceImages = sliceImgs;
+              }
             }
           }
+        } catch (err) {
+          console.error('Error collecting slice images into contentBank:', err);
         }
-      } catch (err) {
-        console.error('Error collecting slice images into contentBank:', err);
       }
 
       // Add metadata
@@ -219,7 +223,7 @@ export class ChartProcessor {
       const response = await this.adapter.generateContent({
         userPrompt: contextPrompt,
         model,
-        maxTokens: 3500,  // Tuned: modifications rarely exceed 2000 tokens
+        maxTokens: 3500,
         temperature: 0.2,
         webSearch
       });
@@ -230,7 +234,7 @@ export class ChartProcessor {
 
       // Sanitize and validate modified chart data if chartData is present
       if (chartData.chartData || chartData.data) {
-        validateAndSanitizeChartData(chartData);
+        validateAndSanitizeChartData(chartData, Boolean(formatStructure));
       }
 
       if (searchWarning) {
@@ -244,27 +248,29 @@ export class ChartProcessor {
         console.error('Error resolving point images in modifyChart:', err);
       }
 
-      // Collect slice images into contentBank
-      try {
-        const ds0 = chartData.chartData?.datasets?.[0] || chartData.data?.datasets?.[0];
-        const labels = chartData.chartData?.labels || chartData.data?.labels || [];
-        if (ds0 && Array.isArray(ds0.pointImages) && ds0.pointImages.some(img => Boolean(img))) {
-          const sliceImgs = labels.map((label, idx) => ({
-            label: String(label || `Slice ${idx + 1}`),
-            imageUrl: ds0.pointImages[idx] || null
-          })).filter(item => Boolean(item.imageUrl));
+      // Collect slice images into contentBank (only if format layout requested or formatContent exists)
+      if (formatStructure || chartData.formatContent) {
+        try {
+          const ds0 = chartData.chartData?.datasets?.[0] || chartData.data?.datasets?.[0];
+          const labels = chartData.chartData?.labels || chartData.data?.labels || [];
+          if (ds0 && Array.isArray(ds0.pointImages) && ds0.pointImages.some(img => Boolean(img))) {
+            const sliceImgs = labels.map((label, idx) => ({
+              label: String(label || `Slice ${idx + 1}`),
+              imageUrl: ds0.pointImages[idx] || null
+            })).filter(item => Boolean(item.imageUrl));
 
-          if (sliceImgs.length > 0) {
-            if (!chartData.contentBank) chartData.contentBank = {};
-            chartData.contentBank.sliceImages = sliceImgs;
-            if (chartData.formatContent) {
-              if (!chartData.formatContent.contentBank) chartData.formatContent.contentBank = {};
-              chartData.formatContent.contentBank.sliceImages = sliceImgs;
+            if (sliceImgs.length > 0) {
+              if (!chartData.contentBank) chartData.contentBank = {};
+              chartData.contentBank.sliceImages = sliceImgs;
+              if (chartData.formatContent) {
+                if (!chartData.formatContent.contentBank) chartData.formatContent.contentBank = {};
+                chartData.formatContent.contentBank.sliceImages = sliceImgs;
+              }
             }
           }
+        } catch (err) {
+          console.error('Error collecting slice images into contentBank:', err);
         }
-      } catch (err) {
-        console.error('Error collecting slice images into contentBank:', err);
       }
 
       // Add metadata
@@ -373,26 +379,96 @@ CRITICAL JSON FORMATTING RULE FOR HTML:
       }
     }
 
-    // Always instruct the AI to generate the formatContent resource bundle for rich layouts
-    prompt += `
-
-CONTENT RESOURCE BUNDLE (formatContent):
-You MUST always include a comprehensive "formatContent" object in your JSON response. This provides layout-agnostic content blocks used by the frontend to populate infographics, social cards, presentations, and dashboards across different aspect ratios and text container sizes.
-Ensure:
-1. "formatContent.titles": Provide "punchy" (<= 35 chars, concise/punchy), "standard" (<= 65 chars), and "detailed" (<= 110 chars) versions.
-2. "formatContent.subtitles": Provide "short" (<= 50 chars) and "detailed" (<= 120 chars) versions.
-3. "formatContent.narratives": Provide "summary" (1 punchy sentence), "editorial" (2-3 analytical sentences), and "bulletPoints" (array of 3 distinct takeaway strings with exact numbers).
-4. "formatContent.stats": Array of 2-4 key metrics from the data, each with { "value": string, "label": string, "trend": "up"|"down"|"flat", "priority": number }.
-5. "formatContent.callouts": { "keyInsight": string, "takeaway": string }.
-6. "formatContent.source": Clear data source attribution string.
-7. "formatContent.visualKeywords": Array of 3-4 specific search keywords for relevant contextual imagery.`;
-
+    // Instruct the AI to generate the formatContent resource bundle ONLY when format layout or format mode is requested
     if (formatStructure) {
       prompt += `
+
+CONTENT RESOURCE BUNDLE FOR FORMAT (formatContent & contentBank):
+The user requested content formatted for visual layouts/formats.
+You MUST include a comprehensive "formatContent" object in your JSON response. This provides layout-agnostic content blocks used by the frontend to populate infographics, social cards, presentations, and dashboards.
+
+=== CRITICAL: DISTINCTNESS & RELEVANCE RULES ===
+Every single piece of content you generate MUST be:
+- DISTINCT: No two titles, subtitles, phrases, or text blocks should repeat the same idea, fact, or phrasing. Each must offer a genuinely different angle, fact, or perspective.
+- CONTEXTUAL: Everything must be tightly related to the user's actual request topic. Never drift into generic filler text.
+- FACTUAL: Use real names, real figures, real entities from the data. If the topic is "Top 5 Billionaires", mention Elon Musk, Jeff Bezos, Bernard Arnault by name — not generic "leading segment" or "top performer".
+
+=== formatContent STRUCTURE ===
+1. "formatContent.titles": Three DISTINCT title variants for the same topic:
+   - "punchy" (<= 35 chars): A bold, catchy headline (e.g. "Musk Tops $250B Empire")
+   - "standard" (<= 65 chars): A clear informative title (e.g. "World's Top 5 Billionaires by Net Worth in 2025")
+   - "detailed" (<= 110 chars): A descriptive analytical title (e.g. "How Tesla, Amazon & LVMH Titans Dominate the Global Wealth Rankings in 2025")
+   Each title must use DIFFERENT wording and angle — not just longer/shorter versions of the same sentence.
+
+2. "formatContent.subtitles": Two DISTINCT subtitle variants:
+   - "short" (<= 50 chars): A concise context line (e.g. "Net worth figures as of Q3 2025")
+   - "detailed" (<= 120 chars): A richer explanatory subtitle (e.g. "Comparing personal fortunes of the world's richest individuals across technology, luxury, and finance sectors")
+   Subtitles must NOT repeat the title — they add new context.
+
+3. "formatContent.narratives":
+   - "summary": 1 punchy sentence with a key insight and at least one specific number.
+   - "editorial": 2-3 analytical sentences providing deeper context. Must not overlap with summary.
+   - "bulletPoints": Array of 3 distinct takeaway strings, each citing exact numbers or entity names.
+
+4. "formatContent.stats": Array of 2-4 key metrics from the data, each with { "value": string, "label": string, "trend": "up"|"down"|"flat", "priority": number }.
+
+5. "formatContent.callouts": { "keyInsight": string, "takeaway": string }. Each must be distinct and non-overlapping.
+
+6. "formatContent.source": Clear data source attribution string.
+
+7. "formatContent.visualKeywords": Array of 3-4 HIGHLY SPECIFIC image search keywords.
+   CRITICAL IMAGE RELEVANCE RULES:
+   - Use real entity names, brand names, or recognizable subjects from the data — NOT generic abstract terms.
+   - BAD examples: "technology datacenter", "business growth", "digital transformation"
+   - GOOD examples: "Jeff Bezos portrait", "Tesla logo official", "LVMH Bernard Arnault", "Amazon headquarters Seattle"
+   - Each keyword should produce a recognizable, context-relevant photograph or logo when searched on Unsplash or Google Images.
+
+8. "formatContent.contentBank": The full asset bank with:
+
+   "titles": [
+     { "id": "t1", "style": "punchy", "text": "..." },
+     { "id": "t2", "style": "analytical", "text": "..." },
+     { "id": "t3", "style": "provocative", "text": "..." }
+   ]
+   — All 3 titles MUST be distinct from each other AND from formatContent.titles above.
+
+   "subtitles": [
+     { "id": "s1", "style": "short", "text": "..." },
+     { "id": "s2", "style": "standard", "text": "..." },
+     { "id": "s3", "style": "detailed", "text": "..." }
+   ]
+   — All 3 subtitles MUST be distinct from each other AND from formatContent.subtitles above.
+
+   "catchyPhrases": [
+     { "id": "cp1", "phrase": "..." },
+     { "id": "cp2", "phrase": "..." },
+     { "id": "cp3", "phrase": "..." }
+   ]
+   — 3 memorable, quotable one-liners. Each must express a different insight. Never repeat callouts.
+
+   "textBlocks": Array of exactly 8 blocks. Each block: { "id": "b1"..."b8", "category": string, "length": string, "text": string, "bullets"?: string[] }.
+   The 8 blocks MUST follow these exact word count targets, and each must cover a DISTINCT aspect of the topic:
+     b1: "Deep Dive Analysis" — length "extra-long", target 450-500 words. Comprehensive flagship editorial piece covering context, background, key entities, and future outlook.
+     b2: "Comprehensive Overview" — length "long", target 280-300 words. Thorough overview covering major trends, comparative standings, and primary market catalysts.
+     b3: "Detailed Breakdown" — length "medium-long", target 180-200 words. Focused analysis on a specific sub-topic, entity strategy, or segment distribution.
+     b4: "Key Comparison" — length "medium", target 90-100 words. Direct comparative analysis between 2-3 entities with specific numbers.
+     b5: "Strategic Insight" — length "medium", target 90-100 words. Actionable forward-looking perspective with concrete reasoning.
+     b6: "Quick Summary" — length "short", target 45-50 words. Concise executive summary paragraph.
+     b7: "Notable Highlight" — length "short", target 45-50 words. One surprising or noteworthy fact/trend with context.
+     b8: "Bullet Points" — length "list", text: brief intro sentence, "bullets": array of 4-5 key data points as strings.
+   IMPORTANT: Every text block must contain UNIQUE information. Do NOT rephrase or summarize other blocks.
+   TOKEN BUDGET: Keep within these word count targets so the entire JSON completes cleanly within the token limit.
+
+   "sources": Array of 1-3 source attribution strings.
+   "generalImageQueries": Array of 3 highly specific image search queries following the same CRITICAL IMAGE RELEVANCE RULES above.`;
+
+      if (formatStructure.formatName) {
+        prompt += `
 
 FORMAT LAYOUT SPECIFICS:
 Active format: "${formatStructure.formatName}" (${formatStructure.category || 'infographic'}, ${formatStructure.dimensions?.width}x${formatStructure.dimensions?.height}).
 Tailor the tone and content of "formatContent" to fit the ${formatStructure.theme?.mood || 'professional'} theme.`;
+      }
     }
 
     return prompt;
@@ -785,77 +861,54 @@ USER'S CURRENT REQUEST: ${inputText}`;
         }
       }
 
-      // Try to fix unterminated strings
-      if (inString) {
-        // Find the last opening quote without a closing quote
-        let quoteCount = 0;
-        let lastOpenQuoteIndex = -1;
-
-        for (let i = 0; i < repaired.length; i++) {
-          if (repaired[i] === '"' && (i === 0 || repaired[i - 1] !== '\\')) {
-            quoteCount++;
-            if (quoteCount % 2 === 1) {
-              lastOpenQuoteIndex = i;
-            }
-          }
-        }
-
-        if (lastOpenQuoteIndex > -1) {
-          // Close the unterminated string and try to complete the structure
-          repaired = repaired.substring(0, lastOpenQuoteIndex + 1) + '"]}}';
-          console.log('Attempted to close unterminated string');
-          return repaired;
-        }
-      }
-
-      // Try to close unclosed arrays and objects
-      let arrayCount = 0;
-      let objectCount = 0;
-      inString = false;
-      escapeNext = false;
+      // Stack-based repair for truncated JSON at any nesting depth
+      let inStringNow = false;
+      let escapeNextChar = false;
+      const bracketStack = [];
 
       for (let i = 0; i < repaired.length; i++) {
         const char = repaired[i];
 
-        if (escapeNext) {
-          escapeNext = false;
+        if (escapeNextChar) {
+          escapeNextChar = false;
           continue;
         }
 
         if (char === '\\') {
-          escapeNext = true;
+          escapeNextChar = true;
           continue;
         }
 
         if (char === '"') {
-          inString = !inString;
+          inStringNow = !inStringNow;
           continue;
         }
 
-        if (!inString) {
-          if (char === '[') arrayCount++;
-          else if (char === ']') arrayCount--;
-          else if (char === '{') objectCount++;
-          else if (char === '}') objectCount--;
+        if (!inStringNow) {
+          if (char === '{' || char === '[') {
+            bracketStack.push(char);
+          } else if (char === '}' || char === ']') {
+            bracketStack.pop();
+          }
         }
       }
 
-      // Add missing closing brackets
-      while (arrayCount > 0) {
-        repaired += ']';
-        arrayCount--;
-      }
-      while (objectCount > 0) {
-        repaired += '}';
-        objectCount--;
+      // If terminated mid-string, close the string quote
+      if (inStringNow) {
+        repaired += '"';
       }
 
-      if (arrayCount < 0 || objectCount < 0) {
-        console.log('Could not repair JSON: too many closing brackets');
-        return null;
+      // Clean up any trailing dangling commas or colons before closing containers
+      repaired = repaired.replace(/,\s*$/, '').replace(/:\s*$/, ': ""');
+
+      // Close all open brackets and braces in the exact reverse order of opening
+      while (bracketStack.length > 0) {
+        const openChar = bracketStack.pop();
+        repaired = repaired.replace(/,\s*$/, '');
+        repaired += (openChar === '{' ? '}' : ']');
       }
 
-      console.log('Attempted to close unclosed brackets');
+      console.log('Repaired truncated JSON via bracket stack tracking');
       return repaired;
 
     } catch (error) {

@@ -4,22 +4,19 @@ import { requireAuth, rateLimitMiddleware, requireAuthEnhanced } from '../middle
 
 const router = Router()
 
-// Apply rate limiting to all auth routes
-router.use(rateLimitMiddleware)
-
-// Public routes (with rate limiting)
-router.post('/signup', signUp)
-router.post('/signin', signIn)
-router.post('/guest', guestSignIn)
+// Sensitive public routes subject to brute-force rate limiting
+router.post('/signup', rateLimitMiddleware, signUp)
+router.post('/signin', rateLimitMiddleware, signIn)
+router.post('/guest', rateLimitMiddleware, guestSignIn)
 router.get('/google', googleStart)
 router.get('/google/callback', googleCallback)
 
 // Password reset routes (with rate limiting)
-router.post('/password/forgot', passwordForgot)
-router.post('/password/reset', passwordReset)
-router.post('/resend-verification', resendVerification)
+router.post('/password/forgot', rateLimitMiddleware, passwordForgot)
+router.post('/password/reset', rateLimitMiddleware, passwordReset)
+router.post('/resend-verification', rateLimitMiddleware, resendVerification)
 
-// Protected routes (require authentication)
+// Protected routes (require authentication - not subject to brute-force IP rate limiting)
 router.get('/me', requireAuthEnhanced, me)
 router.post('/signout', requireAuthEnhanced, signOut)
 

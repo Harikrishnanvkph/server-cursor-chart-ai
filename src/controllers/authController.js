@@ -16,7 +16,10 @@ function setSessionCookies(res, session) {
     sameSite: isProd ? 'none' : 'lax',
     path: '/',
   }
-  res.cookie('access_token', session.access_token, { ...cookieOptions, maxAge: session.expires_in * 1000 })
+  // Use 15-day cookie lifetime matching session validity so the browser does not prematurely
+  // delete the cookie after 1 hour. JWT token validation inside middleware still respects cryptographic exp.
+  const sessionLifetimeMs = 15 * 24 * 60 * 60 * 1000
+  res.cookie('access_token', session.access_token, { ...cookieOptions, maxAge: sessionLifetimeMs })
   if (session.refresh_token) {
     res.cookie('refresh_token', session.refresh_token, { ...cookieOptions, maxAge: 30 * 24 * 60 * 60 * 1000 })
   }

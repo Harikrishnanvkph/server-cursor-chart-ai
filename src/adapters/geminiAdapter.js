@@ -38,7 +38,7 @@ export class GeminiAdapter {
         return this._genAI;
     }
 
-    async generateContent({ systemPrompt, userPrompt, model, webSearch }) {
+    async generateContent({ systemPrompt, userPrompt, model, webSearch, maxTokens }) {
         const modelName = MODEL_MAP[model] ?? model ?? DEFAULT_MODEL;
 
         if (webSearch) {
@@ -52,7 +52,11 @@ export class GeminiAdapter {
                 contents: [{
                     parts: [{ text: promptWithJsonDirective }]
                 }],
-                tools: [{ google_search: {} }]
+                tools: [{ google_search: {} }],
+                generationConfig: {
+                    maxOutputTokens: maxTokens || 8192,
+                    temperature: 0.2
+                }
                 // Note: responseMimeType: 'application/json' is intentionally omitted because Gemini API rejects search grounding tool when responseMimeType is set.
             };
 
@@ -64,7 +68,7 @@ export class GeminiAdapter {
 
             try {
                 const controller = new AbortController();
-                const timeoutId = setTimeout(() => controller.abort(), 60000);
+                const timeoutId = setTimeout(() => controller.abort(), 120000); // 120s timeout for large format generations
 
                 const response = await fetch(url, {
                     method: 'POST',
@@ -120,7 +124,9 @@ export class GeminiAdapter {
         const genModel = this.genAI.getGenerativeModel({
             model: modelName,
             generationConfig: {
-                responseMimeType: 'application/json'
+                responseMimeType: 'application/json',
+                maxOutputTokens: maxTokens || 8192,
+                temperature: 0.2
             }
         });
         const combinedPrompt = systemPrompt
@@ -129,7 +135,7 @@ export class GeminiAdapter {
 
         try {
             const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 60000);
+            const timeoutId = setTimeout(() => controller.abort(), 120000); // 120s timeout for large format generations
 
             try {
                 const result = await genModel.generateContent(combinedPrompt, {
