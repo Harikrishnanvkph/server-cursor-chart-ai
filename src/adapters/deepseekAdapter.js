@@ -44,9 +44,13 @@ export class DeepSeekAdapter {
       const content = response.choices[0]?.message?.content;
       if (!content?.trim()) throw new Error('Empty response from DeepSeek AI service');
 
+      const u = response.usage;
+      const usage = u ? { sent: u.prompt_tokens || 0, received: u.completion_tokens || 0, total: u.total_tokens || 0 } : null;
+
       return {
         content,
-        tokensUsed: response.usage?.total_tokens || null,
+        tokensUsed: usage?.total || null,
+        usage,
         rawResponse: response
       };
     } catch (error) {

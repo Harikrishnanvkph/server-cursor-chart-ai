@@ -109,9 +109,13 @@ export class GeminiAdapter {
                     throw new Error('Empty response from Gemini AI search grounding service');
                 }
 
+                const u = result.usageMetadata;
+                const usage = u ? { sent: u.promptTokenCount || 0, received: u.candidatesTokenCount || 0, total: u.totalTokenCount || 0 } : null;
+
                 return {
                     content,
-                    tokensUsed: result.usageMetadata ? (result.usageMetadata.promptTokenCount || 0) + (result.usageMetadata.candidatesTokenCount || 0) : null,
+                    tokensUsed: usage?.total || null,
+                    usage,
                     rawResponse: result,
                     groundingMetadata: candidate?.groundingMetadata || null
                 };
@@ -149,9 +153,13 @@ export class GeminiAdapter {
                     throw new Error('Empty response from Gemini AI service');
                 }
 
+                const u = result.response?.usageMetadata;
+                const usage = u ? { sent: u.promptTokenCount || 0, received: u.candidatesTokenCount || 0, total: u.totalTokenCount || 0 } : null;
+
                 return {
                     content,
-                    tokensUsed: this._extractTokenUsage(result),
+                    tokensUsed: usage?.total || null,
+                    usage,
                     rawResponse: result,
                 };
             } catch (innerError) {
@@ -208,15 +216,6 @@ export class GeminiAdapter {
 
     enhanceError(error) {
         return new Error(`Gemini API error: ${error.message}`);
-    }
-
-    _extractTokenUsage(result) {
-        try {
-            const u = result.response?.usageMetadata;
-            return u ? (u.promptTokenCount || 0) + (u.candidatesTokenCount || 0) : null;
-        } catch {
-            return null;
-        }
     }
 }
 

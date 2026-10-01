@@ -73,6 +73,7 @@ RULES:
 - chartConfig: PARTIAL — only changed properties. Merged into existing config.
 - chartType: "bar"|"line"|"pie"|"doughnut"|"scatter"|"bubble"|"radar"|"polarArea"|"horizontalBar"|"stackedBar"|"area"|"pie3d"|"doughnut3d"
 - "3D pie" = "pie3d", "3D doughnut" = "doughnut3d"
+- GROUPED CHARTS: When user asks for a grouped chart or asks to compare/add another metric (e.g. "add revenue as grouped", "make grouped chart with networth and revenue"): keep chartType as "bar" (or "horizontalBar") and provide MULTIPLE dataset objects in "chartData.datasets", each with its own label and distinct colors, sharing the same labels.
 - All arrays same length. Include pointImages/pointImageSearchQueries/pointImageConfig only when relevant.
 - New chart: generate fresh data, labels, config for the new topic.
 - Never "improve" or "enhance" anything unasked. Use exact figures from grounding data when web search is provided.

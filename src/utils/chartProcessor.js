@@ -29,6 +29,11 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const SRC_DIR = path.resolve(__dirname, '..');
 
+// Module-level caches for instruction templates (avoids repeated disk I/O under concurrent load)
+let AI_CHART_CACHE = null;
+let AI_FORMAT_CACHE = null;
+let MODIFICATION_CACHE = null;
+
 /**
  * Generic Chart Processing Engine
  * Handles common operations while delegating service-specific logic to adapters
@@ -36,8 +41,6 @@ const SRC_DIR = path.resolve(__dirname, '..');
 export class ChartProcessor {
   constructor(adapter) {
     this.adapter = adapter;
-    this.aiContextCache = null;
-    this.modificationContextCache = null;
   }
 
   /**
@@ -49,8 +52,9 @@ export class ChartProcessor {
    */
   async generateChart(inputText, model, templateStructure = null, formatStructure = null, webSearch = false, searchProvider = null) {
     try {
-      // Get AI context (with caching)
-      const aiContext = await this.getAIContext();
+      // Get AI context (lightweight chart schema or rich format/contentBank schema)
+      const isFormat = Boolean(formatStructure);
+      const aiContext = await this.getAIContext(isFormat);
 
       let searchResults = null;
       let searchWarning = null;
@@ -90,8 +94,8 @@ export class ChartProcessor {
       const userPrompt = this.buildUserPrompt(inputText, templateStructure);
 
       // Make service-specific API call
-      // Format requests need significantly more tokens for the content bank (500w+300w+200w+... text blocks)
-      const maxTokens = formatStructure ? 8000 : 2500;
+      // Generous token budget prevents truncation on multi-dataset or search-grounded charts
+      const maxTokens = formatStructure ? 8000 : 5000;
       const response = await this.adapter.generateContent({
         systemPrompt,
         userPrompt,
@@ -219,11 +223,12 @@ export class ChartProcessor {
         searchResults
       );
 
-      // Make service-specific API call with higher tokens for modifications
+      // Make service-specific API call with higher tokens for format or multi-dataset modifications
+      const maxTokens = formatStructure ? 8000 : 5000;
       const response = await this.adapter.generateContent({
         userPrompt: contextPrompt,
         model,
-        maxTokens: 3500,
+        maxTokens,
         temperature: 0.2,
         webSearch
       });
@@ -300,25 +305,32 @@ export class ChartProcessor {
   // ========== PRIVATE HELPER METHODS ==========
 
   /**
-   * Get AI context with caching
+   * Get AI context with module-level caching
+   * @param {boolean} isFormat - Whether visual format / contentBank schema is required
    * @returns {Promise<string>} - AI context content
    */
-  async getAIContext() {
-    if (!this.aiContextCache) {
-      this.aiContextCache = await fs.readFile(path.join(SRC_DIR, 'AI_Inform.txt'), 'utf-8');
+  async getAIContext(isFormat = false) {
+    if (isFormat) {
+      if (!AI_FORMAT_CACHE) {
+        AI_FORMAT_CACHE = await fs.readFile(path.join(SRC_DIR, 'AI_Format_Inform.txt'), 'utf-8');
+      }
+      return AI_FORMAT_CACHE;
     }
-    return this.aiContextCache;
+    if (!AI_CHART_CACHE) {
+      AI_CHART_CACHE = await fs.readFile(path.join(SRC_DIR, 'AI_Chart_Inform.txt'), 'utf-8');
+    }
+    return AI_CHART_CACHE;
   }
 
   /**
-   * Get modification context with caching
+   * Get modification context with module-level caching
    * @returns {Promise<string>} - Modification context content
    */
   async getModificationContext() {
-    if (!this.modificationContextCache) {
-      this.modificationContextCache = await fs.readFile(path.join(SRC_DIR, 'AI_Modification_Inform.txt'), 'utf-8');
+    if (!MODIFICATION_CACHE) {
+      MODIFICATION_CACHE = await fs.readFile(path.join(SRC_DIR, 'AI_Modification_Inform.txt'), 'utf-8');
     }
-    return this.modificationContextCache;
+    return MODIFICATION_CACHE;
   }
 
   /**
@@ -331,11 +343,16 @@ export class ChartProcessor {
     const currentYear = new Date().getFullYear();
     let prompt = `${aiContext}
 
-TEMPORAL CONTEXT & FACTUAL INTEGRITY:
+TEMPORAL CONTEXT & FACTUAL INTEGRITY (DEFAULT TO LATEST AS OF TODAY):
 - Today's date context: Year ${currentYear}.
-- Real-world reporting rule: For full-year or periodic statistics (e.g. annual corporate revenue, box office totals, GDP, sports champions, census data), data for ${currentYear} is frequently ongoing, incomplete, or not yet officially concluded.
-- YOU MUST use the latest officially reported COMPLETED period with verified figures (e.g. ${currentYear - 1}, ${currentYear - 2}, or latest verified quarterly/YTD data for ${currentYear}).
-- NEVER invent, simulate, or fabricate numbers for uncompleted future periods. Always explicitly label the exact period in the chart subtitle (e.g., "Full Year ${currentYear - 1} Actuals" or "As of Q2 ${currentYear}").
+- DEFAULT EXPECTATION: Users naturally expect the freshest, most recent data available as of today, unless they explicitly requested a past historical year (e.g., "in 2020").
+- REAL-TIME / DYNAMIC METRICS (e.g. billionaire net worth, stock prices, market caps, currency, crypto):
+  * ALWAYS provide the latest verified real-time or latest market-close figures available right now.
+  * In the chart subtitle, explicitly label the timeframe (e.g., "As of Latest Real-Time Estimates" or "As of Market Close ${currentYear}").
+- PERIODIC / CONCLUDED STATISTICS (e.g. full-year corporate revenue, annual GDP, census, sports champions):
+  * For annual figures where ${currentYear} is ongoing/incomplete, use the latest officially concluded reporting period (e.g. ${currentYear - 1} full year or latest verified quarterly data for ${currentYear}).
+  * Label the exact period in the subtitle (e.g., "Full Year ${currentYear - 1} Actuals" or "As of Q2 ${currentYear}").
+- ANTI-HALLUCINATION GUARANTEE: NEVER fabricate, simulate, or invent fake numbers. When live search results are provided below, extract exact verified figures directly from them. If an intraday figure is unavailable, use the latest verified published figure and state the timeframe honestly in the subtitle.
 
 You are an expert chart data generator. Always respond with valid JSON.
 Focus on creating accurate, well-structured data with meaningful titles and axis labels.
@@ -489,6 +506,19 @@ Please generate chart data in valid JSON format.`;
     const imageKeywords = /\b(image|icon|picture|logo|photo|emoji|avatar|flag)\b/i;
     if (imageKeywords.test(inputText)) {
       prompt += `\n\nIMPORTANT: The user wants images on data points. You MUST include "pointImages" (array of working image URLs), "pointImageConfig" (array of config objects), and "pointImageSearchQueries" (array of specific search terms for each label to help the backend search engine find correct images, e.g., "Blast 2026 Tamil movie" instead of just "Blast") in each dataset. All arrays must match labels length.`;
+    }
+
+    // Multi-Dataset / Grouped Chart Detection: Ensure models (especially Gemini) generate separate datasets for comparative metrics
+    const groupedKeywords = /\b(grouped|group\s+chart|clustered|multi-series|multi-metric|both|along\s+with|and\s+provide\s+its)\b/i;
+    if (groupedKeywords.test(inputText)) {
+      prompt += `\n\nCRITICAL MULTI-DATASET / GROUPED CHART INSTRUCTION:
+The user explicitly requested a "grouped chart" or multiple comparative metrics across the entities (e.g. comparing net worth AND revenue, sales AND profits, or multiple categories).
+1. Set "chartType" to "bar" (or "horizontalBar").
+2. In "data.datasets", you MUST create MULTIPLE distinct dataset objects — one dataset for EACH requested metric (e.g. Dataset 1 for "Net Worth", Dataset 2 for "Current Revenue").
+3. All datasets must share the exact same "labels" array.
+4. Each dataset must have its own descriptive "label" (e.g., "Net Worth", "Current Revenue").
+5. Give each dataset a distinct "backgroundColor" and "borderColor" so they display as clearly distinguishable grouped bars side-by-side.
+6. Do NOT collapse multiple metrics into a single dataset or omit any requested metric.`;
     }
 
     if (templateStructure) {
@@ -673,16 +703,39 @@ USER'S CURRENT REQUEST: ${inputText}`;
     } else if (formatStructure) {
       prompt += `\n\n === FORMAT IS ACTIVE === `;
       prompt += `\nAvailable format content zones you can modify inside the "formatContent" object:`;
-      formatStructure.zones.forEach(z => {
-        if (z.type !== 'chart') {
-          prompt += `\n - "${z.role || z.type}" (max ${z.maxCharacters} chars)`;
-          if (z.adminMessage) prompt += ` - admin instruction: "${z.adminMessage}"`;
-          if (z.userNote) prompt += ` - user note: "${z.userNote}"`;
-        }
-      });
-      prompt += `\n\nEnsure you update formatContent zones to align with the changes.`;
+      if (Array.isArray(formatStructure.zones)) {
+        formatStructure.zones.forEach(z => {
+          if (z && z.type !== 'chart') {
+            prompt += `\n - "${z.role || z.type}" (max ${z.maxCharacters || 300} chars)`;
+            if (z.adminMessage) prompt += ` - admin instruction: "${z.adminMessage}"`;
+            if (z.userNote) prompt += ` - user note: "${z.userNote}"`;
+          }
+        });
+      }
+      prompt += `\n\nEnsure you update formatContent zones to align with the changes.
+When modifying format content, you MUST return a valid "formatContent" object with:
+- "titles": { "punchy", "standard", "detailed" }
+- "subtitles": { "short", "detailed" }
+- "narratives": { "summary", "editorial", "bulletPoints" }
+- "stats": array of key metrics
+- "callouts": { "keyInsight", "takeaway" }
+- "source": string
+- "contentBank": full asset bank with updated titles, subtitles, catchyPhrases, and textBlocks (b1 to b8).`;
     } else {
       prompt += `\n\nNOTE: No template or format is active. Text areas/zones are not available in chart-only mode.`;
+    }
+
+    // Multi-Dataset / Grouped Chart Modification Detection
+    const groupedKeywords = /\b(grouped|group\s+chart|clustered|multi-series|multi-metric|both|along\s+with|and\s+provide\s+its)\b/i;
+    if (groupedKeywords.test(inputText)) {
+      prompt += `\n\nCRITICAL MULTI-DATASET / GROUPED CHART INSTRUCTION:
+The user explicitly requested a "grouped chart" or multiple comparative metrics across the entities (e.g. comparing net worth AND revenue, sales AND profits, or multiple categories).
+1. Set "chartType" to "bar" (or "horizontalBar").
+2. In "chartData.datasets", you MUST create MULTIPLE distinct dataset objects — one dataset for EACH requested metric (e.g. Dataset 1 for "Net Worth", Dataset 2 for "Current Revenue").
+3. All datasets must share the exact same "labels" array.
+4. Each dataset must have its own descriptive "label".
+5. Give each dataset a distinct "backgroundColor" and "borderColor" so they display as clearly distinguishable grouped bars side-by-side.
+6. Do NOT collapse multiple metrics into a single dataset or omit any requested metric.`;
     }
 
     return prompt;
@@ -993,11 +1046,16 @@ USER'S CURRENT REQUEST: ${inputText}`;
    * @returns {Object} - Metadata object
    */
   buildMetadata(response, model) {
+    if (response.usage) {
+      console.log(`📊 [${this.adapter.serviceName.toUpperCase()} Telemetry] Sent: ${response.usage.sent} | Received: ${response.usage.received} | Total: ${response.usage.total}`);
+    }
+
     const baseMetadata = {
       service: this.adapter.serviceName,
       model: model,
       timestamp: new Date().toISOString(),
-      tokens_used: response.tokensUsed || null
+      tokens_used: response.tokensUsed || null,
+      usage: response.usage || null
     };
 
     // Add service-specific metadata

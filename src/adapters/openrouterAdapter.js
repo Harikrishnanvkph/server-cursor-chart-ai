@@ -53,9 +53,13 @@ export class OpenRouterAdapter {
       signal: AbortSignal.timeout(120000) // 120-second timeout for large format responses
     });
 
+    const u = response.usage;
+    const usage = u ? { sent: u.prompt_tokens || 0, received: u.completion_tokens || 0, total: u.total_tokens || 0 } : null;
+
     return {
       content: response.choices[0].message.content,
-      tokensUsed: response.usage?.total_tokens || null,
+      tokensUsed: usage?.total || null,
+      usage,
       rawResponse: response
     };
   }

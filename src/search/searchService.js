@@ -80,16 +80,18 @@ class SearchService {
 
 Rules:
 1. If the request is purely visual, formatting-related, or structural (e.g., changing colors, changing chart type like bar to pie, sorting data, updating text titles, styling, or requesting simple explanations of existing data), output exactly: NO_SEARCH
-2. If the request requires looking up new facts, figures, stock prices, or updated statistics from the web, output ONLY the search keywords (no punctuation, no explanation, no quotes). Include specific entity names, metrics (e.g. revenue, GDP, market cap), and relevant years/dates. Keep concise but complete (max 10-15 words). Include "${currentYear}" if the request asks for current, latest, or realtime data.
+2. If the request requires looking up facts, figures, rankings, stock prices, or statistics from the web, output ONLY the search keywords (no punctuation, no explanation, no quotes).
+   DEFAULT TO LATEST: Users naturally expect the freshest, most current data as of today. Unless the user explicitly asked for a past historical year (e.g. "in 2020"), ALWAYS include specific entity names, metrics, and "${currentYear} latest" or "real time" to retrieve current figures.
 3. If the user explicitly requests images, photos, logos, or flags of specific entities, ensure the generated search query includes the names of the entities followed by "official photo" or "logo" or "flag" (e.g. "Virat Kohli official photo") to help the search provider locate valid image URLs.
 
 Examples:
 - Request: "Make the bars blue" -> NO_SEARCH
 - Request: "Change the chart to a line chart" -> NO_SEARCH
-- Request: "Add GDP of Germany" -> Germany GDP ${currentYear}
-- Request: "Compare revenue of Apple, Microsoft, Alphabet in 2025" -> Apple Microsoft Alphabet revenue 2025
-- Request: "Show latest realtime data for tech companies" -> top tech companies revenue ${currentYear}
-- Request: "Show stock price of Apple this week" -> Apple stock price ${currentYear}
+- Request: "Top 5 billionaires" -> top 5 billionaires net worth ${currentYear} latest real time
+- Request: "Top tech companies by market cap" -> top tech companies market cap ${currentYear} latest
+- Request: "Add GDP of Germany" -> Germany GDP ${currentYear} latest
+- Request: "Compare revenue of Apple and Microsoft in 2021" -> Apple Microsoft revenue 2021
+- Request: "Compare revenue of Apple and Microsoft" -> Apple Microsoft revenue ${currentYear} latest
 - Request: "Sort the data ascending" -> NO_SEARCH
 - Request: "Show Virat Kohli, Steve Smith, Joe Root with pictures" -> Virat Kohli Steve Smith Joe Root official photo`;
 

@@ -95,9 +95,13 @@ export class PerplexityAdapter {
         throw new Error('AI service returned explanatory text instead of chart data. Please try rephrasing your request to be more specific about wanting chart data.');
       }
 
+      const u = response.usage;
+      const usage = u ? { sent: u.prompt_tokens || 0, received: u.completion_tokens || 0, total: u.total_tokens || 0 } : null;
+
       return {
         content: content,
-        tokensUsed: response.usage?.total_tokens || null,
+        tokensUsed: usage?.total || null,
+        usage,
         rawResponse: response
       };
 
