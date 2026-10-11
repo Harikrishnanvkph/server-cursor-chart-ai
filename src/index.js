@@ -15,7 +15,8 @@ import deepseekRoutes from './routes/deepseekRoutes.js';
 import geminiRoutes from './routes/geminiRoutes.js';
 import imageProxyRoutes from './routes/imageProxyRoutes.js';
 import { requireAuth, requireAdmin, rateLimitMiddleware, getSecurityStats, blockIP, unblockIP } from './middleware/authMiddleware.js';
-import { canConsumeAiCredit, deductAiCredit } from './services/subscriptionService.js';
+import { canConsumeAiCredit, deductAiCredit, refundAiCredit } from './services/subscriptionService.js';
+import { supabaseAdminClient } from './supabase/client.js';
 
 // Check required environment variables
 const requiredEnvVars = [
@@ -265,23 +266,51 @@ app.post('/api/process-chart-enhanced', requireAuth, aiLimiter, async (req, res)
     includeImages // NEW: Toggle to force image fetching
   } = req.body;
 
+  let creditDeducted = false;
+  const userId = req.user?.user_id || req.user?.id;
+  const abortController = new AbortController();
+
+  // Listen for early client abort / disconnect to kill downstream LLM operations
+  req.on('close', () => {
+    if (!res.writableEnded) {
+      console.log('Client aborted connection to /api/process-chart-enhanced. Cancelling generation.');
+      abortController.abort();
+    }
+  });
+
   try {
 
     if (!input) {
       return res.status(400).json({ error: 'Input text is required' });
     }
 
-    // Check user AI credit limit
-    const userId = req.user?.user_id || req.user?.id;
+    // Security: If conversationId exists in the database, verify it belongs to this user.
+    // Client-generated ephemeral conversation IDs (for unsaved/new chats) won't exist in DB yet, which is expected.
+    if (conversationId && userId) {
+      const { data: conv } = await supabaseAdminClient
+        .from('conversations')
+        .select('id, user_id')
+        .eq('id', conversationId)
+        .maybeSingle();
+
+      if (conv && conv.user_id && String(conv.user_id) !== String(userId)) {
+        return res.status(403).json({ error: 'Unauthorized: conversation does not belong to user' });
+      }
+    }
+
+    // Phase 1: Atomically pre-reserve AI credit before executing expensive LLM inferences
+    let updatedSubscription = null;
     if (userId) {
-      const creditCheck = await canConsumeAiCredit(userId);
-      if (!creditCheck.allowed) {
+      const deductResult = await deductAiCredit(userId);
+      if (!deductResult || deductResult.exhausted || deductResult.success === false) {
         return res.status(403).json({
-          error: creditCheck.error,
+          error: 'Monthly AI credit limit reached.',
           code: 'AI_CREDITS_EXHAUSTED',
-          subscription: creditCheck.subscription
+          subscription: deductResult
         });
       }
+      creditDeducted = true;
+      updatedSubscription = deductResult;
     }
 
     // Intercept input to force images if toggle is on
@@ -308,7 +337,7 @@ app.post('/api/process-chart-enhanced', requireAuth, aiLimiter, async (req, res)
     const isPlaceholder = !apiKeyValue || apiKeyValue.startsWith('your_') || apiKeyValue === '';
 
     if (isPlaceholder) {
-      return res.status(500).json({ error: `API key for '${service}' is not configured. Set ${svc.apiKey} in .env` });
+      throw new Error(`API key for '${service}' is not configured. Set ${svc.apiKey} in .env`);
     }
 
     console.log(`🤖 Processing chart request using: ${service.toUpperCase()} (Model: ${model || 'default'})`);
@@ -317,18 +346,9 @@ app.post('/api/process-chart-enhanced', requireAuth, aiLimiter, async (req, res)
       ? await svc.modify(finalInput, currentChartState, messageHistory || [], model, templateStructure, formatStructure, webSearch, searchProvider)
       : await svc.generate(finalInput, model, templateStructure, formatStructure, webSearch, searchProvider);
 
-    // Deduct 1 credit if chart data was generated or modified
-    let updatedSubscription = null;
-    if (userId && (aiResponse.chartData || aiResponse.data)) {
-      updatedSubscription = await deductAiCredit(userId);
-      // Quota gate: if credit deduction failed due to quota exhaustion during generation, block the response
-      if (updatedSubscription && (updatedSubscription.exhausted || updatedSubscription.success === false)) {
-        return res.status(403).json({
-          error: 'Monthly AI credit limit reached.',
-          code: 'AI_CREDITS_EXHAUSTED',
-          subscription: updatedSubscription
-        });
-      }
+    // Validate that we received chart data
+    if (!aiResponse || (!aiResponse.chartType && !aiResponse.chartData && !aiResponse.data)) {
+      throw new Error('AI service returned an empty or invalid chart response');
     }
 
     // Determine if this is a creation or modification
@@ -364,8 +384,22 @@ app.post('/api/process-chart-enhanced', requireAuth, aiLimiter, async (req, res)
 
   } catch (error) {
     console.error(`Error processing chart request with ${service || 'google'}:`, error);
+
+    // Rollback reserved credit if generation failed or was aborted
+    if (creditDeducted && userId) {
+      try {
+        await refundAiCredit(userId);
+      } catch (refundErr) {
+        console.error('Failed to refund AI credit after error:', refundErr.message);
+      }
+    }
+
+    if (abortController.signal.aborted) {
+      return res.status(499).json({ error: 'Client cancelled request' });
+    }
+
     res.status(500).json({
-      error: `Failed to process chart request`
+      error: error.message || 'Failed to process chart request'
     });
   }
 });

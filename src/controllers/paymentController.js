@@ -215,6 +215,11 @@ export async function verifyRazorpayPayment(req, res) {
  */
 export async function confirmSimulationPayment(req, res) {
   try {
+    const isProd = process.env.NODE_ENV === 'production';
+    if (isProd) {
+      return res.status(403).json({ error: 'Simulation payment is disabled in production environment' });
+    }
+
     const userId = req.user?.user_id || req.user?.id;
     if (!userId) {
       return res.status(401).json({ error: 'Authentication required' });

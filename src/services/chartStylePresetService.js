@@ -7,11 +7,12 @@ class ChartStylePresetService {
   // =============================================
 
   /**
-   * Get all available presets (official + user's own)
+   * Get all available presets (official + user's own, or all if admin)
    * @param {string|null} userId - User ID (null for unauthenticated - only official returned)
+   * @param {boolean} isAdmin - Whether requesting user is an admin
    * @returns {Promise<Array>} Array of chart style presets
    */
-  async getPresets(userId = null) {
+  async getPresets(userId = null, isAdmin = false) {
     try {
       let query = supabaseAdminClient
         .from('chart_style_presets')
@@ -19,7 +20,9 @@ class ChartStylePresetService {
         .order('sort_order', { ascending: true })
         .order('created_at', { ascending: false });
 
-      if (userId) {
+      if (isAdmin) {
+        // Admins can see all presets in the database
+      } else if (userId) {
         // Return official + public + user's own presets
         query = query.or(`is_official.eq.true,is_public.eq.true,user_id.eq.${userId}`);
       } else {
@@ -83,16 +86,19 @@ class ChartStylePresetService {
    * Get a specific preset by ID
    * @param {string} presetId - Preset ID
    * @param {string|null} userId - User ID for authorization
+   * @param {boolean} isAdmin - Whether requesting user is an admin
    * @returns {Promise<Object>} Chart style preset
    */
-  async getPresetById(presetId, userId = null) {
+  async getPresetById(presetId, userId = null, isAdmin = false) {
     try {
       let query = supabaseAdminClient
         .from('chart_style_presets')
         .select('*')
         .eq('id', presetId);
 
-      if (userId) {
+      if (isAdmin) {
+        // Admins can view any preset by ID
+      } else if (userId) {
         query = query.or(`is_official.eq.true,is_public.eq.true,user_id.eq.${userId}`);
       } else {
         query = query.eq('is_official', true);

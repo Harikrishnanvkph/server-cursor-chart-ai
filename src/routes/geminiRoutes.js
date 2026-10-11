@@ -5,7 +5,7 @@ import {
     getAvailableGeminiModels,
     validateGeminiApiKey
 } from '../services/geminiService.js';
-import { canConsumeAiCredit, deductAiCredit } from '../services/subscriptionService.js';
+import { canConsumeAiCredit, deductAiCredit, refundAiCredit } from '../services/subscriptionService.js';
 
 const router = express.Router();
 
@@ -13,22 +13,28 @@ const router = express.Router();
  * POST /api/gemini/process-chart
  */
 router.post('/process-chart', async (req, res) => {
+    let creditDeducted = false;
+    const userId = req.user?.user_id || req.user?.id;
+
     try {
         const { input, model, conversationId, currentChartState, messageHistory } = req.body;
 
         if (!input) return res.status(400).json({ error: 'Input text is required' });
         if (!process.env.GEMINI_API_KEY) return res.status(500).json({ error: 'Gemini API key not configured' });
 
-        const userId = req.user?.user_id || req.user?.id;
+        // Phase 1: Pre-reserve credit atomically before invoking upstream LLM
+        let updatedSubscription = null;
         if (userId) {
-            const creditCheck = await canConsumeAiCredit(userId);
-            if (!creditCheck.allowed) {
+            const deductResult = await deductAiCredit(userId);
+            if (!deductResult || deductResult.exhausted || deductResult.success === false) {
                 return res.status(403).json({
-                    error: creditCheck.error,
+                    error: 'Monthly AI credit limit reached.',
                     code: 'AI_CREDITS_EXHAUSTED',
-                    subscription: creditCheck.subscription
+                    subscription: deductResult
                 });
             }
+            creditDeducted = true;
+            updatedSubscription = deductResult;
         }
 
         const aiResponse = currentChartState && conversationId
@@ -37,11 +43,6 @@ router.post('/process-chart', async (req, res) => {
 
         if (!aiResponse.chartType || !aiResponse.chartData) {
             throw new Error('AI response missing required chart data');
-        }
-
-        let updatedSubscription = null;
-        if (userId) {
-            updatedSubscription = await deductAiCredit(userId);
         }
 
         res.json({
@@ -59,6 +60,14 @@ router.post('/process-chart', async (req, res) => {
 
     } catch (error) {
         console.error('Gemini chart request error:', error.message);
+        // Rollback credit deduction if generation failed
+        if (creditDeducted && userId) {
+            try {
+                await refundAiCredit(userId);
+            } catch (refundErr) {
+                console.error('Failed to refund AI credit after error:', refundErr.message);
+            }
+        }
         res.status(500).json({ error: 'Failed to process chart request with Gemini', details: error.message, service: 'gemini' });
     }
 });

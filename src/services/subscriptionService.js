@@ -170,6 +170,44 @@ export async function deductAiCredit(userId) {
 }
 
 /**
+ * Refund 1 AI credit when an upstream AI generation fails or is aborted.
+ * Decrements ai_credits_used (floored at 0).
+ */
+export async function refundAiCredit(userId) {
+  if (!userId) return null;
+  try {
+    const { data: profile, error } = await supabaseAdminClient
+      .from('profiles')
+      .select('ai_credits_used')
+      .eq('id', userId)
+      .single();
+
+    if (error || !profile) {
+      console.warn('Could not fetch profile to refund credit:', error?.message);
+      return null;
+    }
+
+    const currentUsed = profile.ai_credits_used ?? 0;
+    if (currentUsed <= 0) return await getUserSubscription(userId);
+
+    const { error: updateError } = await supabaseAdminClient
+      .from('profiles')
+      .update({ ai_credits_used: Math.max(0, currentUsed - 1) })
+      .eq('id', userId);
+
+    if (updateError) {
+      console.error('Failed to update profile for refundAiCredit:', updateError.message);
+      return null;
+    }
+
+    return await getUserSubscription(userId);
+  } catch (err) {
+    console.error('Error in refundAiCredit:', err);
+    return null;
+  }
+}
+
+/**
  * Check whether user can save another chart snapshot/conversation
  */
 export async function canSaveCloudChart(userId) {

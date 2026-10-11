@@ -157,15 +157,21 @@ export async function me(req, res) {
 }
 
 // Upgrade user subscription to Pro
-// TODO: PAYMENT REQUIRED — This endpoint currently grants Pro tier instantly without
-// any payment verification. Before production, integrate Stripe Checkout and only
-// upgrade the user after receiving a verified `checkout.session.completed` webhook.
+// In production, direct upgrade is strictly disabled for non-admins to prevent payment bypass.
+// Upgrades must occur via verified webhook fulfillment after checkout.
 export async function upgradeSubscription(req, res) {
   try {
     const userId = req.user?.user_id || req.user?.id
     if (!userId) {
       return res.status(401).json({ error: 'Authentication required' })
     }
+
+    if (isProd && !req.user?.is_admin) {
+      return res.status(403).json({
+        error: 'Direct subscription upgrade is disabled. Please upgrade via the checkout page.'
+      })
+    }
+
     const updatedSub = await setSubscriptionTier(userId, 'pro')
     res.json({ success: true, message: 'Upgraded to Pro successfully', subscription: updatedSub })
   } catch (error) {

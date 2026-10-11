@@ -144,13 +144,33 @@ router.get('/conversations/:id/messages', async (req, res) => {
 // CHART SNAPSHOT ROUTES
 // =============================================
 
+// Helper: verify conversation belongs to user before allowing snapshot/message operations
+async function verifyConversationOwner(conversationId, userId) {
+  if (!conversationId || !userId) return false;
+  const { data, error } = await supabaseAdminClient
+    .from('conversations')
+    .select('id, user_id')
+    .eq('id', conversationId)
+    .maybeSingle();
+
+  if (error || !data) return false;
+  return String(data.user_id) === String(userId);
+}
+
 // Save chart snapshot (POST for create, PUT for update)
 router.post('/chart-snapshots', async (req, res) => {
   try {
     const { conversationId, chartType, chartData, chartConfig, templateStructure, templateContent, snapshotId } = req.body;
+    const userId = req.user?.id || req.user?.user_id;
 
     if (!conversationId || !chartType || !chartData) {
       return res.status(400).json({ error: 'Missing required fields' });
+    }
+
+    // Security: Verify user owns this conversation
+    const isOwner = await verifyConversationOwner(conversationId, userId);
+    if (!isOwner) {
+      return res.status(403).json({ error: 'Unauthorized: conversation does not belong to user' });
     }
 
     const resultId = await chartDataService.saveChartSnapshot(
@@ -178,9 +198,16 @@ router.put('/chart-snapshots/:id', async (req, res) => {
   try {
     const { id } = req.params;
     const { conversationId, chartType, chartData, chartConfig, templateStructure, templateContent } = req.body;
+    const userId = req.user?.id || req.user?.user_id;
 
     if (!id || !conversationId || !chartType || !chartData) {
       return res.status(400).json({ error: 'Missing required fields' });
+    }
+
+    // Security: Verify user owns this conversation
+    const isOwner = await verifyConversationOwner(conversationId, userId);
+    if (!isOwner) {
+      return res.status(403).json({ error: 'Unauthorized: conversation does not belong to user' });
     }
 
     const updatedSnapshotId = await chartDataService.saveChartSnapshot(
@@ -225,6 +252,13 @@ router.post('/chart-snapshots/:id/share', async (req, res) => {
 router.get('/conversations/:id/current-snapshot', async (req, res) => {
   try {
     const { id } = req.params;
+    const userId = req.user?.id || req.user?.user_id;
+
+    // Security: Verify user owns this conversation
+    const isOwner = await verifyConversationOwner(id, userId);
+    if (!isOwner) {
+      return res.status(403).json({ error: 'Unauthorized: conversation does not belong to user' });
+    }
 
     const snapshot = await chartDataService.getCurrentChartSnapshot(id);
     res.json(snapshot);
@@ -239,6 +273,13 @@ router.get('/conversations/:id/chart-history', async (req, res) => {
   try {
     const { id } = req.params;
     const { limit = 10 } = req.query;
+    const userId = req.user?.id || req.user?.user_id;
+
+    // Security: Verify user owns this conversation
+    const isOwner = await verifyConversationOwner(id, userId);
+    if (!isOwner) {
+      return res.status(403).json({ error: 'Unauthorized: conversation does not belong to user' });
+    }
 
     const history = await chartDataService.getChartHistory(id, parseInt(limit));
     res.json(history);
@@ -263,6 +304,7 @@ router.post('/messages', async (req, res) => {
       action,
       changes
     } = req.body;
+    const userId = req.user?.id || req.user?.user_id;
 
     if (!conversationId || !role || !content) {
       return res.status(400).json({ error: 'Missing required fields' });
@@ -270,6 +312,12 @@ router.post('/messages', async (req, res) => {
 
     if (!['user', 'assistant'].includes(role)) {
       return res.status(400).json({ error: 'Invalid role' });
+    }
+
+    // Security: Verify user owns this conversation
+    const isOwner = await verifyConversationOwner(conversationId, userId);
+    if (!isOwner) {
+      return res.status(403).json({ error: 'Unauthorized: conversation does not belong to user' });
     }
 
     const message = await chartDataService.addMessage(

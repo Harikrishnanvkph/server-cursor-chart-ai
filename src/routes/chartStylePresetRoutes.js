@@ -37,11 +37,12 @@ router.get('/chart-style-presets/mine', requireAuth, async (req, res) => {
   }
 });
 
-// Get all presets (official + user's own - requires auth)
+// Get all presets (official + user's own - requires auth; all presets if admin)
 router.get('/chart-style-presets', requireAuth, async (req, res) => {
   try {
     const userId = req.user.id;
-    const presets = await chartStylePresetService.getPresets(userId);
+    const isAdmin = req.user.is_admin === true;
+    const presets = await chartStylePresetService.getPresets(userId, isAdmin);
     res.json(presets);
   } catch (error) {
     console.error('Error fetching chart style presets:', error);
@@ -54,7 +55,8 @@ router.get('/chart-style-presets/:id', requireAuth, async (req, res) => {
   try {
     const { id } = req.params;
     const userId = req.user.id;
-    const preset = await chartStylePresetService.getPresetById(id, userId);
+    const isAdmin = req.user.is_admin === true;
+    const preset = await chartStylePresetService.getPresetById(id, userId, isAdmin);
     res.json(preset);
   } catch (error) {
     console.error('Error fetching chart style preset:', error);
