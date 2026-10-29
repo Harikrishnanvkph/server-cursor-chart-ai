@@ -1353,7 +1353,8 @@ function normalizeWikimediaUrl(url) {
 
     if (filename) {
       const cleanFilename = decodeURIComponent(filename);
-      const host = parsed.hostname.includes('upload.wikimedia.org') ? 'commons.wikimedia.org' : parsed.hostname;
+      // Route all wikimedia.org requests through commons.wikimedia.org (thumb.wikimedia.org does not support Special:FilePath)
+      const host = parsed.hostname.includes('wikimedia.org') ? 'commons.wikimedia.org' : parsed.hostname;
       return `https://${host}/wiki/Special:FilePath/${encodeURIComponent(cleanFilename)}?width=500`;
     }
   } catch (e) {
@@ -1465,7 +1466,7 @@ async function resolveFamousPersonImage(cleanLabel) {
   try {
     const resultUrl = await Promise.race([
       resolveWithNetwork(),
-      new Promise(resolve => setTimeout(() => resolve(null), 3000))
+      new Promise(resolve => setTimeout(() => resolve(null), 6500))
     ]);
 
     if (resultUrl) {

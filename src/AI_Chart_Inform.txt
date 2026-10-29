@@ -44,12 +44,23 @@ FIELD DESCRIPTIONS:
 - grounding.verifiedMetrics: Array of { entity, value, unit } representing the verified real-world data points
 - data.labels: Category labels for each data point (must correspond to grounding entities)
 - data.datasets[].label: Name of each dataset series
-- data.datasets[].data: The actual numeric values (must strictly match the values in grounding.verifiedMetrics)
+- data.datasets[].data: The actual numeric values or coordinate objects (must strictly match the values in grounding.verifiedMetrics)
 - data.datasets[].backgroundColor: Colors for each data point (use visually appealing rgba colors)
 - data.datasets[].borderColor: Border colors for each data point
 
-The chartType must be one of the following: "bar", "line", "pie", "doughnut", "scatter", "bubble", "polarArea", "radar", "horizontalBar", "stackedBar", "area", "pie3d", "doughnut3d"
-IMPORTANT: If the user asks for a "3D pie chart", use chartType "pie3d". If the user asks for a "3D doughnut chart", use chartType "doughnut3d". If user asks for a horizontal bar chart, use "horizontalBar". If user asks for a stacked bar chart, use "stackedBar".
+The chartType must be one of the following: "bar", "line", "pie", "doughnut", "scatter", "bubble", "polarArea", "radar", "horizontalBar", "stackedBar", "area", "pie3d", "doughnut3d", "bar3d", "horizontalBar3d", "gauge", "funnel", "waterfall"
+IMPORTANT:
+- If the user asks for a "3D pie chart", use chartType "pie3d".
+- If the user asks for a "3D doughnut chart", use chartType "doughnut3d".
+- If the user asks for a "3D bar chart", use chartType "bar3d".
+- If the user asks for a "3D horizontal bar chart", use chartType "horizontalBar3d".
+- If the user asks for a horizontal bar chart, use "horizontalBar".
+- If the user asks for a stacked bar chart, use "stackedBar".
+- If the user asks for a "gauge chart" or speedometer/progress meter, use chartType "gauge".
+- If the user asks for a "funnel chart" (stages, conversion, drop-offs), use chartType "funnel".
+- If the user asks for a "waterfall chart" (variance, bridge, financial increments/decrements), use chartType "waterfall".
+- For "scatter" charts: datasets[].data MUST be an array of coordinate objects: [{ "x": number, "y": number }, ...].
+- For "bubble" charts: datasets[].data MUST be an array of coordinate objects: [{ "x": number, "y": number, "r": radiusNumber }, ...].
 
 GROUPED / MULTI-DATASET CHARTS:
 When the user asks for a "grouped chart", "grouped bar chart", "clustered chart", "multi-series chart", or asks to compare multiple metrics across entities (e.g., "networth and revenue", "revenue and profit", "sales and volume", "2023 vs 2024"):
@@ -66,7 +77,7 @@ When the user asks for a "grouped chart", "grouped bar chart", "clustered chart"
      ]
    }
 
-All arrays (e.g., labels, data, backgroundColor, borderColor within each dataset) must be of the exact same length.
+All arrays (e.g., labels, data, backgroundColor, borderColor within each dataset) must be of the exact same length (except for coordinate charts scatter/bubble where data is coordinate objects).
 
 DATA PRECISION & FACTUAL INTEGRITY RULES:
 - DEFAULT TO LATEST: Unless the user explicitly requested a past historical year (e.g. "in 2020"), ALWAYS default to the freshest, most up-to-date data available as of today.
@@ -74,13 +85,13 @@ DATA PRECISION & FACTUAL INTEGRITY RULES:
 - For dynamic metrics (net worth, market caps, prices): use the latest live tracker or market close numbers.
 - For annual/periodic metrics: use the latest officially reported completed period.
 - "grounding.verifiedMetrics": ALWAYS generate the "grounding" object BEFORE the "data" object. Extract the entities and numerical values from verified research/context FIRST into "grounding.verifiedMetrics".
-- "data.datasets[].data" MUST contain strictly numbers (e.g. [14.5, 29.8], NEVER strings like ["$14.5M", "29.8%"]). The values in "data" MUST match the exact numbers extracted in "grounding.verifiedMetrics". Put currency/unit symbols in "yAxisTitle".
+- "data.datasets[].data" MUST contain strictly numbers (or {x, y} coordinate objects for scatter/bubble). NEVER strings like ["$14.5M", "29.8%"]. The values in "data" MUST match the exact numbers extracted in "grounding.verifiedMetrics". Put currency/unit symbols in "yAxisTitle".
 - When search results or research summaries are present, extract real figures directly from them.
 - If real figures for a specific data point are unavailable, state clearly in "user_message" which figures could not be found, rather than inventing fake data.
 
 AXIS TITLES:
-- For bar, line, area, scatter, bubble, horizontalBar, stackedBar charts: Always provide meaningful xAxisTitle and yAxisTitle
-- For pie, doughnut, polarArea, radar charts: xAxisTitle and yAxisTitle can be empty strings ""
+- For bar, line, area, scatter, bubble, horizontalBar, stackedBar, bar3d, horizontalBar3d, waterfall, funnel charts: Always provide meaningful xAxisTitle and yAxisTitle
+- For pie, doughnut, polarArea, radar, pie3d, doughnut3d, gauge charts: xAxisTitle and yAxisTitle can be empty strings ""
 
 DO NOT include an "options" or "chartConfig" object. The frontend handles all chart configuration (scales, legend, tooltip, grid, etc.) automatically. Only provide the fields shown in the structure above.
 

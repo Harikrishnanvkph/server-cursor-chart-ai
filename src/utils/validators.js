@@ -55,10 +55,14 @@ export function validateAndSanitizeChartData(chartResponse, isFormatRequest = fa
     throw new Error('AI response missing chart data container');
   }
 
+  const isScatter = chartResponse.chartType === 'scatter';
+  const isBubble = chartResponse.chartType === 'bubble';
+  const isCoordinate = isScatter || isBubble;
+
   // 1. Ensure labels is an array of strings
   let labels = Array.isArray(dataContainer.labels) ? dataContainer.labels : [];
   labels = labels.map(l => String(l ?? ''));
-  if (labels.length === 0) {
+  if (!isCoordinate && labels.length === 0) {
     labels = ['Item 1'];
   }
   dataContainer.labels = labels;
@@ -67,14 +71,17 @@ export function validateAndSanitizeChartData(chartResponse, isFormatRequest = fa
   if (!Array.isArray(dataContainer.datasets) || dataContainer.datasets.length === 0) {
     dataContainer.datasets = [{
       label: chartResponse.title || 'Dataset 1',
-      data: Array(labels.length).fill(0)
+      data: isCoordinate ? [{ x: 10, y: 20 }] : Array(labels.length).fill(0)
     }];
   }
 
   // 3. Sanitize each dataset
   dataContainer.datasets.forEach((ds, dsIndex) => {
     if (!ds || typeof ds !== 'object') {
-      dataContainer.datasets[dsIndex] = { label: `Series ${dsIndex + 1}`, data: Array(labels.length).fill(0) };
+      dataContainer.datasets[dsIndex] = {
+        label: `Series ${dsIndex + 1}`,
+        data: isCoordinate ? [{ x: 10, y: 20 }] : Array(labels.length).fill(0)
+      };
       return;
     }
 
@@ -82,38 +89,86 @@ export function validateAndSanitizeChartData(chartResponse, isFormatRequest = fa
       ds.label = `Series ${dsIndex + 1}`;
     }
 
-    // Coerce data to finite numbers
     let rawData = Array.isArray(ds.data) ? ds.data : [];
-    let numericData = rawData.map(v => coerceToFiniteNumber(v));
 
-    // Pad or trim data array to match labels length
-    if (numericData.length < labels.length) {
-      while (numericData.length < labels.length) {
-        numericData.push(0);
-      }
-    } else if (numericData.length > labels.length) {
-      numericData = numericData.slice(0, labels.length);
-    }
-    ds.data = numericData;
+    if (isCoordinate) {
+      // Coordinate chart data: preserve { x, y } (and { x, y, r } for bubble)
+      let coordinateData = rawData.map((point, ptIdx) => {
+        if (point && typeof point === 'object') {
+          const x = coerceToFiniteNumber(point.x);
+          const y = coerceToFiniteNumber(point.y);
+          if (isBubble) {
+            const r = Math.max(1, coerceToFiniteNumber(point.r !== undefined ? point.r : 8));
+            return { x, y, r };
+          }
+          return { x, y };
+        }
+        // Fallback if AI returned numbers instead of point objects: synthesize coordinates
+        const yVal = coerceToFiniteNumber(point);
+        const xVal = ptIdx + 1;
+        return isBubble ? { x: xVal, y: yVal, r: 8 } : { x: xVal, y: yVal };
+      });
 
-    // Pad or trim colors if present
-    if (Array.isArray(ds.backgroundColor) && ds.backgroundColor.length > 0) {
-      const fallbackColor = ds.backgroundColor[0] || 'rgba(54, 162, 235, 0.7)';
-      while (ds.backgroundColor.length < labels.length) {
-        ds.backgroundColor.push(fallbackColor);
+      if (coordinateData.length === 0) {
+        coordinateData = isBubble ? [{ x: 10, y: 20, r: 8 }] : [{ x: 10, y: 20 }];
       }
-      if (ds.backgroundColor.length > labels.length) {
-        ds.backgroundColor = ds.backgroundColor.slice(0, labels.length);
-      }
-    }
 
-    if (Array.isArray(ds.borderColor) && ds.borderColor.length > 0) {
-      const fallbackBorder = ds.borderColor[0] || 'rgba(54, 162, 235, 1)';
-      while (ds.borderColor.length < labels.length) {
-        ds.borderColor.push(fallbackBorder);
+      ds.data = coordinateData;
+
+      // Coordinate charts don't require labels.length alignment; align colors to coordinate count
+      const coordCount = coordinateData.length;
+      if (Array.isArray(ds.backgroundColor) && ds.backgroundColor.length > 0) {
+        const fallbackColor = ds.backgroundColor[0] || 'rgba(54, 162, 235, 0.7)';
+        while (ds.backgroundColor.length < coordCount) {
+          ds.backgroundColor.push(fallbackColor);
+        }
+        if (ds.backgroundColor.length > coordCount) {
+          ds.backgroundColor = ds.backgroundColor.slice(0, coordCount);
+        }
       }
-      if (ds.borderColor.length > labels.length) {
-        ds.borderColor = ds.borderColor.slice(0, labels.length);
+
+      if (Array.isArray(ds.borderColor) && ds.borderColor.length > 0) {
+        const fallbackBorder = ds.borderColor[0] || 'rgba(54, 162, 235, 1)';
+        while (ds.borderColor.length < coordCount) {
+          ds.borderColor.push(fallbackBorder);
+        }
+        if (ds.borderColor.length > coordCount) {
+          ds.borderColor = ds.borderColor.slice(0, coordCount);
+        }
+      }
+    } else {
+      // Categorical chart data: coerce to numbers and align with labels
+      let numericData = rawData.map(v => coerceToFiniteNumber(v));
+
+      // Pad or trim data array to match labels length
+      if (numericData.length < labels.length) {
+        while (numericData.length < labels.length) {
+          numericData.push(0);
+        }
+      } else if (numericData.length > labels.length) {
+        numericData = numericData.slice(0, labels.length);
+      }
+      ds.data = numericData;
+
+      // Pad or trim colors if present
+      if (Array.isArray(ds.backgroundColor) && ds.backgroundColor.length > 0) {
+        const fallbackColor = ds.backgroundColor[0] || 'rgba(54, 162, 235, 0.7)';
+        while (ds.backgroundColor.length < labels.length) {
+          ds.backgroundColor.push(fallbackColor);
+        }
+        if (ds.backgroundColor.length > labels.length) {
+          ds.backgroundColor = ds.backgroundColor.slice(0, labels.length);
+        }
+      }
+
+      if (Array.isArray(ds.borderColor) && ds.borderColor.length > 0) {
+        const fallbackBorder = ds.borderColor[0] || 'rgba(54, 162, 235, 1)';
+        while (ds.borderColor.length < labels.length) {
+          ds.borderColor.push(fallbackBorder);
+        }
+        if (ds.borderColor.length > labels.length) {
+          ds.borderColor = ds.borderColor.slice(0, labels.length);
+        }
       }
     }
   });
@@ -320,5 +375,3 @@ function sanitizeFormatContent(rawBundle, chartResponse, dataContainer) {
 
   return bundle;
 }
-
-

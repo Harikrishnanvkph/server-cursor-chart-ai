@@ -112,11 +112,20 @@ async function safeFetch(url, options, maxRedirects = 5) {
 // IMAGE PROXY ROUTE
 // =============================================
 
-router.get('/image', async (req, res) => {
+router.options('/image', (req, res) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', '*');
     res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
-    // Use configured frontend origin instead of wildcard to prevent open-proxy abuse
-    const frontendOrigin = process.env.FRONTEND_URL || 'http://localhost:3000';
-    res.setHeader('Access-Control-Allow-Origin', frontendOrigin);
+    return res.sendStatus(204);
+});
+
+router.get('/image', async (req, res) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', '*');
+    res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+    res.setHeader('Vary', 'Origin, Accept-Encoding');
     const { url: imageUrl, width, quality, format } = req.query;
 
     if (!imageUrl) {
@@ -164,8 +173,8 @@ router.get('/image', async (req, res) => {
 
             // Route through the official file download API of the SPECIFIC wikipedia/wikimedia domain
             // (e.g. en.wikipedia.org or commons.wikimedia.org) to support local/fair-use uploads.
-            // Decode the filename first to prevent double-encoding characters like %27 (single quotes)
-            const targetWikiHost = parsedUrl.hostname.includes('upload.wikimedia.org') ? 'commons.wikimedia.org' : parsedUrl.hostname;
+            // Note: thumb.wikimedia.org does NOT support Special:FilePath, so all wikimedia.org requests must route through commons.wikimedia.org.
+            const targetWikiHost = parsedUrl.hostname.includes('wikimedia.org') ? 'commons.wikimedia.org' : parsedUrl.hostname;
             
             // Critical fallback: always request a width from Special:FilePath to prevent Wikipedia from throwing 429 Too Many Requests
             const targetWidth = width ? parseInt(width, 10) : 500;
