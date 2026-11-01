@@ -374,28 +374,6 @@ ${searchResults}
 ======================================`;
     }
 
-    if (templateStructure) {
-      // Check if any sections require HTML
-      const hasHtmlSections = templateStructure.sections?.some(s => s.contentType === 'html');
-
-      prompt += `
-
-IMPORTANT: The user has selected a template layout. You MUST also generate relevant text content for each template text area based on the chart topic.
-The response must include a "templateContent" object with content for each area type (title, heading, custom, main).`;
-
-      if (hasHtmlSections) {
-        prompt += `
-
-Some sections require HTML formatted content. For those sections, generate well-structured HTML with semantic tags like <p>, <strong>, <em>, <ul>, <li>, <h3>, <h4>, etc.
-
-CRITICAL JSON FORMATTING RULE FOR HTML:
-- All HTML content MUST be on a SINGLE LINE within the JSON string
-- Do NOT include actual newlines inside HTML strings - they break JSON parsing
-- Use inline HTML: "<h3>Title</h3><p>Content here</p><ul><li>Item</li></ul>"
-- NEVER format HTML with line breaks inside the JSON string value`;
-      }
-    }
-
     // Instruct the AI to generate the formatContent resource bundle ONLY when format layout or format mode is requested
     if (formatStructure) {
       prompt += `
@@ -521,95 +499,6 @@ The user explicitly requested a "grouped chart" or multiple comparative metrics 
 6. Do NOT collapse multiple metrics into a single dataset or omit any requested metric.`;
     }
 
-    if (templateStructure) {
-      // Group sections by content type for clearer instructions
-      const textSections = templateStructure.sections.filter(s => s.type !== 'chart' && s.contentType !== 'html');
-      const htmlSections = templateStructure.sections.filter(s => s.type !== 'chart' && s.contentType === 'html');
-
-      // Build sections info with notes for enhanced guidance
-      const sectionsInfo = templateStructure.sections
-        .filter(s => s.type !== 'chart')
-        .map(s => {
-          const formatType = s.contentType === 'html' ? 'HTML formatted' : 'plain text';
-          let info = `- ${s.name} (${s.type}): Generate ${formatType} content`;
-          // Include the note if provided by user for more specific guidance
-          if (s.note && s.note.trim()) {
-            info += `\n  → USER NOTE: "${s.note}"`;
-          }
-          return info;
-        })
-        .join('\n');
-
-      // Collect sections with notes for special emphasis
-      const sectionsWithNotes = templateStructure.sections.filter(s => s.type !== 'chart' && s.note && s.note.trim());
-
-      prompt += `
-
-Template Structure:
-- Dimensions: ${templateStructure.width}px × ${templateStructure.height}px
-- Chart Area: ${templateStructure.chartArea.width}px × ${templateStructure.chartArea.height}px
-- Text Sections to populate:
-${sectionsInfo}
-
-Your response MUST include a "templateContent" object with content for each section type.`;
-
-      // Add emphasis on user notes if any exist
-      if (sectionsWithNotes.length > 0) {
-        prompt += `
-
-IMPORTANT - User-Specified Instructions:
-The user has provided specific notes for some sections. Please follow these instructions carefully:`;
-        sectionsWithNotes.forEach(s => {
-          prompt += `
-- ${s.name}: ${s.note}`;
-        });
-      }
-
-      // Add format-specific instructions
-      if (htmlSections.length > 0) {
-        const htmlTypes = [...new Set(htmlSections.map(s => s.type))];
-        prompt += `
-
-HTML FORMAT REQUIRED for these sections: ${htmlTypes.join(', ')}
-For HTML sections, generate well-structured HTML with appropriate tags like <p>, <strong>, <em>, <ul>, <li>, <h3>, <h4>, <br>, etc.
-Make the HTML visually appealing with proper semantic markup.
-
-CRITICAL: When including HTML in JSON strings, you MUST:
-1. Keep HTML on a SINGLE LINE (no actual newlines inside the string)
-2. Use \\n for line breaks if needed
-3. Escape all double quotes inside HTML as \\"
-
-CORRECT example in JSON:
-"main": "<h3>Key Insights</h3><ul><li><strong>Trend:</strong> Growth</li></ul><p>Details here.</p>"
-
-WRONG (will break JSON):
-"main": "<h3>Key Insights</h3>
-<ul>
-  <li>Item</li>
-</ul>"`;
-      }
-
-      if (textSections.length > 0) {
-        const textTypes = [...new Set(textSections.map(s => s.type))];
-        prompt += `
-
-PLAIN TEXT FORMAT for these sections: ${textTypes.join(', ')}
-For plain text sections, generate clean, readable text without HTML tags.`;
-      }
-
-      prompt += `
-
-Response format for templateContent:
-{
-  "title": "A concise, descriptive title for the chart",
-  "heading": "A brief subtitle or heading that provides context",
-  "custom": "Additional context or custom information (if applicable)",
-  "main": "A comprehensive explanation or analysis related to the chart data"
-}
-
-Generate contextually relevant content for each section based on the chart topic and data, using the specified format (HTML or plain text) for each.`;
-    }
-
     return prompt;
   }
 
@@ -673,36 +562,10 @@ ${recentHistory}
 
 USER'S CURRENT REQUEST: ${inputText}`;
 
-    if (templateStructure) {
-      prompt += '\n\nNote: Template layout is active. If text modifications are requested, include the updated text/HTML inside "templateContent".';
-    } else if (formatStructure) {
-      prompt += '\n\nNote: Format layout is active. If text modifications are requested, include the updated text inside "formatContent".';
-    }
-
-    if (templateStructure) {
-      // List available template text areas
-      const textAreas = templateStructure.sections.filter(s => s.type !== 'chart');
-
-      prompt += `\n\n === TEMPLATE IS ACTIVE === `;
-      prompt += `\nAvailable text areas you can modify: `;
-      textAreas.forEach(s => {
-        const formatType = s.contentType === 'html' ? 'HTML' : 'plain text';
-        prompt += `\n - "${s.type}"(${s.name}): expects ${formatType} `;
-      });
-
-      // Collect sections with notes for guidance
-      const sectionsWithNotes = textAreas.filter(s => s.note && s.note.trim());
-      if (sectionsWithNotes.length > 0) {
-        prompt += `\n\nUser instructions for specific areas: `;
-        sectionsWithNotes.forEach(s => {
-          prompt += `\n - ${s.name}: "${s.note}"`;
-        });
-      }
-
-      prompt += `\n\nREMEMBER: "main text area" = templateContent.main, NOT pointImages!`;
-    } else if (formatStructure) {
-      prompt += `\n\n === FORMAT IS ACTIVE === `;
-      prompt += `\nAvailable format content zones you can modify inside the "formatContent" object:`;
+    if (formatStructure) {
+      prompt += '\n\nNote: Template layout is active. If text modifications are requested, include the updated text inside "formatContent".';
+      prompt += `\n\n === TEMPLATE LAYOUT IS ACTIVE === `;
+      prompt += `\nAvailable template content zones you can modify inside the "formatContent" object:`;
       if (Array.isArray(formatStructure.zones)) {
         formatStructure.zones.forEach(z => {
           if (z && z.type !== 'chart') {
@@ -713,7 +576,7 @@ USER'S CURRENT REQUEST: ${inputText}`;
         });
       }
       prompt += `\n\nEnsure you update formatContent zones to align with the changes.
-When modifying format content, you MUST return a valid "formatContent" object with:
+When modifying template content, you MUST return a valid "formatContent" object with:
 - "titles": { "punchy", "standard", "detailed" }
 - "subtitles": { "short", "detailed" }
 - "narratives": { "summary", "editorial", "bulletPoints" }
@@ -722,7 +585,7 @@ When modifying format content, you MUST return a valid "formatContent" object wi
 - "source": string
 - "contentBank": full asset bank with updated titles, subtitles, catchyPhrases, and textBlocks (b1 to b8).`;
     } else {
-      prompt += `\n\nNOTE: No template or format is active. Text areas/zones are not available in chart-only mode.`;
+      prompt += `\n\nNOTE: No template layout is active. Text areas/zones are not available in chart-only mode.`;
     }
 
     // Multi-Dataset / Grouped Chart Modification Detection

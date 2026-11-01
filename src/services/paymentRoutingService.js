@@ -1,5 +1,6 @@
 import { supabaseAdminClient } from '../supabase/client.js';
 import { resolveLocationContext } from './geoService.js';
+import { TIER_CONFIG } from './subscriptionService.js';
 
 export const PAYMENT_PLANS = {
   pro: {
@@ -160,9 +161,13 @@ export async function fulfillSubscriptionUpgrade({
 
   const currentPeriodEnd = new Date(baseTime + periodDurationDays * 24 * 60 * 60 * 1000).toISOString();
 
-  // 1. Upgrade subscription tier and reset AI credits in profiles
+  const tierConfig = TIER_CONFIG[tier] || TIER_CONFIG.pro;
+
+  // 1. Upgrade subscription tier, limits, and reset AI credits in profiles
   const profileUpdates = {
     subscription_tier: tier,
+    ai_credits_limit: tierConfig.aiCreditsLimit,
+    cloud_charts_limit: tierConfig.cloudChartsLimit,
     payment_gateway: gateway,
     country_code: countryCode,
     billing_currency: currency,

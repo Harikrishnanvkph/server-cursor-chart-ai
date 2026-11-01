@@ -39,12 +39,16 @@ export function detectCountryFromRequest(req) {
   const acceptLanguage = req.headers['accept-language'];
   if (acceptLanguage && typeof acceptLanguage === 'string') {
     const upperLang = acceptLanguage.toUpperCase();
-    if (upperLang.includes('-IN') || upperLang.includes('HI') || upperLang.includes('TA') || upperLang.includes('TE')) {
+    if (upperLang.includes('-IN') || upperLang.includes('HI') || upperLang.includes('TA') || upperLang.includes('TE') || upperLang.includes('KN') || upperLang.includes('MR')) {
       return 'IN';
     }
   }
 
-  // Default fallback
+  // Default fallback: In local development, default to IN so Indian payment methods (Razorpay) can be tested locally
+  if (process.env.NODE_ENV !== 'production') {
+    return 'IN';
+  }
+
   return 'GLOBAL';
 }
 

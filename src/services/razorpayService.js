@@ -36,6 +36,9 @@ export function getRazorpayPublicKey() {
 export async function createRazorpayOrder({ amountInInr, receipt, notes = {} }) {
   // Amount for Razorpay must be in the smallest currency sub-unit (paise for INR, 1 INR = 100 paise)
   const amountInPaise = Math.round(amountInInr * 100);
+  if (amountInPaise < 100) {
+    throw new Error('Order amount must be at least 100 paise (₹1.00)');
+  }
 
   if (isRazorpayConfigured && razorpayInstance) {
     try {
@@ -79,8 +82,8 @@ export async function createRazorpayOrder({ amountInInr, receipt, notes = {} }) 
  * Verify Razorpay payment signature
  */
 export function verifyRazorpaySignature({ orderId, paymentId, signature }) {
-  if (!orderId || !paymentId) {
-    return { verified: false, error: 'Missing order ID or payment ID' };
+  if (!orderId || !paymentId || !signature) {
+    return { verified: false, error: 'Missing order ID, payment ID, or signature' };
   }
 
   // Allow simulation mode when keys are not provided
