@@ -1,6 +1,15 @@
 import crypto from 'crypto';
 import { supabaseAdminClient } from '../supabase/client.js';
 
+// Reject a promise that does not settle within `ms` (keeps auth checks from hanging on slow DB calls)
+function withTimeout(promise, ms, message) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(message)), ms);
+  });
+  return Promise.race([Promise.resolve(promise), timeout]).finally(() => clearTimeout(timer));
+}
+
 // Secure database-backed session store for OAuth users with minimal logging
 class SecureSessionStore {
   constructor() {
@@ -66,6 +75,13 @@ class SecureSessionStore {
     const attempts = this.rateLimitMap.get(identifier) || { count: 0, firstAttempt: Date.now() };
     attempts.count++;
     this.rateLimitMap.set(identifier, attempts);
+  }
+
+  /**
+   * Reset rate limiting for an identifier (e.g., on successful authentication)
+   */
+  resetRateLimit(identifier) {
+    this.rateLimitMap.delete(identifier);
   }
 
   /**
@@ -169,6 +185,27 @@ class SecureSessionStore {
         });
       }
 
+      // Enforce session concurrency limit: keep at most 5 active sessions per user
+      // to allow "sign out all devices" behavior and prevent unbounded session growth
+      const MAX_SESSIONS_PER_USER = 5;
+      try {
+        const { data: userSessions } = await supabaseAdminClient
+          .from('oauth_sessions')
+          .select('id, created_at')
+          .eq('user_id', user.id)
+          .order('created_at', { ascending: false });
+
+        if (userSessions && userSessions.length > MAX_SESSIONS_PER_USER) {
+          const sessionsToDelete = userSessions.slice(MAX_SESSIONS_PER_USER).map(s => s.id);
+          await supabaseAdminClient
+            .from('oauth_sessions')
+            .delete()
+            .in('id', sessionsToDelete);
+        }
+      } catch (concurrencyErr) {
+        console.warn('Failed to enforce session concurrency limit:', concurrencyErr.message);
+      }
+
       return {
         id: session.id,
         user_id: user.id,
@@ -186,31 +223,59 @@ class SecureSessionStore {
   }
 
   /**
-   * Validate OAuth session
+   * Validate OAuth session.
+   *
+   * Returns the session user, or `null` when the session definitively does not exist / has expired.
+   * THROWS on transient infrastructure failures (DB timeout, network error, 5xx) so callers can
+   * tell "session is invalid" (-> 401, client signs out) apart from "could not check right now"
+   * (-> 503, client keeps the session). Previously every error was reported as "invalid", which made
+   * random Supabase blips look like logouts.
    */
   async validateSession(accessToken) {
+    const tokenHash = this.hashToken(accessToken);
+
+    let session;
     try {
-      const tokenHash = this.hashToken(accessToken);
-
-      const { data: session, error } = await supabaseAdminClient
-        .from('oauth_sessions')
-        .select(`
-          *,
-          profiles:user_id (
+      const { data, error } = await withTimeout(
+        supabaseAdminClient
+          .from('oauth_sessions')
+          .select(`
             id,
-            email,
-            full_name,
-            avatar_url,
-            provider
-          )
-        `)
-        .eq('access_token_hash', tokenHash)
-        .gt('expires_at', new Date().toISOString())
-        .single();
+            user_id,
+            expires_at,
+            profiles:user_id (
+              id,
+              email,
+              full_name,
+              avatar_url,
+              provider,
+              is_admin
+            )
+          `)
+          .eq('access_token_hash', tokenHash)
+          .gt('expires_at', new Date().toISOString())
+          .maybeSingle(),
+        6000,
+        'Session lookup timed out'
+      );
 
-      if (error || !session) {
-        return null;
+      if (error) {
+        // PGRST116 = "no rows" (kept for older PostgREST); anything else is an infrastructure error
+        if (error.code === 'PGRST116') return null;
+        throw Object.assign(new Error(error.message || 'Session lookup failed'), { transient: true });
       }
+      session = data;
+    } catch (err) {
+      console.error('Error in validateSession (transient):', err.message);
+      err.transient = true;
+      throw err;
+    }
+
+    if (!session || !session.profiles) {
+      return null;
+    }
+
+    try {
 
       // Throttle last_used_at DB writes: only write if >5 minutes since last update
       // This avoids a DB write on every authenticated request
@@ -239,12 +304,23 @@ class SecureSessionStore {
         full_name: session.profiles.full_name,
         avatar_url: session.profiles.avatar_url,
         provider: session.profiles.provider,
+        is_admin: session.profiles.is_admin === true,
         expires_at: session.expires_at
       };
 
     } catch (error) {
+      // Only the optional bookkeeping above can land here; the session itself is already verified.
       console.error('Error in validateSession:', error);
-      return null;
+      return {
+        id: session.id,
+        user_id: session.profiles.id,
+        email: session.profiles.email,
+        full_name: session.profiles.full_name,
+        avatar_url: session.profiles.avatar_url,
+        provider: session.profiles.provider,
+        is_admin: session.profiles.is_admin === true,
+        expires_at: session.expires_at
+      };
     }
   }
 
@@ -287,6 +363,28 @@ class SecureSessionStore {
       return true;
     } catch (error) {
       console.error('Error in deleteSession:', error);
+      return false;
+    }
+  }
+
+  /**
+   * Delete all OAuth sessions for a given user (revoke all devices)
+   */
+  async deleteAllUserSessions(userId) {
+    try {
+      const { error } = await supabaseAdminClient
+        .from('oauth_sessions')
+        .delete()
+        .eq('user_id', userId);
+
+      if (error) {
+        console.error('Error deleting all user sessions:', error);
+        return false;
+      }
+
+      return true;
+    } catch (error) {
+      console.error('Error in deleteAllUserSessions:', error);
       return false;
     }
   }

@@ -3,7 +3,7 @@ import { signInSchema, signUpSchema } from '../utils/validators.js'
 import googleOAuthService from '../services/googleOAuthService.js'
 import secureSessionStore from '../services/sessionStore.js'
 import { getUserSubscription, setSubscriptionTier } from '../services/subscriptionService.js'
-import { invalidateCachedUser } from '../middleware/authMiddleware.js'
+import { invalidateCachedUser, isJwtFormat } from '../middleware/authMiddleware.js'
 import crypto from 'crypto'
 
 const isProd = process.env.NODE_ENV === 'production'
@@ -26,8 +26,17 @@ function setSessionCookies(res, session) {
 }
 
 function clearSessionCookies(res) {
-  res.clearCookie('access_token', { path: '/' })
-  res.clearCookie('refresh_token', { path: '/' })
+  // Attributes must mirror setSessionCookies. A deletion sent without `secure` / `sameSite: 'none'`
+  // is treated as SameSite=Lax, which browsers ignore on cross-site API responses - leaving the user
+  // "signed out" in the UI but still holding a live cookie.
+  const clearOptions = {
+    httpOnly: true,
+    secure: isProd,
+    sameSite: isProd ? 'none' : 'lax',
+    path: '/',
+  }
+  res.clearCookie('access_token', clearOptions)
+  res.clearCookie('refresh_token', clearOptions)
 }
 
 // Sign up with email/password
@@ -47,9 +56,17 @@ export async function signUp(req, res) {
       return res.status(400).json({ error: error.message })
     }
 
+    if (data.session) {
+      setSessionCookies(res, data.session)
+    }
+
     res.status(201).json({
-      message: 'User created successfully. Please check your email for verification.',
-      user: data.user
+      message: data.session
+        ? 'User signed up successfully.'
+        : 'User created successfully. Please check your email for verification.',
+      user: data.user,
+      wasNewUser: true,
+      requiresEmailConfirmation: !data.session
     })
   } catch (error) {
     console.error('Sign up error:', error)
@@ -61,6 +78,14 @@ export async function signUp(req, res) {
 export async function signIn(req, res) {
   try {
     const { email, password } = signInSchema.parse(req.body)
+    const normalizedEmail = email.toLowerCase().trim()
+
+    // Per-account rate limiting / lockout check
+    if (!secureSessionStore.checkRateLimit(`login:${normalizedEmail}`)) {
+      return res.status(429).json({
+        error: 'Too many failed login attempts for this account. Please wait 15 minutes before trying again.'
+      })
+    }
 
     const { data, error } = await supabaseUserClient.auth.signInWithPassword({
       email,
@@ -68,8 +93,12 @@ export async function signIn(req, res) {
     })
 
     if (error) {
+      secureSessionStore.recordFailedAttempt(`login:${normalizedEmail}`)
       return res.status(400).json({ error: error.message })
     }
+
+    // Reset rate limit counter on successful login
+    secureSessionStore.resetRateLimit(`login:${normalizedEmail}`)
 
     let user = data.user
 
@@ -204,15 +233,15 @@ export async function signOut(req, res) {
       // Invalidate in-memory auth cache immediately
       invalidateCachedUser(accessToken)
 
-      // Try to delete OAuth session
-      await secureSessionStore.deleteSession(accessToken)
-
-      // Try Supabase sign out as well
-      try {
-        await supabaseUserClient.auth.signOut()
-      } catch (e) {
-        // Ignore Supabase errors
-      }
+      // Revoke the DB-backed OAuth session and the Supabase session concurrently (they are
+      // independent network calls, so awaiting them one after another just slowed logout down).
+      // allSettled: a failure in either must never stop the cookies from being cleared below.
+      await Promise.allSettled([
+        secureSessionStore.deleteSession(accessToken),
+        isJwtFormat(accessToken)
+          ? supabaseAdminClient.auth.admin.signOut(accessToken)
+          : Promise.resolve()
+      ])
     }
 
     clearSessionCookies(res)
@@ -269,7 +298,7 @@ export async function googleCallback(req, res) {
     }
 
     // Clear the state cookie
-    res.clearCookie('oauth_state', { path: '/' })
+    res.clearCookie('oauth_state', { httpOnly: true, secure: isProd, sameSite: isProd ? 'none' : 'lax', path: '/' })
 
     // Exchange code for tokens
     const tokens = await googleOAuthService.exchangeCodeForToken(code)
@@ -278,9 +307,12 @@ export async function googleCallback(req, res) {
     // (always uses the access_token validated by Google's servers)
     const userInfo = await googleOAuthService.getUserInfo(tokens.access_token)
 
+    // Generate our own secure opaque session token (decouples session lifetime from Google's 1-hour access token)
+    const sessionToken = `oauth_${crypto.randomBytes(32).toString('hex')}`
+
     // Create or get user session
     const session = await secureSessionStore.createSession(
-      tokens.access_token,
+      sessionToken,
       userInfo,
       'google'
     )
@@ -294,7 +326,7 @@ export async function googleCallback(req, res) {
       maxAge: 15 * 24 * 60 * 60 * 1000 // 15 days
     }
 
-    res.cookie('access_token', tokens.access_token, cookieOptions)
+    res.cookie('access_token', sessionToken, cookieOptions)
 
     // Redirect to frontend with success
     const redirectUrl = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/auth/success?provider=google`
@@ -324,14 +356,15 @@ export async function passwordForgot(req, res) {
     }
 
     const { error } = await supabaseUserClient.auth.resetPasswordForEmail(email, {
-      redirectTo: `${process.env.FRONTEND_URL || 'http://localhost:3000'}/auth/reset-password`
+      redirectTo: `${process.env.FRONTEND_URL || 'http://localhost:3000'}/auth/reset`
     })
 
     if (error) {
-      return res.status(400).json({ error: error.message })
+      console.warn('Password forgot notice:', error.message)
     }
 
-    res.json({ message: 'Password reset email sent' })
+    // Generic response prevents email enumeration
+    res.json({ message: 'If an account exists with this email, a password reset link has been sent.' })
   } catch (error) {
     console.error('Password forgot error:', error)
     res.status(500).json({ error: 'Internal server error' })

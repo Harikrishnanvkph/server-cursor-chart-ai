@@ -95,7 +95,10 @@ app.use(
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
-    exposedHeaders: ['X-Total-Count']
+    exposedHeaders: ['X-Total-Count'],
+    // Let browsers cache the CORS preflight for 24h. Without this every credentialed JSON request
+    // (/auth/me, data calls...) cost an extra OPTIONS round-trip, since Chrome only caches 5s by default.
+    maxAge: 86400
   })
 )
 
@@ -156,10 +159,6 @@ app.use((req, res, next) => {
     } catch {
       return res.status(403).json({ error: 'Request blocked by CSRF policy' });
     }
-  }
-
-  if (req.headers['sec-fetch-site'] === 'same-origin') {
-    return next();
   }
 
   // Allow non-browser tools in local development

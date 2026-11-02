@@ -30,12 +30,24 @@ export async function getUserSubscription(userId) {
   if (!userId) return null;
 
   try {
-    // 1. Fetch profile
-    const { data: profile, error: profileErr } = await supabaseAdminClient
-      .from('profiles')
-      .select('is_admin, subscription_tier, ai_credits_used, ai_credits_limit, cloud_charts_limit, credits_reset_at')
-      .eq('id', userId)
-      .single();
+    // 1. Fetch profile and saved-chart count concurrently — they are independent queries, so running
+    //    them sequentially (as before) just doubled the latency of every /auth/me call.
+    //    Only active charts count toward the cloud limit.
+    const [
+      { data: profile, error: profileErr },
+      { count: savedCount }
+    ] = await Promise.all([
+      supabaseAdminClient
+        .from('profiles')
+        .select('is_admin, subscription_tier, ai_credits_used, ai_credits_limit, cloud_charts_limit, credits_reset_at')
+        .eq('id', userId)
+        .single(),
+      supabaseAdminClient
+        .from('conversations')
+        .select('id', { count: 'exact', head: true })
+        .eq('user_id', userId)
+        .eq('is_active', true)
+    ]);
 
     if (profileErr || !profile) {
       console.warn('Could not fetch profile for subscription info, using defaults:', profileErr?.message);
@@ -74,13 +86,6 @@ export async function getUserSubscription(userId) {
         })
         .eq('id', userId);
     }
-
-    // 3. Count saved conversations (charts) — only active charts count toward cloud limit
-    const { count: savedCount } = await supabaseAdminClient
-      .from('conversations')
-      .select('id', { count: 'exact', head: true })
-      .eq('user_id', userId)
-      .eq('is_active', true);
 
     return {
       is_admin: profile.is_admin || false,

@@ -121,6 +121,7 @@ export async function createCheckout(req, res) {
       userId,
       customerEmail: userEmail,
       customerName: req.user?.full_name || 'Subscriber',
+      customerCountry: effectiveRegion,
       billingCycle,
       amountInUsd: routingInfo.amount,
     });

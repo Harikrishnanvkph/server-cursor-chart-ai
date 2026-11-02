@@ -18,7 +18,10 @@ router.post('/resend-verification', rateLimitMiddleware, resendVerification)
 
 // Protected routes (require authentication - not subject to brute-force IP rate limiting)
 router.get('/me', requireAuthEnhanced, me)
-router.post('/signout', requireAuthEnhanced, signOut)
+// Sign-out must NOT require a valid session: with an expired/revoked token the old requireAuth gate
+// answered 401 before the handler ran, so the browser kept its (dead) httpOnly cookies forever.
+// The handler is idempotent and only ever clears the caller's own cookies/session.
+router.post('/signout', signOut)
 
 // Subscription management endpoints
 router.post('/subscription/upgrade', requireAuthEnhanced, upgradeSubscription)

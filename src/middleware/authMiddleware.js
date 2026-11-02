@@ -243,7 +243,7 @@ function rateLimitMiddleware(req, res, next) {
 const inFlightRefreshes = new Map();
 
 // Helper to determine if a token is a standard JWT (e.g. Supabase) vs an opaque OAuth token (e.g. Google ya29.*)
-function isJwtFormat(token) {
+export function isJwtFormat(token) {
   if (!token || typeof token !== 'string') return false;
   const parts = token.split('.');
   return parts.length === 3;
@@ -255,6 +255,10 @@ export async function requireAuth(req, res, next) {
     const accessToken = req.cookies?.access_token;
     const refreshToken = req.cookies?.refresh_token;
     const clientIP = getClientIP(req);
+
+    // Set when we could not *verify* the access token (Supabase/DB outage, timeout) as opposed to
+    // having verified that it is invalid. Transient failures must never look like a logout.
+    let accessTokenCheckUnavailable = false;
 
     // If access token is present, attempt to validate it first
     if (accessToken) {
@@ -271,23 +275,28 @@ export async function requireAuth(req, res, next) {
         return res.status(403).json({ error: 'Access denied' });
       }
 
-      // Only attempt Supabase token validation if the token matches JWT structure
-      // (Google OAuth tokens starting with "ya29." are not Supabase JWTs; querying Supabase with them
-      // always fails with 401/403 after a 200-2000ms network penalty).
+      // Token type decides which backend can validate it, so only ONE lookup is ever made:
+      //  - Supabase JWT (3 dot-separated parts)  -> Supabase /auth/v1/user
+      //  - Opaque `oauth_*` session token (Google) -> oauth_sessions table
+      // (Previously an expired JWT also paid for a pointless oauth_sessions query, and vice versa.)
       if (isJwtFormat(accessToken)) {
         try {
           const url = `${process.env.SUPABASE_URL}/auth/v1/user`;
           const controller = new AbortController();
           const timeoutId = setTimeout(() => controller.abort(), 5000); // 5 second timeout
 
-          const response = await fetch(url, {
-            headers: {
-              'Authorization': `Bearer ${accessToken}`,
-              'apikey': process.env.SUPABASE_ANON_KEY || ''
-            },
-            signal: controller.signal
-          });
-          clearTimeout(timeoutId);
+          let response;
+          try {
+            response = await fetch(url, {
+              headers: {
+                'Authorization': `Bearer ${accessToken}`,
+                'apikey': process.env.SUPABASE_ANON_KEY || ''
+              },
+              signal: controller.signal
+            });
+          } finally {
+            clearTimeout(timeoutId);
+          }
 
           if (response.ok) {
             const user = await response.json();
@@ -300,41 +309,57 @@ export async function requireAuth(req, res, next) {
               is_admin: profile?.is_admin || false
             };
 
-            setCachedUser(accessToken, enrichedUser);
+            // Never cache a user whose profile lookup failed: we would pin is_admin=false for 15 minutes
+            if (profile) setCachedUser(accessToken, enrichedUser);
             req.user = enrichedUser;
             return next();
           }
+
+          // 5xx / 429 from Supabase = service trouble, not a bad token.
+          // 401 / 403 = expired or invalid token -> fall through to the refresh-token flow.
+          if (response.status >= 500 || response.status === 429) {
+            console.warn(`Supabase token validation unavailable (HTTP ${response.status})`);
+            accessTokenCheckUnavailable = true;
+          }
         } catch (supabaseError) {
           console.warn('Supabase token validation failed or timed out:', supabaseError.message);
-          // Fallback to OAuth session validation when Supabase validation fails
+          accessTokenCheckUnavailable = true;
+        }
+      } else {
+        try {
+          const oauthUser = await secureSessionStore.validateSession(accessToken);
+
+          if (oauthUser) {
+            // validateSession already joined the profile (incl. is_admin), so the extra
+            // ensureUserProfile round-trip is unnecessary here.
+            const normalizedUser = {
+              id: oauthUser.user_id || oauthUser.id,
+              email: oauthUser.email,
+              full_name: oauthUser.full_name,
+              avatar_url: oauthUser.avatar_url,
+              provider: oauthUser.provider,
+              is_admin: oauthUser.is_admin === true
+            };
+
+            setCachedUser(accessToken, normalizedUser);
+            req.user = normalizedUser;
+            return next();
+          }
+        } catch (sessionError) {
+          // validateSession only throws for infrastructure failures (DB timeout / network),
+          // never for "session not found" - so this is NOT an invalid session.
+          console.error('OAuth session validation unavailable:', sessionError.message);
+          accessTokenCheckUnavailable = true;
         }
       }
 
-      // Check OAuth session in database
-      try {
-        const oauthUser = await secureSessionStore.validateSession(accessToken);
-
-        if (oauthUser) {
-          const userId = oauthUser.user_id || oauthUser.id;
-
-          // Ensure user has a profile
-          const profile = await ensureUserProfile(userId, oauthUser.email, oauthUser.full_name, oauthUser.avatar_url);
-
-          const normalizedUser = {
-            id: userId,
-            email: oauthUser.email,
-            full_name: oauthUser.full_name,
-            avatar_url: oauthUser.avatar_url,
-            provider: oauthUser.provider,
-            is_admin: profile?.is_admin || false
-          };
-
-          setCachedUser(accessToken, normalizedUser);
-          req.user = normalizedUser;
-          return next();
-        }
-      } catch (sessionError) {
-        console.error('OAuth session validation error:', sessionError);
+      if (accessTokenCheckUnavailable) {
+        // Do not burn a rotating refresh token or report 401 while the backing store is unreachable.
+        // The client treats 503 as transient and keeps the user signed in.
+        return res.status(503).json({
+          error: 'Authentication service temporarily unavailable. Please retry.',
+          code: 'AUTH_UNAVAILABLE'
+        });
       }
     }
 
@@ -416,8 +441,15 @@ export async function requireAuth(req, res, next) {
         // Only clear cookies if token is proven definitively invalid or revoked.
         // DO NOT clear cookies on network timeouts or temporary server blips!
         if (isDefinitiveAuthFailure) {
-          res.clearCookie('access_token', { path: '/' });
-          res.clearCookie('refresh_token', { path: '/' });
+          // Mirror the attributes used when the cookies were set, otherwise cross-site deletes are ignored
+          const clearOptions = {
+            httpOnly: true,
+            secure: process.env.NODE_ENV === 'production',
+            sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
+            path: '/'
+          };
+          res.clearCookie('access_token', clearOptions);
+          res.clearCookie('refresh_token', clearOptions);
           return res.status(401).json({ error: 'Session expired, please sign in again', code: 'SESSION_REVOKED' });
         }
 

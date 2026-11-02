@@ -26,12 +26,17 @@ export async function createDodoCheckoutSession({
   userId,
   customerEmail,
   customerName = 'Valued User',
+  customerCountry,
   billingCycle = 'monthly',
   amountInUsd = 5,
   returnUrl = `${FRONTEND_URL}/payment/success`
 }) {
   if (isDodoConfigured) {
     try {
+      const countryCode = (customerCountry && customerCountry !== 'GLOBAL' && customerCountry.length === 2)
+        ? customerCountry.toUpperCase()
+        : 'US';
+
       const response = await fetch(`${BASE_URL}/payments`, {
         method: 'POST',
         headers: {
@@ -40,14 +45,10 @@ export async function createDodoCheckoutSession({
         },
         body: JSON.stringify({
           billing: {
-            city: 'City',
-            country: 'US',
-            state: 'State',
-            street: 'Street',
-            zipcode: '10001'
+            country: countryCode,
           },
           customer: {
-            email: customerEmail,
+            email: customerEmail || 'customer@example.com',
             name: customerName,
           },
           payment_link: true,
@@ -55,7 +56,7 @@ export async function createDodoCheckoutSession({
             {
               amount: Math.round(amountInUsd * 100), // cents
               currency: 'USD',
-              product_id: process.env.DODO_PRO_PRODUCT_ID || 'p_pro_tier',
+              product_id: process.env.DODO_PRO_PRODUCT_ID || 'pdt_0Nr0b0r0L0fbCC6AbYbRt',
               quantity: 1
             }
           ],
