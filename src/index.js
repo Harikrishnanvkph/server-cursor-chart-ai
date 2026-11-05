@@ -266,6 +266,7 @@ app.post('/api/process-chart-enhanced', requireAuth, aiLimiter, async (req, res)
   } = req.body;
 
   let creditDeducted = false;
+  let deductedBucket = 'free';
   const userId = req.user?.user_id || req.user?.id;
   const abortController = new AbortController();
 
@@ -303,12 +304,13 @@ app.post('/api/process-chart-enhanced', requireAuth, aiLimiter, async (req, res)
       const deductResult = await deductAiCredit(userId);
       if (!deductResult || deductResult.exhausted || deductResult.success === false) {
         return res.status(403).json({
-          error: 'Monthly AI credit limit reached.',
+          error: 'AI credit limit reached. Purchase an AI Credits pack to continue generating charts.',
           code: 'AI_CREDITS_EXHAUSTED',
           subscription: deductResult
         });
       }
       creditDeducted = true;
+      deductedBucket = deductResult.deducted_bucket || 'free';
       updatedSubscription = deductResult;
     }
 
@@ -387,7 +389,7 @@ app.post('/api/process-chart-enhanced', requireAuth, aiLimiter, async (req, res)
     // Rollback reserved credit if generation failed or was aborted
     if (creditDeducted && userId) {
       try {
-        await refundAiCredit(userId);
+        await refundAiCredit(userId, deductedBucket);
       } catch (refundErr) {
         console.error('Failed to refund AI credit after error:', refundErr.message);
       }

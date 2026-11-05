@@ -150,6 +150,7 @@ router.get('/image', async (req, res) => {
         // The only robust way to download Wikipedia/Wikimedia images from a Node.js backend 
         // without getting IP banned is to use the Special:FilePath API.
         let finalFetchUrl = imageUrl;
+        let fallbackWikiUrl = null;
         let isWiki = false;
         if (parsedUrl.hostname.includes('wikimedia.org') || parsedUrl.hostname.includes('wikipedia.org')) {
             isWiki = true;
@@ -172,14 +173,24 @@ router.get('/image', async (req, res) => {
             }
 
             // Route through the official file download API of the SPECIFIC wikipedia/wikimedia domain
-            // (e.g. en.wikipedia.org or commons.wikimedia.org) to support local/fair-use uploads.
-            // Note: thumb.wikimedia.org does NOT support Special:FilePath, so all wikimedia.org requests must route through commons.wikimedia.org.
-            const targetWikiHost = parsedUrl.hostname.includes('wikimedia.org') ? 'commons.wikimedia.org' : parsedUrl.hostname;
-            
+            // (e.g. en.wikipedia.org for fair-use movie posters/logos or commons.wikimedia.org for Commons).
+            let targetWikiHost = 'commons.wikimedia.org';
+            const wikiLangMatch = parsedUrl.pathname.match(/^\/wikipedia\/([a-z]{2,10})\//i);
+            if (wikiLangMatch && wikiLangMatch[1].toLowerCase() !== 'commons') {
+                targetWikiHost = `${wikiLangMatch[1].toLowerCase()}.wikipedia.org`;
+            } else if (parsedUrl.hostname.endsWith('.wikipedia.org')) {
+                targetWikiHost = parsedUrl.hostname;
+            }
+
             // Critical fallback: always request a width from Special:FilePath to prevent Wikipedia from throwing 429 Too Many Requests
             const targetWidth = width ? parseInt(width, 10) : 500;
-            finalFetchUrl = `https://${targetWikiHost}/wiki/Special:FilePath/${encodeURIComponent(decodeURIComponent(filename))}?width=${targetWidth}`;
-            
+            const encodedFile = encodeURIComponent(decodeURIComponent(filename));
+            finalFetchUrl = `https://${targetWikiHost}/wiki/Special:FilePath/${encodedFile}?width=${targetWidth}`;
+
+            // Prepare cross-domain Wiki fallback (e.g. if commons returns 404 for a fair-use file on en.wikipedia.org)
+            const altWikiHost = targetWikiHost === 'commons.wikimedia.org' ? 'en.wikipedia.org' : 'commons.wikimedia.org';
+            fallbackWikiUrl = `https://${altWikiHost}/wiki/Special:FilePath/${encodedFile}?width=${targetWidth}`;
+
             console.log(`[ImageProxy] Using Special:FilePath API on ${targetWikiHost} for: ${decodeURIComponent(filename)} with width ${targetWidth}`);
         }
 
@@ -199,10 +210,19 @@ router.get('/image', async (req, res) => {
         }
 
         // Use safeFetch to validate redirect targets against SSRF
-        const response = await safeFetch(finalFetchUrl, {
+        let response = await safeFetch(finalFetchUrl, {
             method: 'GET',
             headers: headers
         });
+
+        // If Wikimedia Commons 404s on a fair-use file (or vice versa), automatically try the alternate Wiki host
+        if (!response.ok && response.status === 404 && fallbackWikiUrl) {
+            console.log(`[ImageProxy] Primary Wiki host 404'd, trying fallback: ${fallbackWikiUrl}`);
+            response = await safeFetch(fallbackWikiUrl, {
+                method: 'GET',
+                headers: headers
+            });
+        }
 
         if (!response.ok) {
             console.error(`[ImageProxy] Upstream rejected ${finalFetchUrl} with ${response.status}`);

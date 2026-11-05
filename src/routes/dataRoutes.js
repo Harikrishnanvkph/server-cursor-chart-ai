@@ -51,7 +51,7 @@ router.post('/conversations', async (req, res) => {
       return res.status(400).json({ error: 'Title is required' });
     }
 
-    // Check cloud chart limit (10 for Free, 30 for Pro)
+    // Check cloud chart limit (5 permanent Free + any active Cloud Credits packs)
     const saveCheck = await canSaveCloudChart(userId);
     if (!saveCheck.allowed) {
       return res.status(403).json({

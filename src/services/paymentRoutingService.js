@@ -1,48 +1,128 @@
 import { supabaseAdminClient } from '../supabase/client.js';
 import { resolveLocationContext } from './geoService.js';
-import { TIER_CONFIG } from './subscriptionService.js';
+import { CREDIT_PACKS, fulfillCreditPackPurchase } from './subscriptionService.js';
 
 export const PAYMENT_PLANS = {
-  pro: {
-    name: 'Pro',
-    description: 'Higher AI credits limit, expanded cloud saves, and vector SVG exports.',
+  ai_lite: {
+    id: 'ai_lite',
+    category: 'ai',
+    name: 'AI Lite',
+    displayName: 'Lite User',
+    description: '+15 AI credits (Never Expire) + 5 Cloud Save credits on first AI payment.',
     pricing: {
-      INR: {
-        currency: 'INR',
-        symbol: '₹',
-        monthly: 399, // ₹399 / mo
-        yearly: 3990, // ₹3,990 / yr (~₹332 / mo, save ~17%)
-      },
       USD: {
         currency: 'USD',
         symbol: '$',
-        monthly: 5,   // $5 / mo
-        yearly: 48,  // $48 / yr ($4 / mo, save 20%)
-      }
-    }
-  }
+        oneTime: 2,
+      },
+      INR: {
+        currency: 'INR',
+        symbol: '₹',
+        oneTime: 99,
+      },
+    },
+  },
+  ai_pro: {
+    id: 'ai_pro',
+    category: 'ai',
+    name: 'AI Pro',
+    displayName: 'Pro User',
+    description: '+60 AI credits (Never Expire) + 5 Cloud Save credits on first AI payment.',
+    pricing: {
+      USD: {
+        currency: 'USD',
+        symbol: '$',
+        oneTime: 5,
+      },
+      INR: {
+        currency: 'INR',
+        symbol: '₹',
+        oneTime: 249,
+      },
+    },
+  },
+  cloud_lite: {
+    id: 'cloud_lite',
+    category: 'cloud',
+    name: 'Cloud Lite',
+    displayName: 'Lite User',
+    description: '+10 Cloud Save credits valid for 2 months.',
+    pricing: {
+      USD: {
+        currency: 'USD',
+        symbol: '$',
+        oneTime: 2,
+      },
+      INR: {
+        currency: 'INR',
+        symbol: '₹',
+        oneTime: 99,
+      },
+    },
+  },
+  cloud_pro: {
+    id: 'cloud_pro',
+    category: 'cloud',
+    name: 'Cloud Pro',
+    displayName: 'Pro User',
+    description: '+15 Cloud Save credits valid for 6 months.',
+    pricing: {
+      USD: {
+        currency: 'USD',
+        symbol: '$',
+        oneTime: 5,
+      },
+      INR: {
+        currency: 'INR',
+        symbol: '₹',
+        oneTime: 249,
+      },
+    },
+  },
 };
 
 /**
- * Determine pricing and gateway details based on selected region & plan
+ * Normalize packId from either explicit packId or legacy planTier
  */
-export function getPlanPricingAndGateway({ planTier = 'pro', billingCycle = 'monthly', region = 'GLOBAL' }) {
-  const plan = PAYMENT_PLANS[planTier] || PAYMENT_PLANS.pro;
+export function resolvePackId(packId, planTier = 'pro') {
+  if (packId && CREDIT_PACKS[packId]) {
+    return packId;
+  }
+  if (planTier && CREDIT_PACKS[planTier]) {
+    return planTier;
+  }
+  if (planTier === 'lite') return 'ai_lite';
+  return 'ai_pro';
+}
+
+/**
+ * Determine pricing and gateway details for a credit pack (USD globally, INR 99/249 for India via Dodo)
+ */
+export function getPlanPricingAndGateway({
+  packId = null,
+  planTier = 'pro',
+  billingCycle = 'one_time',
+  region = 'GLOBAL',
+}) {
+  const resolvedPackId = resolvePackId(packId, planTier);
+  const pack = CREDIT_PACKS[resolvedPackId] || CREDIT_PACKS.ai_pro;
   const location = resolveLocationContext(region);
-  const currency = location.currency;
-  const priceConfig = plan.pricing[currency] || plan.pricing.USD;
-  const rawAmount = billingCycle === 'yearly' ? priceConfig.yearly : priceConfig.monthly;
+  const isIndia = location.isIndia;
+  const currency = isIndia ? 'INR' : 'USD';
+  const currencySymbol = isIndia ? '₹' : '$';
+  const amount = isIndia ? (pack.priceInr || (pack.priceUsd === 2 ? 99 : 249)) : pack.priceUsd;
 
   return {
-    planTier,
-    planName: plan.name,
-    billingCycle,
-    region: location.countryCode,
-    isIndia: location.isIndia,
-    gateway: location.recommendedGateway, // 'razorpay' | 'dodo'
+    packId: resolvedPackId,
+    planTier: pack.badge || 'pro',
+    planName: pack.name,
+    billingCycle: 'one_time',
+    region: location.countryCode || 'GLOBAL',
+    isIndia,
+    gateway: 'dodo',
     currency,
-    currencySymbol: priceConfig.symbol,
-    amount: rawAmount,
+    currencySymbol,
+    amount,
   };
 }
 
@@ -56,15 +136,17 @@ export async function recordPaymentTransaction({
   gatewayPaymentId = null,
   gatewaySubscriptionId = null,
   amount,
-  currency,
+  currency = 'USD',
+  packId = 'ai_pro',
   planTier = 'pro',
-  billingCycle = 'monthly',
+  billingCycle = 'one_time',
   status = 'pending',
   customerEmail = null,
   customerCountry = null,
-  metadata = {}
+  metadata = {},
 }) {
   try {
+    const resolvedPackId = resolvePackId(packId, planTier);
     const { data, error } = await supabaseAdminClient
       .from('payment_transactions')
       .insert({
@@ -75,18 +157,21 @@ export async function recordPaymentTransaction({
         gateway_subscription_id: gatewaySubscriptionId,
         amount,
         currency,
-        plan_tier: planTier,
-        billing_cycle: billingCycle,
+        plan_tier: planTier || resolvedPackId,
+        billing_cycle: billingCycle || 'one_time',
         status,
         customer_email: customerEmail,
         customer_country: customerCountry,
-        metadata
+        metadata: {
+          ...metadata,
+          packId: resolvedPackId,
+        },
       })
       .select()
       .single();
 
     if (error) {
-      console.warn('Could not record payment transaction to Supabase (check migration):', error.message);
+      console.warn('Could not record payment transaction to Supabase:', error.message);
       return { id: 'temp_' + Date.now(), status };
     }
 
@@ -104,7 +189,7 @@ export async function updatePaymentTransaction(identifier, updates) {
   try {
     let query = supabaseAdminClient.from('payment_transactions').update({
       ...updates,
-      updated_at: new Date().toISOString()
+      updated_at: new Date().toISOString(),
     });
 
     if (updates.id) {
@@ -126,68 +211,30 @@ export async function updatePaymentTransaction(identifier, updates) {
 }
 
 /**
- * Sync user profile subscription upon successful payment
+ * Fulfill credit pack purchase upon successful payment
  */
 export async function fulfillSubscriptionUpgrade({
   userId,
+  packId = null,
   tier = 'pro',
-  gateway,
+  gateway = 'dodo',
   gatewayCustomerId = null,
   gatewaySubscriptionId = null,
+  orderId = null,
+  paymentId = null,
+  transactionId = null,
   countryCode = 'GLOBAL',
   currency = 'USD',
-  billingCycle = 'monthly'
 }) {
-  const periodDurationDays = billingCycle === 'yearly' ? 365 : 30;
-  
-  // Calculate period end: if the user already has an active period in the future, extend from that date
-  let baseTime = Date.now();
-  try {
-    const { data: existingProfile } = await supabaseAdminClient
-      .from('profiles')
-      .select('current_period_end')
-      .eq('id', userId)
-      .single();
-
-    if (existingProfile?.current_period_end) {
-      const existingEnd = new Date(existingProfile.current_period_end).getTime();
-      if (existingEnd > baseTime) {
-        baseTime = existingEnd; // Clean extension of paid duration
-      }
-    }
-  } catch (profileErr) {
-    console.warn('Could not check existing current_period_end:', profileErr?.message);
-  }
-
-  const currentPeriodEnd = new Date(baseTime + periodDurationDays * 24 * 60 * 60 * 1000).toISOString();
-
-  const tierConfig = TIER_CONFIG[tier] || TIER_CONFIG.pro;
-
-  // 1. Upgrade subscription tier, limits, and reset AI credits in profiles
-  const profileUpdates = {
-    subscription_tier: tier,
-    ai_credits_limit: tierConfig.aiCreditsLimit,
-    cloud_charts_limit: tierConfig.cloudChartsLimit,
-    payment_gateway: gateway,
-    country_code: countryCode,
-    billing_currency: currency,
-    gateway_customer_id: gatewayCustomerId,
-    gateway_subscription_id: gatewaySubscriptionId,
-    subscription_status: 'active',
-    current_period_end: currentPeriodEnd,
-    ai_credits_used: 0,
-    credits_reset_at: currentPeriodEnd,
-  };
-
-  const { error } = await supabaseAdminClient
-    .from('profiles')
-    .update(profileUpdates)
-    .eq('id', userId);
-
-  if (error) {
-    console.error('Failed to update profile subscription details:', error.message);
-    throw new Error(`Profile subscription update failed: ${error.message}`);
-  }
-
-  return { success: true, tier, currentPeriodEnd };
+  const resolvedPackId = resolvePackId(packId, tier);
+  return await fulfillCreditPackPurchase({
+    userId,
+    packId: resolvedPackId,
+    orderId: orderId || gatewaySubscriptionId,
+    paymentId,
+    transactionId,
+    gateway,
+    countryCode,
+    currency,
+  });
 }

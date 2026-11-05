@@ -14,6 +14,7 @@ const router = express.Router();
  */
 router.post('/process-chart', async (req, res) => {
     let creditDeducted = false;
+    let deductedBucket = 'free';
     const userId = req.user?.user_id || req.user?.id;
 
     try {
@@ -28,12 +29,13 @@ router.post('/process-chart', async (req, res) => {
             const deductResult = await deductAiCredit(userId);
             if (!deductResult || deductResult.exhausted || deductResult.success === false) {
                 return res.status(403).json({
-                    error: 'Monthly AI credit limit reached.',
+                    error: 'AI credit limit reached. Purchase an AI Credits pack to continue generating charts.',
                     code: 'AI_CREDITS_EXHAUSTED',
                     subscription: deductResult
                 });
             }
             creditDeducted = true;
+            deductedBucket = deductResult.deducted_bucket || 'free';
             updatedSubscription = deductResult;
         }
 
@@ -63,7 +65,7 @@ router.post('/process-chart', async (req, res) => {
         // Rollback credit deduction if generation failed
         if (creditDeducted && userId) {
             try {
-                await refundAiCredit(userId);
+                await refundAiCredit(userId, deductedBucket);
             } catch (refundErr) {
                 console.error('Failed to refund AI credit after error:', refundErr.message);
             }

@@ -201,8 +201,9 @@ export async function upgradeSubscription(req, res) {
       })
     }
 
-    const updatedSub = await setSubscriptionTier(userId, 'pro')
-    res.json({ success: true, message: 'Upgraded to Pro successfully', subscription: updatedSub })
+    const packOrTier = req.body?.packId || req.body?.tier || 'ai_pro'
+    const updatedSub = await setSubscriptionTier(userId, packOrTier)
+    res.json({ success: true, message: 'Credit pack applied successfully', subscription: updatedSub })
   } catch (error) {
     console.error('Upgrade subscription error:', error)
     res.status(500).json({ error: error.message || 'Failed to upgrade subscription' })

@@ -9,64 +9,66 @@ const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:3000';
 export const isDodoConfigured = Boolean(DODO_API_KEY && !DODO_API_KEY.includes('placeholder'));
 
 const BASE_URL = DODO_ENVIRONMENT === 'live'
-  ? 'https://api.dodopayments.com'
+  ? 'https://live.dodopayments.com'
   : 'https://test.dodopayments.com';
 
+const DODO_PRODUCT_IDS = {
+  ai_lite: process.env.DODO_AI_LITE_PRODUCT_ID || 'pdt_0NrDYDZ4dISLl5nV8VLTh',
+  ai_pro: process.env.DODO_AI_PRO_PRODUCT_ID || 'pdt_0NrDYDegv3SDHVEFHYYIP',
+  cloud_lite: process.env.DODO_CLOUD_LITE_PRODUCT_ID || 'pdt_0NrDYDilzZGawdfkvGdCT',
+  cloud_pro: process.env.DODO_CLOUD_PRO_PRODUCT_ID || 'pdt_0NrDYDoSmdQ9RPl1kuLwJ',
+};
+
 /**
- * Create a Dodo Payments checkout session / payment link
- * @param {Object} params
- * @param {string} params.userId
- * @param {string} params.customerEmail
- * @param {string} params.customerName
- * @param {string} params.billingCycle - 'monthly' | 'yearly'
- * @param {number} params.amountInUsd - Amount in USD (e.g. 5 or 48)
- * @param {string} params.returnUrl - URL to redirect upon completion
+ * Create a Dodo Payments checkout session / payment link for a one-time credit pack
  */
 export async function createDodoCheckoutSession({
   userId,
   customerEmail,
   customerName = 'Valued User',
   customerCountry,
-  billingCycle = 'monthly',
+  packId = 'ai_pro',
+  billingCycle = 'one_time',
   amountInUsd = 5,
   returnUrl = `${FRONTEND_URL}/payment/success`
 }) {
   if (isDodoConfigured) {
     try {
-      const countryCode = (customerCountry && customerCountry !== 'GLOBAL' && customerCountry.length === 2)
-        ? customerCountry.toUpperCase()
-        : 'US';
+      const productId = DODO_PRODUCT_IDS[packId] || DODO_PRODUCT_IDS.ai_pro;
 
-      const response = await fetch(`${BASE_URL}/payments`, {
+      const checkoutPayload = {
+        product_cart: [
+          {
+            product_id: productId,
+            quantity: 1
+          }
+        ],
+        customer: {
+          email: customerEmail || 'customer@example.com',
+          name: customerName,
+        },
+        return_url: `${returnUrl}?gateway=dodo&pack=${encodeURIComponent(packId)}&amount=${amountInUsd}`,
+        metadata: {
+          user_id: userId,
+          pack_id: packId,
+          plan_tier: packId,
+          billing_cycle: billingCycle,
+        }
+      };
+
+      if (customerCountry && customerCountry !== 'GLOBAL' && customerCountry.length === 2) {
+        checkoutPayload.billing_address = {
+          country: customerCountry.toUpperCase(),
+        };
+      }
+
+      const response = await fetch(`${BASE_URL}/checkouts`, {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${DODO_API_KEY}`,
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({
-          billing: {
-            country: countryCode,
-          },
-          customer: {
-            email: customerEmail || 'customer@example.com',
-            name: customerName,
-          },
-          payment_link: true,
-          product_cart: [
-            {
-              amount: Math.round(amountInUsd * 100), // cents
-              currency: 'USD',
-              product_id: process.env.DODO_PRO_PRODUCT_ID || 'pdt_0Nr0b0r0L0fbCC6AbYbRt',
-              quantity: 1
-            }
-          ],
-          return_url: `${returnUrl}?gateway=dodo&cycle=${billingCycle}`,
-          metadata: {
-            user_id: userId,
-            plan_tier: 'pro',
-            billing_cycle: billingCycle,
-          }
-        })
+        body: JSON.stringify(checkoutPayload)
       });
 
       const data = await response.json();
@@ -75,10 +77,11 @@ export async function createDodoCheckoutSession({
       }
 
       return {
-        id: data.payment_id || data.id,
-        checkoutUrl: data.payment_link || data.checkout_url || data.url,
+        id: data.session_id || data.payment_id || data.id,
+        checkoutUrl: data.checkout_url || data.payment_link || data.url,
         amount: amountInUsd,
         currency: 'USD',
+        packId,
         status: 'created',
         isSimulation: false,
       };
@@ -91,13 +94,14 @@ export async function createDodoCheckoutSession({
   // Developer Simulation Mode when Dodo API key is not configured
   console.log('Dodo Payments API key not configured. Running in Developer Simulation Mode.');
   const simulatedSessionId = `dodo_sim_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
-  const simulatedCheckoutUrl = `${FRONTEND_URL}/payment/success?gateway=dodo&session_id=${simulatedSessionId}&plan=pro&cycle=${billingCycle}&amount=${amountInUsd}`;
+  const simulatedCheckoutUrl = `${FRONTEND_URL}/payment/success?gateway=dodo&session_id=${simulatedSessionId}&pack=${encodeURIComponent(packId)}&amount=${amountInUsd}`;
 
   return {
     id: simulatedSessionId,
     checkoutUrl: simulatedCheckoutUrl,
     amount: amountInUsd,
     currency: 'USD',
+    packId,
     status: 'created',
     isSimulation: true,
   };
@@ -115,7 +119,7 @@ export function verifyDodoWebhook({ rawBody, signature, webhookId, timestamp }) 
   try {
     const payload = typeof rawBody === 'string' ? rawBody : JSON.stringify(rawBody);
     const textToSign = `${webhookId}.${timestamp}.${payload}`;
-    
+
     // Svix / Standard HMAC SHA-256
     const expectedSignature = crypto
       .createHmac('sha256', DODO_WEBHOOK_SECRET)

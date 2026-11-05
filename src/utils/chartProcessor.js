@@ -481,9 +481,9 @@ Tailor the tone and content of "formatContent" to fit the ${formatStructure.them
 Please generate chart data in valid JSON format.`;
 
     // F4: Reinforce pointImages instructions when user mentions image-related keywords
-    const imageKeywords = /\b(image|icon|picture|logo|photo|emoji|avatar|flag)\b/i;
+    const imageKeywords = /\b(image|images|icon|icons|picture|pictures|logo|logos|photo|photos|emoji|avatar|avatars|portrait|portraits|profile|profiles|flag|flags|brand|brands|emblem|emblems|symbol|symbols)\b/i;
     if (imageKeywords.test(inputText)) {
-      prompt += `\n\nIMPORTANT: The user wants images on data points. You MUST include "pointImages" (array of working image URLs), "pointImageConfig" (array of config objects), and "pointImageSearchQueries" (array of specific search terms for each label to help the backend search engine find correct images, e.g., "Blast 2026 Tamil movie" instead of just "Blast") in each dataset. All arrays must match labels length.`;
+      prompt += `\n\nIMPORTANT: The user wants images on data points. You MUST include "pointImages" (array of null/empty strings), "pointImageConfig" (array of config objects), and "pointImageSearchQueries" (array of structured metadata objects per label: { "type": "person"|"company"|"country"|"media"|"product"|"place"|"object", "query": "specific context-disambiguated web image search query", "wikiTitle": "Exact_Wikipedia_Title", "domain": "company.com", "countryCode": "iso2", "context": "2-5 topic keywords from user prompt" }) in each dataset. All arrays must match labels length.`;
     }
 
     // Multi-Dataset / Grouped Chart Detection: Ensure models (especially Gemini) generate separate datasets for comparative metrics
@@ -586,6 +586,12 @@ When modifying template content, you MUST return a valid "formatContent" object 
 - "contentBank": full asset bank with updated titles, subtitles, catchyPhrases, and textBlocks (b1 to b8).`;
     } else {
       prompt += `\n\nNOTE: No template layout is active. Text areas/zones are not available in chart-only mode.`;
+    }
+
+    // Reinforce pointImages instructions during modifications when user requests images/icons/flags/logos
+    const imageKeywords = /\b(image|images|icon|icons|picture|pictures|logo|logos|photo|photos|emoji|avatar|avatars|portrait|portraits|profile|profiles|flag|flags|brand|brands|emblem|emblems|symbol|symbols)\b/i;
+    if (imageKeywords.test(inputText)) {
+      prompt += `\n\nIMPORTANT: The user wants images on data points. You MUST include "pointImages" (array of null/empty strings), "pointImageConfig" (array of config objects), and "pointImageSearchQueries" (array of structured metadata objects per label: { "type": "person"|"company"|"country"|"media"|"product"|"place"|"object", "query": "specific context-disambiguated web image search query", "wikiTitle": "Exact_Wikipedia_Title", "domain": "company.com", "countryCode": "iso2", "context": "2-5 topic keywords from user prompt" }) in each dataset of "chartData.datasets". All arrays must match labels length.`;
     }
 
     // Multi-Dataset / Grouped Chart Modification Detection
@@ -1077,14 +1083,14 @@ The user explicitly requested a "grouped chart" or multiple comparative metrics 
   }
 
   /**
-   * Automatically resolve country flags or famous people photos programmatically
-   * based on data labels and user request prompt context.
+   * Automatically resolve context-accurate images across multiple web & encyclopedia sources
+   * (Brave Image Search, Tavily Image Search with descriptions, Brand Logo CDNs, FlagCDN, Unsplash, and Wikipedia).
    */
   async resolvePointImages(chartData, userPrompt) {
     if (!chartData) return;
 
     // Resolve target data container
-    let chartDataContainer = chartData.chartData || chartData.data;
+    let chartDataContainer = chartData.chartData || chartData.data || (chartData.datasets ? chartData : null);
     if (!chartDataContainer || !chartDataContainer.datasets || !Array.isArray(chartDataContainer.datasets)) {
       return;
     }
@@ -1093,14 +1099,18 @@ The user explicitly requested a "grouped chart" or multiple comparative metrics 
     const labels = chartDataContainer.labels || [];
     if (!labels.length) return;
 
-    const promptLower = (userPrompt || "").toLowerCase();
+    const chartTitle = chartData.title || chartData.chartConfig?.plugins?.title?.text || '';
+    const promptLower = (userPrompt || '').toLowerCase();
     const wantsFlags = /\b(flag|flags|country flag|country flags)\b/i.test(promptLower);
     const wantsImages = /\b(image|images|icon|icons|picture|pictures|photo|photos|avatar|avatars|portrait|portraits|profile|profiles|flag|flags|logo|logos|brand|brands|emblem|emblems|symbol|symbols)\b/i.test(promptLower);
 
-    // Check if the LLM already returned pointImages
-    const hasPointImages = datasets.some(ds => ds.pointImages && Array.isArray(ds.pointImages));
+    // Check if the LLM already returned pointImages or pointImageSearchQueries
+    const hasPointImages = datasets.some(ds =>
+      (ds.pointImages && Array.isArray(ds.pointImages) && ds.pointImages.some(Boolean)) ||
+      (ds.pointImageSearchQueries && Array.isArray(ds.pointImageSearchQueries) && ds.pointImageSearchQueries.length > 0)
+    );
 
-    // If no image/flag is requested, and the LLM didn't return any pointImages, do nothing
+    // If no image/flag is requested, and the LLM didn't return any pointImages/queries, do nothing
     if (!wantsFlags && !wantsImages && !hasPointImages) {
       return;
     }
@@ -1112,7 +1122,6 @@ The user explicitly requested a "grouped chart" or multiple comparative metrics 
       if (!ds.pointImages || !Array.isArray(ds.pointImages)) {
         ds.pointImages = Array(labels.length).fill(null);
       } else {
-        // Pad array if too short
         while (ds.pointImages.length < labels.length) {
           ds.pointImages.push(null);
         }
@@ -1138,41 +1147,43 @@ The user explicitly requested a "grouped chart" or multiple comparative metrics 
       }
 
       labels.forEach((label, idx) => {
-        const cleanLabel = String(label).trim();
+        const cleanLabel = String(label || '').trim();
+        if (!cleanLabel) return;
+
         const currentImg = ds.pointImages[idx];
+        const rawQueryMeta = ds.pointImageSearchQueries ? ds.pointImageSearchQueries[idx] : null;
+        const meta = parsePointImageMeta(rawQueryMeta, cleanLabel, userPrompt, chartTitle, wantsFlags);
 
-        // Helper to check if a string is a valid HTTP/S URL
+        // 1. Resolve country flag ONLY when entity type is 'country' or user explicitly asked for flags
+        if (meta.type === 'country' || wantsFlags) {
+          const isoCode = (meta.countryCode && /^[a-z]{2}$/i.test(meta.countryCode.trim()))
+            ? meta.countryCode.trim().toLowerCase()
+            : getCountryCode(cleanLabel) || getCountryCode(meta.cleanEntityName);
+          if (isoCode) {
+            ds.pointImages[idx] = `https://flagcdn.com/w80/${isoCode}.png`;
+            return;
+          }
+        }
+
+        // 2. Resolve entity image across our multi-source context-aware pipeline
         const isUrl = (url) => typeof url === 'string' && (url.startsWith('http://') || url.startsWith('https://'));
-        const isWikipediaUrl = (url) => typeof url === 'string' && (url.includes('wikipedia.org') || url.includes('wikimedia.org'));
-        
-        const isDuplicate = currentImg && ds.pointImages.filter(img => img === currentImg).length > 2;
-        const isWiki = isWikipediaUrl(currentImg);
+        const isDuplicate = currentImg && ds.pointImages.filter(img => img === currentImg).length > 1;
 
-        // 1. Resolve flag if user explicitly asked for flags OR if label is a country and wantsFlags is true
-        const countryCode = getCountryCode(cleanLabel);
-        if (countryCode && (wantsFlags || (wantsImages && !isUrl(currentImg)))) {
-          ds.pointImages[idx] = `https://flagcdn.com/w80/${countryCode}.png`;
-          return;
-        }
-
-        // 2. Resolve famous person profile image if wantsImages is true and we don't have a valid Wikipedia URL
-        // or if the URL returned was a duplicate/composite, or if it's currently empty/null/non-URL
-        if (wantsImages && (!currentImg || isDuplicate || !isUrl(currentImg) || !isWiki)) {
-          // Use LLM-generated search query if available, otherwise default to label
-          const refinedLabel = (ds.pointImageSearchQueries && ds.pointImageSearchQueries[idx])
-            ? String(ds.pointImageSearchQueries[idx]).trim()
-            : cleanLabel;
-
-          // Push promise to resolve the image via our robust famous person resolver
-          const promise = resolveFamousPersonImage(refinedLabel).then(resolvedUrl => {
-            if (resolvedUrl) {
-              ds.pointImages[idx] = resolvedUrl;
-            } else {
-              ds.pointImages[idx] = null;
+        const promise = (async () => {
+          // If a non-duplicate URL was already provided (e.g., user-preserved or search-grounded), verify it first
+          if (isUrl(currentImg) && !isDuplicate) {
+            const normalizedExisting = normalizeWikimediaUrl(currentImg);
+            if (await validateImageUrl(normalizedExisting)) {
+              ds.pointImages[idx] = normalizedExisting;
+              return;
             }
-          });
-          fetchPromises.push(promise);
-        }
+          }
+
+          const resolvedUrl = await resolveEntityImage(meta, cleanLabel, userPrompt, chartTitle);
+          ds.pointImages[idx] = resolvedUrl ? normalizeWikimediaUrl(resolvedUrl) : null;
+        })();
+
+        fetchPromises.push(promise);
       });
     });
 
@@ -1181,7 +1192,6 @@ The user explicitly requested a "grouped chart" or multiple comparative metrics 
     }
 
     // Final pass: normalize all Wikimedia/Wikipedia image URLs to official Special:FilePath format
-    // This prevents the "Error: Use thumbnail sizes listed on https://w.wiki/GHai" error from upload.wikimedia.org
     datasets.forEach(ds => {
       if (ds.pointImages && Array.isArray(ds.pointImages)) {
         ds.pointImages = ds.pointImages.map(img => normalizeWikimediaUrl(img));
@@ -1190,6 +1200,139 @@ The user explicitly requested a "grouped chart" or multiple comparative metrics 
   }
 }
 
+/**
+ * Parse and normalize structured or string pointImageSearchQueries item into rich entity metadata
+ */
+function parsePointImageMeta(rawMeta, cleanLabel, userPrompt = '', chartTitle = '', wantsFlags = false) {
+  const combinedContextText = `${userPrompt || ''} ${chartTitle || ''}`.trim();
+  const contextLower = combinedContextText.toLowerCase();
+
+  let type = '';
+  let query = '';
+  let wikiTitle = '';
+  let domain = '';
+  let countryCode = '';
+  let context = '';
+
+  if (rawMeta && typeof rawMeta === 'object') {
+    type = String(rawMeta.type || '').toLowerCase().trim();
+    query = String(rawMeta.query || rawMeta.searchQuery || '').trim();
+    wikiTitle = String(rawMeta.wikiTitle || '').trim();
+    domain = String(rawMeta.domain || '').toLowerCase().replace(/^https?:\/\//, '').replace(/\/.*$/, '').trim();
+    countryCode = String(rawMeta.countryCode || '').toLowerCase().trim();
+    context = String(rawMeta.context || '').trim();
+  } else if (typeof rawMeta === 'string' && rawMeta.trim()) {
+    query = rawMeta.trim();
+  }
+
+  // Derive cleanEntityName from wikiTitle or cleanLabel (never from the long web search query)
+  const rawEntityBase = wikiTitle
+    ? wikiTitle.replace(/_/g, ' ').replace(/\s*\([^)]*\)\s*/g, ' ')
+    : cleanLabel;
+  const cleanEntityName = rawEntityBase
+    .replace(/\b(official\s+photo|profile\s+photo|face\s+profile\s+photo|portrait\s+photo|official\s+portrait|portrait|headshot|official\s+logo|brand\s+logo|logo\s+png|logo|flag|official\s+poster|movie\s+poster|film\s+poster|poster|product\s+photo|photo|picture|image|icon)\b/gi, '')
+    .replace(/\s+/g, ' ')
+    .trim() || cleanLabel;
+
+  // Infer entity type if not explicitly provided or invalid
+  const validTypes = new Set(['person', 'company', 'country', 'media', 'product', 'place', 'object']);
+  if (!validTypes.has(type)) {
+    const inspectStr = `${query} ${cleanLabel} ${context} ${contextLower}`.toLowerCase();
+    const directCountryCode = getCountryCode(cleanLabel);
+
+    if (wantsFlags || (directCountryCode && /\b(country|countries|nation|nations|gdp|population|export|import|olympic|continent|world|global|tariff|economy|economies|flag)\b/i.test(contextLower))) {
+      type = 'country';
+      if (!countryCode && directCountryCode) countryCode = directCountryCode;
+    } else if (domain || KNOWN_COMPANY_DOMAINS[cleanLabel.toLowerCase()] || /\b(logo|brand|company|companies|corporation|bank|banks|startup|startups|airline|airlines|automaker|stock|market\s+cap|revenue|valuation|tech\s+giant|insurer|retailer|exchange|crypto)\b/i.test(inspectStr)) {
+      type = 'company';
+    } else if (/\b(movie|movies|film|films|cinema|box\s+office|song|songs|album|albums|show|series|anime|game|games|book|books|novel|novels|soundtrack|actor|starring|director)\b/i.test(inspectStr)) {
+      type = 'media';
+    } else if (/\b(iphone|galaxy|pixel|macbook|laptop|smartphone|phone|car|cars|vehicle|ev|suv|truck|console|gpu|processor|chip|watch|headphone|camera|device|model)\b/i.test(inspectStr)) {
+      type = 'product';
+    } else if (/\b(city|cities|landmark|landmarks|mountain|mountains|peak|river|building|tower|temple|monument|island|beach|airport|stadium|park|bridge|state|province|tourism|destination)\b/i.test(inspectStr)) {
+      type = 'place';
+    } else if (/\b(food|fruit|vegetable|drink|beverage|coffee|tea|dish|cuisine|animal|breed|bird|dog|cat|flower|plant|metal|commodity|element|vitamin|sport)\b/i.test(inspectStr)) {
+      type = 'object';
+    } else {
+      type = 'person';
+    }
+  }
+
+  if (type === 'company' && !domain) {
+    domain = KNOWN_COMPANY_DOMAINS[cleanLabel.toLowerCase()] || KNOWN_COMPANY_DOMAINS[cleanEntityName.toLowerCase()] || '';
+  }
+
+  if (type === 'country' && !countryCode) {
+    countryCode = getCountryCode(cleanLabel) || getCountryCode(cleanEntityName) || '';
+  }
+
+  // Build disambiguated web search query if missing or too generic
+  if (!query || query.toLowerCase() === cleanLabel.toLowerCase()) {
+    const contextHint = context || extractPromptTopicHint(userPrompt, chartTitle, cleanLabel);
+    if (type === 'company') {
+      query = `${cleanLabel} ${contextHint} official logo png`.replace(/\s+/g, ' ').trim();
+    } else if (type === 'media') {
+      query = `${cleanLabel} ${contextHint} official poster`.replace(/\s+/g, ' ').trim();
+    } else if (type === 'product') {
+      query = `${cleanLabel} ${contextHint} official product photo`.replace(/\s+/g, ' ').trim();
+    } else if (type === 'person') {
+      query = `${cleanLabel} ${contextHint} portrait photo`.replace(/\s+/g, ' ').trim();
+    } else {
+      query = `${cleanLabel} ${contextHint} photo`.replace(/\s+/g, ' ').trim();
+    }
+  }
+
+  const contextTokens = extractContextTokens(`${context} ${query} ${userPrompt} ${chartTitle}`, cleanLabel);
+
+  return {
+    type,
+    query,
+    wikiTitle: wikiTitle.replace(/\s+/g, '_'),
+    cleanEntityName,
+    domain,
+    countryCode,
+    context,
+    contextTokens
+  };
+}
+
+function extractPromptTopicHint(userPrompt = '', chartTitle = '', cleanLabel = '') {
+  const raw = `${chartTitle || ''} ${userPrompt || ''}`
+    .replace(/\(with images\)/gi, '')
+    .replace(/\b(create|generate|make|show|give|me|a|an|the|chart|bar|pie|line|doughnut|graph|of|top|ten|five|10|5|with|images|photos|pictures|icons|logos|flags|by|in|and|for|comparison|data)\b/gi, ' ')
+    .replace(new RegExp(escapeRegExp(cleanLabel), 'gi'), ' ')
+    .replace(/[^\w\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return raw.split(' ').slice(0, 4).join(' ');
+}
+
+function extractContextTokens(text = '', cleanLabel = '') {
+  const stopWords = new Set([
+    'create', 'generate', 'make', 'show', 'give', 'chart', 'graph', 'plot', 'table', 'data',
+    'bar', 'pie', 'line', 'doughnut', 'horizontal', 'stacked', 'grouped', 'with', 'images',
+    'image', 'photo', 'photos', 'picture', 'pictures', 'icon', 'icons', 'logo', 'logos',
+    'official', 'portrait', 'poster', 'top', 'best', 'most', 'highest', 'lowest', 'list',
+    'the', 'and', 'for', 'from', 'that', 'this', 'are', 'was', 'were', 'have', 'has'
+  ]);
+  const labelWords = new Set(cleanLabel.toLowerCase().split(/\W+/).filter(Boolean));
+  return [...new Set(
+    text
+      .toLowerCase()
+      .split(/\W+/)
+      .filter(w => w.length > 2 && !stopWords.has(w) && !labelWords.has(w))
+  )];
+}
+
+function escapeRegExp(str) {
+  return String(str).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * Normalize Wikimedia/Wikipedia image URLs to official Special:FilePath format.
+ * Preserves local Wikipedia domains (e.g. en.wikipedia.org) for fair-use movie posters, logos, and album covers,
+ * while routing /wikipedia/commons/ files to commons.wikimedia.org.
+ */
 function normalizeWikimediaUrl(url) {
   if (!url || typeof url !== 'string') return url;
   if (!url.includes('wikimedia.org') && !url.includes('wikipedia.org')) return url;
@@ -1197,6 +1340,14 @@ function normalizeWikimediaUrl(url) {
   try {
     const parsed = new URL(url);
     const path = parsed.pathname;
+
+    // If already in Special:FilePath format, ensure width parameter is attached
+    if (path.includes('/wiki/Special:FilePath/')) {
+      if (!parsed.searchParams.has('width')) {
+        parsed.searchParams.set('width', '500');
+      }
+      return parsed.toString();
+    }
 
     let filename = path.substring(path.lastIndexOf('/') + 1);
 
@@ -1216,8 +1367,15 @@ function normalizeWikimediaUrl(url) {
 
     if (filename) {
       const cleanFilename = decodeURIComponent(filename);
-      // Route all wikimedia.org requests through commons.wikimedia.org (thumb.wikimedia.org does not support Special:FilePath)
-      const host = parsed.hostname.includes('wikimedia.org') ? 'commons.wikimedia.org' : parsed.hostname;
+      // Detect whether the file belongs to a specific language Wikipedia (e.g. /wikipedia/en/ for fair-use posters/logos)
+      // or Wikimedia Commons (/wikipedia/commons/)
+      let host = 'commons.wikimedia.org';
+      const wikiLangMatch = path.match(/^\/wikipedia\/([a-z]{2,10})\//i);
+      if (wikiLangMatch && wikiLangMatch[1].toLowerCase() !== 'commons') {
+        host = `${wikiLangMatch[1].toLowerCase()}.wikipedia.org`;
+      } else if (parsed.hostname.endsWith('.wikipedia.org')) {
+        host = parsed.hostname;
+      }
       return `https://${host}/wiki/Special:FilePath/${encodeURIComponent(cleanFilename)}?width=500`;
     }
   } catch (e) {
@@ -1226,101 +1384,118 @@ function normalizeWikimediaUrl(url) {
   return url;
 }
 
-async function fetchWikiImage(label) {
-  try {
-    // 1. Search Wikipedia for the closest page and retrieve its pageimage/thumbnail
-    const searchUrl = `https://en.wikipedia.org/w/api.php?action=query&generator=search&gsrsearch=${encodeURIComponent(label)}&gsrlimit=1&prop=pageimages&format=json&pithumbsize=500`;
-    const res = await fetch(searchUrl, {
-      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Antigravity/1.0 (Google DeepMind Team)' }
-    });
-    
-    if (res.ok) {
-      const data = await res.json();
-      if (data.query && data.query.pages) {
-        const pageId = Object.keys(data.query.pages)[0];
-        const page = data.query.pages[pageId];
-        if (page.thumbnail && page.thumbnail.source) {
-          return normalizeWikimediaUrl(page.thumbnail.source);
-        }
-      }
-    }
-
-    // 2. Direct title match fallback (following redirects)
-    const directUrl = `https://en.wikipedia.org/w/api.php?action=query&titles=${encodeURIComponent(label)}&prop=pageimages&format=json&pithumbsize=500&redirects=1`;
-    const directRes = await fetch(directUrl, {
-      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Antigravity/1.0 (Google DeepMind Team)' }
-    });
-    
-    if (directRes.ok) {
-      const directData = await directRes.json();
-      if (directData.query && directData.query.pages) {
-        const pageId = Object.keys(directData.query.pages)[0];
-        const page = directData.query.pages[pageId];
-        if (page && page.thumbnail && page.thumbnail.source) {
-          return normalizeWikimediaUrl(page.thumbnail.source);
-        }
-      }
-    }
-
-    // 3. MediaWiki REST API Summary fallback
-    const restUrl = `https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(label)}`;
-    const restRes = await fetch(restUrl, {
-      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Antigravity/1.0 (Google DeepMind Team)' }
-    });
-    if (restRes.ok) {
-      const restData = await restRes.json();
-      if (restData.thumbnail && restData.thumbnail.source) {
-        return normalizeWikimediaUrl(restData.thumbnail.source);
-      }
-      if (restData.originalimage && restData.originalimage.source) {
-        return normalizeWikimediaUrl(restData.originalimage.source);
-      }
-    }
-
-    return null;
-  } catch (e) {
-    console.error(`[WikiResolver] Error resolving image for "${label}":`, e.message);
-    return null;
-  }
-}
-
-async function resolveFamousPersonImage(cleanLabel) {
-  if (!cleanLabel) return null;
-  const cached = getCachedImage(cleanLabel);
+/**
+ * Multi-Source Context-Aware Image Resolver
+ * Routes each entity to the highest-reliability sources for its category and scores candidates against prompt context.
+ */
+async function resolveEntityImage(meta, cleanLabel, userPrompt = '', chartTitle = '') {
+  const cacheKey = `${meta.type}:${cleanLabel.toLowerCase()}:${(meta.wikiTitle || meta.domain || meta.context || '').toLowerCase().substring(0, 60)}`;
+  const cached = getCachedImage(cacheKey);
   if (cached) return cached;
 
   const resolveWithNetwork = async () => {
-    // 1. Try Wikipedia PageImages API first (cleanest, handles naming redirects)
-    let wikiUrl = await fetchWikiImage(cleanLabel);
-    if (wikiUrl) return wikiUrl;
+    // 1. COMPANY / BRAND / STARTUP / CRYPTO PIPELINE
+    if (meta.type === 'company') {
+      // 1a. Free source: Wikimedia Commons official vector/PNG logo file
+      const wikiLogo = await fetchWikimediaLogo(meta.cleanEntityName, cleanLabel);
+      if (wikiLogo && await validateImageUrl(wikiLogo, 2000)) {
+        return wikiLogo;
+      }
 
-    // 2. Try Tavily Live Web Search Fallback (excluding Wikipedia/Wikimedia redirects)
-    let webUrl = await fetchTavilyImageFallback(cleanLabel);
+      // 1b. Free source: Official domain logo CDN (Clearbit) if domain is known
+      if (meta.domain) {
+        const clearbitUrl = `https://logo.clearbit.com/${meta.domain}`;
+        if (await validateImageUrl(clearbitUrl, 1800)) {
+          return clearbitUrl;
+        }
+      }
+
+      // 1c. Free source: Context-scored Wikipedia article image
+      const wikiPageImg = await fetchContextScoredWikiImage(meta, cleanLabel);
+      if (wikiPageImg && await validateImageUrl(wikiPageImg, 2000)) {
+        return wikiPageImg;
+      }
+
+      // 1d. LIVE WEB IMAGE SEARCH (Brave Images + Tavily Images)
+      // Triggered ONLY if free sources were missing or returned a 404 / broken URL.
+      // Fetches real, high-resolution logos directly from the live web.
+      const webLogo = await fetchWebImageWithContext(meta, cleanLabel);
+      if (webLogo) return webLogo;
+
+      // 1e. Final fallback to high-res Google Favicon CDN if domain is known
+      if (meta.domain) {
+        const gIconUrl = `https://t2.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://${meta.domain}&size=128`;
+        if (await validateImageUrl(gIconUrl, 1800)) {
+          return gIconUrl;
+        }
+      }
+
+      return null;
+    }
+
+    // 2. MEDIA (MOVIES, SONGS, BOOKS, GAMES) & PRODUCTS (PHONES, CARS, GADGETS) PIPELINE
+    if (meta.type === 'media' || meta.type === 'product') {
+      // 2a. Free source: exact/context-scored Wikipedia (supports /wikipedia/en/ fair-use movie posters & album art)
+      const wikiMediaUrl = await fetchContextScoredWikiImage(meta, cleanLabel);
+      if (wikiMediaUrl && await validateImageUrl(wikiMediaUrl, 2000)) {
+        return wikiMediaUrl;
+      }
+
+      // 2b. Live Web Image Search (Brave Image Search + Tavily with image descriptions)
+      // Triggered ONLY if Wikipedia article had no image or returned a 404
+      const webMediaUrl = await fetchWebImageWithContext(meta, cleanLabel);
+      if (webMediaUrl) return webMediaUrl;
+
+      return null;
+    }
+
+    // 3. GENERIC OBJECT / FOOD / ANIMAL / CONCEPT PIPELINE
+    if (meta.type === 'object') {
+      // 3a. Free source: Unsplash high-res photography if configured
+      const unsplashUrl = await fetchUnsplashEntityImage(meta.query || cleanLabel);
+      if (unsplashUrl && await validateImageUrl(unsplashUrl, 2000)) {
+        return unsplashUrl;
+      }
+
+      // 3b. Free source: Context-Scored Wikipedia
+      const wikiObjUrl = await fetchContextScoredWikiImage(meta, cleanLabel);
+      if (wikiObjUrl && await validateImageUrl(wikiObjUrl, 2000)) {
+        return wikiObjUrl;
+      }
+
+      // 3c. Live Web Image Search only if Unsplash & Wikipedia both failed or 404'd
+      const webObjUrl = await fetchWebImageWithContext(meta, cleanLabel);
+      if (webObjUrl) return webObjUrl;
+
+      return null;
+    }
+
+    // 4. PERSON / PLACE / GENERAL ENTITY PIPELINE
+    // 4a. Free source: Context-Scored Wikipedia lookup (Exact wikiTitle + Top-5 candidate scoring)
+    const wikiUrl = await fetchContextScoredWikiImage(meta, cleanLabel);
+    if (wikiUrl && await validateImageUrl(wikiUrl, 2000)) {
+      return wikiUrl;
+    }
+
+    // 4b. Live Web Image Search (Brave Image Search + Tavily Image Search with descriptions)
+    // Triggered ONLY when entity has no photo on Wikipedia or Wikipedia returns a 404
+    const webUrl = await fetchWebImageWithContext(meta, cleanLabel);
     if (webUrl) return webUrl;
 
-    // 3. Manual Wikipedia File check fallback
-    const cleanPersonName = cleanLabel.replace(/\s+(&|and)?\s*[Ff]amily\s*$/i, '').trim();
-    const formattedName = cleanPersonName
-      .split(/\s+/)
-      .map(word => word.charAt(0).toUpperCase() + word.slice(1))
-      .join('_');
+    // 4c. Manual Wikimedia Commons filename check fallback (only when no web search API keys are configured)
+    if (!process.env.BRAVE_SEARCH_API_KEY && !process.env.TAVILY_API_KEY) {
+      const cleanPersonName = cleanLabel.replace(/\s+(&|and)?\s*[Ff]amily\s*$/i, '').trim();
+      const formattedName = cleanPersonName
+        .split(/\s+/)
+        .map(word => word.charAt(0).toUpperCase() + word.slice(1))
+        .join('_');
 
-    // Try checking .jpg existence
-    const jpgFilename = `${formattedName}.jpg`;
-    if (await checkWikipediaFile(jpgFilename)) {
-      return `https://commons.wikimedia.org/wiki/Special:FilePath/${jpgFilename}`;
-    }
-
-    // Try checking .png existence
-    const pngFilename = `${formattedName}.png`;
-    if (await checkWikipediaFile(pngFilename)) {
-      return `https://commons.wikimedia.org/wiki/Special:FilePath/${pngFilename}`;
-    }
-
-    // Try checking .jpeg existence
-    const jpegFilename = `${formattedName}.jpeg`;
-    if (await checkWikipediaFile(jpegFilename)) {
-      return `https://commons.wikimedia.org/wiki/Special:FilePath/${jpegFilename}`;
+      for (const ext of ['jpg', 'png', 'jpeg']) {
+        const candidateFile = `${formattedName}.${ext}`;
+        if (await checkWikipediaFile(candidateFile)) {
+          return `https://commons.wikimedia.org/wiki/Special:FilePath/${candidateFile}?width=500`;
+        }
+      }
     }
 
     return null;
@@ -1333,7 +1508,7 @@ async function resolveFamousPersonImage(cleanLabel) {
     ]);
 
     if (resultUrl) {
-      setCachedImage(cleanLabel, resultUrl);
+      setCachedImage(cacheKey, resultUrl);
     }
     return resultUrl;
   } catch (err) {
@@ -1341,161 +1516,577 @@ async function resolveFamousPersonImage(cleanLabel) {
   }
 }
 
+/**
+ * Search Wikipedia and Wikimedia Commons File namespace specifically for official brand/company logos
+ */
+async function fetchWikimediaLogo(cleanEntityName, rawLabel) {
+  const baseName = (rawLabel || cleanEntityName || '')
+    .replace(/\b(inc\.?|corp\.?|corporation|ltd\.?|limited|plc|llc|group|holdings|co\.?)\b/gi, '')
+    .replace(/[^\w\s&-]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!baseName) return null;
+
+  const endpoints = [
+    'https://en.wikipedia.org/w/api.php',
+    'https://commons.wikimedia.org/w/api.php'
+  ];
+
+  const searchVariants = [`${baseName} logo`, `${baseName} icon`];
+
+  for (const endpoint of endpoints) {
+    for (const searchQuery of searchVariants) {
+      try {
+        const url = `${endpoint}?action=query&generator=search&gsrsearch=${encodeURIComponent(searchQuery)}&gsrnamespace=6&gsrlimit=6&prop=imageinfo&iiprop=url&iiurlwidth=500&format=json`;
+        const res = await fetch(url, {
+          headers: { 'User-Agent': 'ChartGeneratorBot/1.0 (https://chartgenerator.app; support@chartgenerator.app)' }
+        });
+
+        if (!res.ok) continue;
+        const data = await res.json();
+        const pages = data.query?.pages ? Object.values(data.query.pages) : [];
+        if (!pages.length) continue;
+
+        const entityWords = baseName.toLowerCase().split(/\W+/).filter(w => w.length > 1);
+        let bestUrl = null;
+        let bestScore = -1;
+
+        for (const page of pages) {
+          const titleLower = (page.title || '').toLowerCase();
+          const thumbUrl = page.imageinfo?.[0]?.thumburl || page.imageinfo?.[0]?.url;
+          if (!thumbUrl) continue;
+
+          // Skip non-logo files like building photos, store interiors, white-on-transparent logos, or maps
+          if (/\b(building|headquarters|office|store|shop|campus|map|founder|ceo|chart|graph|white|policies)\b/i.test(titleLower)) {
+            continue;
+          }
+
+          let score = 0;
+          for (const w of entityWords) {
+            if (titleLower.includes(w)) score += 4;
+          }
+          if (/\b(logo|icon|symbol|emblem|wordmark|badge)\b/i.test(titleLower)) score += 5;
+          if (titleLower.endsWith('.svg') || titleLower.endsWith('.png') || titleLower.endsWith('.webp')) score += 3;
+          if (typeof page.index === 'number') score -= page.index * 0.5;
+
+          if (score > bestScore && score >= 5) {
+            bestScore = score;
+            bestUrl = normalizeWikimediaUrl(thumbUrl);
+          }
+        }
+
+        if (bestUrl) return bestUrl;
+      } catch (e) {
+        // Continue to next endpoint or variant
+      }
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Context-Scored Wikipedia PageImage Resolver
+ * 1. Checks exact canonical `meta.wikiTitle` first if provided by LLM
+ * 2. Searches top 5 Wikipedia candidates (`gsrlimit=5&prop=pageimages|description|extracts`)
+ *    and scores each candidate against the prompt context and entity type to avoid wrong homonyms.
+ */
+async function fetchContextScoredWikiImage(meta, cleanLabel) {
+  const headers = { 'User-Agent': 'ChartGeneratorBot/1.0 (https://chartgenerator.app; support@chartgenerator.app)' };
+  const isBadPersonImage = (sourceUrl) => {
+    if (meta.type !== 'person') return false;
+    const lower = decodeURIComponent(String(sourceUrl || '')).toLowerCase();
+    return /(?:^|[^a-z0-9])(signature|autograph|plaque|grave|tomb|memorial|statue|map|coat_of_arms|flag_of|flag|logo)(?:$|[^a-z0-9])/i.test(lower);
+  };
+  const isBadCompanyImage = (sourceUrl) => {
+    if (meta.type !== 'company') return false;
+    const lower = decodeURIComponent(String(sourceUrl || '')).toLowerCase();
+    return /(?:^|[^a-z0-9])(aerial|campus|building|headquarters|office|store|shop|factory|facility|founder|ceo|executive|chart|graph|map|flag)(?:$|[^a-z0-9])/i.test(lower);
+  };
+  const isUnsuitableImage = (sourceUrl) => isBadPersonImage(sourceUrl) || isBadCompanyImage(sourceUrl);
+
+  try {
+    // 1. Explicit canonical Wikipedia Title lookup ONLY when wikiTitle is explicitly provided by the LLM
+    if (meta.wikiTitle) {
+      const directUrl = `https://en.wikipedia.org/w/api.php?action=query&titles=${encodeURIComponent(meta.wikiTitle)}&prop=pageimages|description&format=json&pithumbsize=500&pilicense=any&redirects=1`;
+      const directRes = await fetch(directUrl, { headers });
+      if (directRes.ok) {
+        const directData = await directRes.json();
+        const pages = directData.query?.pages ? Object.values(directData.query.pages) : [];
+        for (const page of pages) {
+          if (!page || page.missing !== undefined) continue;
+          const desc = (page.description || '').toLowerCase();
+          if (desc.includes('topics referred to by the same term') || desc.includes('disambiguation')) continue;
+
+          const thumb = page.thumbnail?.source;
+          if (thumb && !isUnsuitableImage(thumb)) {
+            return normalizeWikimediaUrl(thumb);
+          }
+        }
+      }
+    }
+
+    // 2. Multi-candidate Wikipedia search (gsrlimit=5) with context scoring
+    // Search with disambiguated query/context first so homonyms (e.g. 'Michael Jordan machine learning' vs NBA) are ranked properly
+    const searchQueries = [];
+    if (meta.context) {
+      searchQueries.push(`${meta.cleanEntityName} ${meta.context}`.trim());
+    }
+    if (meta.query) {
+      const cleanedQuery = meta.query
+        .replace(/\b(official\s+photo|profile\s+photo|face\s+profile\s+photo|portrait\s+photo|official\s+portrait|portrait|headshot|official\s+logo|brand\s+logo|logo\s+png|official\s+poster|movie\s+poster|film\s+poster|product\s+photo|photo|picture|image|icon)\b/gi, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+      if (cleanedQuery) searchQueries.push(cleanedQuery);
+    }
+    searchQueries.push(meta.cleanEntityName);
+    if (cleanLabel !== meta.cleanEntityName) {
+      searchQueries.push(cleanLabel);
+    }
+
+    for (const sQuery of [...new Set(searchQueries)].filter(Boolean)) {
+      const searchUrl = `https://en.wikipedia.org/w/api.php?action=query&generator=search&gsrsearch=${encodeURIComponent(sQuery)}&gsrlimit=5&prop=pageimages|description&format=json&pithumbsize=500&pilicense=any`;
+      const res = await fetch(searchUrl, { headers });
+      if (!res.ok) continue;
+
+      const data = await res.json();
+      const pages = data.query?.pages ? Object.values(data.query.pages) : [];
+      if (!pages.length) continue;
+
+      let bestPageWithThumb = null;
+      let bestThumbScore = -999;
+      let bestOverallPage = null;
+      let bestOverallScore = -999;
+
+      for (const page of pages) {
+        const desc = (page.description || '').toLowerCase();
+        if (desc.includes('topics referred to by the same term') || desc.includes('disambiguation')) continue;
+
+        const score = scoreWikiCandidate(page, meta, cleanLabel);
+        if (score > bestOverallScore) {
+          bestOverallScore = score;
+          bestOverallPage = page;
+        }
+
+        const thumb = page.thumbnail?.source;
+        if (!thumb || isUnsuitableImage(thumb)) continue;
+
+        if (score > bestThumbScore) {
+          bestThumbScore = score;
+          bestPageWithThumb = page;
+        }
+      }
+
+      // If the top context-matched page on Wikipedia is this exact entity (e.g. 'Michael I. Jordan')
+      // but Wikipedia has NO photo for them, stop searching Wikipedia immediately so Web Image Search
+      // (Brave / Tavily) fetches their real photo instead of falling back to a wrong homonym on Wikipedia!
+      if (bestOverallPage && bestOverallScore >= 8 && !bestOverallPage.thumbnail?.source) {
+        if (!bestPageWithThumb || bestOverallScore > bestThumbScore + 2) {
+          return null;
+        }
+      }
+
+      if (bestPageWithThumb && bestThumbScore >= 5) {
+        return normalizeWikimediaUrl(bestPageWithThumb.thumbnail.source);
+      }
+    }
+
+    // 3. MediaWiki REST API Summary fallback ONLY when wikiTitle is explicitly provided
+    if (meta.wikiTitle) {
+      const restUrl = `https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(meta.wikiTitle)}`;
+      const restRes = await fetch(restUrl, { headers });
+      if (restRes.ok) {
+        const restData = await restRes.json();
+        if (restData.type !== 'disambiguation') {
+          const src = restData.thumbnail?.source || restData.originalimage?.source;
+          if (src && !isUnsuitableImage(src)) {
+            return normalizeWikimediaUrl(src);
+          }
+        }
+      }
+    }
+
+    return null;
+  } catch (e) {
+    console.error(`[WikiResolver] Error resolving Wikipedia image for "${cleanLabel}":`, e.message);
+    return null;
+  }
+}
+
+/**
+ * Score a Wikipedia page candidate against the entity label, expected type, and prompt context
+ */
+function scoreWikiCandidate(page, meta, cleanLabel) {
+  const titleLower = (page.title || '').toLowerCase();
+  const descLower = (page.description || '').toLowerCase();
+  const combined = `${titleLower} ${descLower}`;
+  const labelLower = cleanLabel.toLowerCase();
+  const cleanEntityLower = (meta.cleanEntityName || cleanLabel).toLowerCase();
+
+  // Never pick list/timeline/filmography articles as entity images
+  if (/^(list|index|timeline|bibliography|filmography|discography|history|outline)\s+of\b/i.test(titleLower)) {
+    return -100;
+  }
+
+  let score = 0;
+
+  // Require the Wikipedia page TITLE itself to match the entity name (prevents picking a co-worker/rival's page)
+  if (titleLower === labelLower || titleLower === cleanEntityLower || titleLower === (meta.wikiTitle || '').toLowerCase().replace(/_/g, ' ')) {
+    score += 10;
+  } else if (titleLower.startsWith(cleanEntityLower) || titleLower.includes(cleanEntityLower) || titleLower.includes(labelLower)) {
+    score += 7;
+  } else {
+    const entityWords = cleanEntityLower.split(/\W+/).filter(w => w.length > 2);
+    const matchedTitleWords = entityWords.filter(w => titleLower.includes(w));
+    if (matchedTitleWords.length === 0) {
+      return -100; // Page title does not match entity at all
+    }
+    score += matchedTitleWords.length * 3;
+  }
+
+  // Context token match bonus
+  for (const token of (meta.contextTokens || [])) {
+    if (combined.includes(token)) {
+      score += 4;
+    }
+  }
+
+  // Category alignment bonus/penalty
+  if (meta.type === 'person') {
+    if (/\b(born|politician|actor|actress|singer|player|cricketer|footballer|businessman|billionaire|entrepreneur|ceo|founder|author|writer|scientist|professor|director|athlete|leader|president|minister)\b/i.test(descLower)) {
+      score += 5;
+    }
+    if (/\b(film|movie|album|song|company|corporation|city|municipality|district|species|genus|video game)\b/i.test(descLower)) {
+      score -= 8;
+    }
+  } else if (meta.type === 'media') {
+    if (/\b(film|movie|television|series|album|song|novel|book|video game|anime|soundtrack)\b/i.test(descLower)) {
+      score += 6;
+    }
+  } else if (meta.type === 'company') {
+    if (/\b(company|corporation|bank|brand|enterprise|conglomerate|airline|manufacturer|platform|startup|firm)\b/i.test(descLower)) {
+      score += 6;
+    }
+    // Avoid picking the fruit when looking for Apple Inc.
+    if (/\b(fruit|plant|species|tree|animal|river)\b/i.test(descLower)) {
+      score -= 12;
+    }
+  } else if (meta.type === 'product') {
+    if (/\b(smartphone|phone|car|vehicle|laptop|computer|console|device|model|aircraft|processor|camera)\b/i.test(descLower)) {
+      score += 5;
+    }
+  }
+
+  // Prefer higher-ranked search index slightly if tied
+  if (typeof page.index === 'number') {
+    score -= page.index * 0.5;
+  }
+
+  return score;
+}
+
+/**
+ * Search the entire live web for context-matching images using:
+ * 1. Brave Image Search API (`/res/v1/images/search`)
+ * 2. Tavily Search API (`include_images: true`, `include_image_descriptions: true`)
+ */
+async function fetchWebImageWithContext(meta, cleanLabel) {
+  const searchQuery = meta.query || cleanLabel;
+
+  // 1. Try Brave Dedicated Image Search API first if BRAVE_SEARCH_API_KEY is configured
+  if (process.env.BRAVE_SEARCH_API_KEY) {
+    try {
+      const braveUrl = await fetchBraveImageSearch(searchQuery, meta, cleanLabel);
+      if (braveUrl) return braveUrl;
+    } catch (e) {
+      console.warn(`[WebImageResolver] Brave image search error for "${searchQuery}":`, e.message);
+    }
+  }
+
+  // 2. Try Tavily Search API with include_image_descriptions
+  if (process.env.TAVILY_API_KEY) {
+    try {
+      const tavilyUrl = await fetchTavilyImageWithContext(searchQuery, meta, cleanLabel);
+      if (tavilyUrl) return tavilyUrl;
+    } catch (e) {
+      console.warn(`[WebImageResolver] Tavily image search error for "${searchQuery}":`, e.message);
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Brave Image Search API (`/res/v1/images/search`)
+ * Searches across the entire web (IMDb, Forbes, company sites, product pages, news) and scores results against context.
+ */
+async function fetchBraveImageSearch(query, meta, cleanLabel) {
+  const apiKey = process.env.BRAVE_SEARCH_API_KEY;
+  if (!apiKey) return null;
+
+  const params = new URLSearchParams({
+    q: query,
+    count: '6',
+    safesearch: 'strict',
+    search_lang: 'en'
+  });
+
+  const response = await fetch(`https://api.search.brave.com/res/v1/images/search?${params}`, {
+    method: 'GET',
+    headers: {
+      'Accept': 'application/json',
+      'Accept-Encoding': 'gzip',
+      'X-Subscription-Token': apiKey
+    }
+  });
+
+  if (!response.ok) return null;
+  const data = await response.json();
+  const results = data.results || [];
+  if (!results.length) return null;
+
+  const entityWords = (meta.cleanEntityName || cleanLabel).toLowerCase().split(/\W+/).filter(w => w.length > 2);
+
+  // Score candidates by title/source relevance
+  const scored = results.map((item, idx) => {
+    const titleLower = `${item.title || ''} ${item.source || ''}`.toLowerCase();
+    let score = 10 - idx;
+    for (const w of entityWords) {
+      if (titleLower.includes(w)) score += 5;
+    }
+    for (const token of (meta.contextTokens || [])) {
+      if (titleLower.includes(token)) score += 3;
+    }
+    const directUrl = item.properties?.url;
+    const thumbUrl = item.thumbnail?.src;
+    return { directUrl, thumbUrl, score };
+  }).sort((a, b) => b.score - a.score);
+
+  for (const candidate of scored) {
+    if (candidate.directUrl && await validateImageUrl(candidate.directUrl, 2200)) {
+      return candidate.directUrl;
+    }
+    if (candidate.thumbUrl && await validateImageUrl(candidate.thumbUrl, 2000)) {
+      return candidate.thumbUrl;
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Tavily Image Search with AI Image Descriptions (`include_image_descriptions: true`)
+ * Scores each returned web image's description & URL against the entity name and prompt context.
+ */
+async function fetchTavilyImageWithContext(query, meta, cleanLabel) {
+  const apiKey = process.env.TAVILY_API_KEY;
+  if (!apiKey) return null;
+
+  const response = await fetch('https://api.tavily.com/search', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      api_key: apiKey,
+      query: query,
+      max_results: 6,
+      search_depth: 'basic',
+      include_images: true,
+      include_image_descriptions: true
+    })
+  });
+
+  if (!response.ok) return null;
+  const data = await response.json();
+  if (!data.images || !data.images.length) return null;
+
+  const entityWords = (meta.cleanEntityName || cleanLabel).toLowerCase().split(/\W+/).filter(w => w.length > 2);
+
+  const candidates = data.images
+    .map((imgItem, idx) => {
+      const rawUrl = typeof imgItem === 'string' ? imgItem : (imgItem.url || '');
+      const desc = typeof imgItem === 'object' ? (imgItem.description || '') : '';
+      if (!rawUrl || typeof rawUrl !== 'string' || !rawUrl.startsWith('http')) return null;
+
+      // Skip generic site icons, sprites, or tracking pixels
+      if (/\b(sprite|pixel|spacer|1x1|blank|avatar-default|placeholder)\b/i.test(rawUrl)) return null;
+
+      const inspectText = `${desc} ${rawUrl}`.toLowerCase();
+      let score = 10 - idx;
+
+      for (const w of entityWords) {
+        if (inspectText.includes(w)) score += 6;
+      }
+      for (const token of (meta.contextTokens || [])) {
+        if (inspectText.includes(token)) score += 3;
+      }
+      if (meta.type === 'company' && inspectText.includes('logo')) score += 4;
+      if (meta.type === 'media' && inspectText.includes('poster')) score += 4;
+
+      return { url: normalizeWikimediaUrl(rawUrl), score };
+    })
+    .filter(Boolean)
+    .sort((a, b) => b.score - a.score);
+
+  for (const candidate of candidates) {
+    if (await validateImageUrl(candidate.url, 2500)) {
+      return candidate.url;
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Unsplash Photo Search for generic objects, food, animals, lifestyle, or concepts
+ */
+async function fetchUnsplashEntityImage(query) {
+  const accessKey = process.env.UNSPLASH_ACCESS_KEY;
+  if (!accessKey || !query) return null;
+
+  try {
+    const res = await fetch(`https://api.unsplash.com/search/photos?query=${encodeURIComponent(query)}&per_page=3&orientation=squarish`, {
+      headers: { Authorization: `Client-ID ${accessKey}` }
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    const firstPhoto = data.results?.[0];
+    return firstPhoto?.urls?.small || firstPhoto?.urls?.regular || null;
+  } catch (e) {
+    return null;
+  }
+}
+
+const urlValidationCache = new Map();
+function cacheValidation(url, isValid) {
+  if (urlValidationCache.size > 1000) {
+    const firstKey = urlValidationCache.keys().next().value;
+    urlValidationCache.delete(firstKey);
+  }
+  urlValidationCache.set(url, isValid);
+}
+
 async function checkWikipediaFile(name) {
   const url = `https://commons.wikimedia.org/wiki/Special:FilePath/${encodeURIComponent(name)}?width=500`;
-  try {
-    const res = await fetch(url, {
-      method: 'HEAD',
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Sec-Fetch-Dest': 'document',
-        'Sec-Fetch-Mode': 'navigate',
-        'Sec-Fetch-Site': 'none'
-      },
-      timeout: 2000
-    });
-    return res.ok;
-  } catch (e) {
-    return false;
-  }
+  return await validateImageUrl(url, 2000);
 }
 
 async function validateImageUrl(url, timeoutMs = 2500) {
   if (!url || typeof url !== 'string' || !url.startsWith('http')) return false;
 
-  // Trusted fast paths
-  if (url.includes('wikimedia.org') || url.includes('wikipedia.org') || url.includes('flagcdn.com')) {
+  // Trusted ultra-reliable CDN for country flags
+  if (url.includes('flagcdn.com')) {
     return true;
+  }
+
+  if (urlValidationCache.has(url)) {
+    return urlValidationCache.get(url);
   }
 
   try {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
-    const res = await fetch(url, {
+    let res = await fetch(url, {
       method: 'HEAD',
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'User-Agent': 'ChartGeneratorBot/1.0 (https://chartgenerator.app; support@chartgenerator.app)',
         'Accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8'
       },
-      signal: controller.signal
+      signal: controller.signal,
+      redirect: 'follow'
     });
+
+    // Fall back to GET with byte range if server rejects HEAD with 405 Method Not Allowed
+    if (res.status === 405) {
+      res = await fetch(url, {
+        method: 'GET',
+        headers: {
+          'User-Agent': 'ChartGeneratorBot/1.0 (https://chartgenerator.app; support@chartgenerator.app)',
+          'Accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
+          'Range': 'bytes=0-1024'
+        },
+        signal: controller.signal,
+        redirect: 'follow'
+      });
+    }
+
     clearTimeout(timeoutId);
 
     if (res.ok) {
       const contentType = (res.headers.get('content-type') || '').toLowerCase();
-      if (contentType.includes('image/') || contentType.includes('octet-stream')) {
-        return true;
-      }
+      const isValid = contentType.includes('image/') ||
+                      contentType.includes('octet-stream') ||
+                      contentType.includes('svg') ||
+                      url.toLowerCase().endsWith('.svg');
+      cacheValidation(url, isValid);
+      return isValid;
     }
+
+    cacheValidation(url, false);
     return false;
   } catch (e) {
+    cacheValidation(url, false);
     return false;
   }
 }
 
-async function fetchTavilyImageFallback(label) {
-  const apiKey = process.env.TAVILY_API_KEY;
-  if (!apiKey) return null;
-
-  try {
-    let query = label;
-    if (!/\b(movie|film|song|music|game|book|novel|logo|brand|flag)\b/i.test(label)) {
-      const isCompany = /\b(inc|corp|co|limited|ltd|plc|gmbh|sa|group|company|corporation|brands|industries|apple|google|microsoft|amazon|meta|tesla|nvidia|samsung)\b/i.test(label);
-      query = label + (isCompany ? " logo png" : " face profile photo");
-    }
-
-    const response = await fetch('https://api.tavily.com/search', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        api_key: apiKey,
-        query: query,
-        max_results: 5,
-        search_depth: 'basic',
-        include_images: true
-      })
-    });
-
-    if (response.ok) {
-      const data = await response.json();
-      if (data.images && data.images.length > 0) {
-        for (const imgItem of data.images) {
-          const rawUrl = typeof imgItem === 'string' ? imgItem : (imgItem.url || imgItem);
-          if (typeof rawUrl === 'string' && rawUrl.startsWith('http')) {
-            if (!rawUrl.includes('wikipedia.org') && !rawUrl.includes('wikimedia.org')) {
-              const isValid = await validateImageUrl(rawUrl);
-              if (isValid) {
-                return rawUrl;
-              }
-            }
-          }
-        }
-      }
-    }
-  } catch (e) {
-    console.error(`[WikiResolver] Tavily fallback failed for "${label}":`, e.message);
-  }
-  return null;
-}
+const KNOWN_COMPANY_DOMAINS = {
+  'apple': 'apple.com', 'apple inc': 'apple.com', 'apple inc.': 'apple.com',
+  'microsoft': 'microsoft.com', 'google': 'google.com', 'alphabet': 'abc.xyz',
+  'amazon': 'amazon.com', 'meta': 'meta.com', 'facebook': 'facebook.com',
+  'tesla': 'tesla.com', 'nvidia': 'nvidia.com', 'netflix': 'netflix.com',
+  'samsung': 'samsung.com', 'intel': 'intel.com', 'amd': 'amd.com',
+  'tsmc': 'tsmc.com', 'broadcom': 'broadcom.com', 'oracle': 'oracle.com',
+  'salesforce': 'salesforce.com', 'adobe': 'adobe.com', 'ibm': 'ibm.com',
+  'cisco': 'cisco.com', 'uber': 'uber.com', 'airbnb': 'airbnb.com',
+  'spotify': 'spotify.com', 'paypal': 'paypal.com', 'stripe': 'stripe.com',
+  'shopify': 'shopify.com', 'openai': 'openai.com', 'anthropic': 'anthropic.com',
+  'walmart': 'walmart.com', 'costco': 'costco.com', 'target': 'target.com',
+  'nike': 'nike.com', 'adidas': 'adidas.com', 'coca-cola': 'coca-cola.com',
+  'pepsi': 'pepsi.com', 'mcdonalds': 'mcdonalds.com', "mcdonald's": 'mcdonalds.com',
+  'starbucks': 'starbucks.com', 'disney': 'disney.com', 'sony': 'sony.com',
+  'toyota': 'toyota.com', 'bmw': 'bmw.com', 'mercedes-benz': 'mercedes-benz.com',
+  'ferrari': 'ferrari.com', 'porsche': 'porsche.com', 'ford': 'ford.com',
+  'jpmorgan': 'jpmorganchase.com', 'jpmorgan chase': 'jpmorganchase.com',
+  'goldman sachs': 'goldmansachs.com', 'morgan stanley': 'morganstanley.com',
+  'bank of america': 'bankofamerica.com', 'visa': 'visa.com', 'mastercard': 'mastercard.com',
+  'berkshire hathaway': 'berkshirehathaway.com', 'eli lilly': 'lilly.com',
+  'novo nordisk': 'novonordisk.com', 'johnson & johnson': 'jnj.com',
+  'exxonmobil': 'exxonmobil.com', 'chevron': 'chevron.com', 'shell': 'shell.com',
+  'saudi aramco': 'aramco.com', 'aramco': 'aramco.com', 'lvmh': 'lvmh.com',
+  'reliance': 'ril.com', 'reliance industries': 'ril.com', 'tcs': 'tcs.com',
+  'tata consultancy services': 'tcs.com', 'infosys': 'infosys.com',
+  'hdfc bank': 'hdfcbank.com', 'hdfc': 'hdfcbank.com', 'icici bank': 'icicibank.com',
+  'icici': 'icicibank.com', 'sbi': 'sbi.co.in', 'state bank of india': 'sbi.co.in',
+  'wipro': 'wipro.com', 'bharti airtel': 'airtel.in', 'airtel': 'airtel.in',
+  'zomato': 'zomato.com', 'swiggy': 'swiggy.com', 'flipkart': 'flipkart.com',
+  'paytm': 'paytm.com', 'zepto': 'zeptonow.com', 'ola': 'olacabs.com',
+  'byjus': 'byjus.com', 'razorpay': 'razorpay.com', 'cred': 'cred.club'
+};
 
 const COUNTRY_MAP = {
-  'united states': 'us', 'usa': 'us', 'united states of america': 'us', 'america': 'us',
-  'united kingdom': 'gb', 'uk': 'gb', 'great britain': 'gb', 'england': 'gb', 'scotland': 'gb',
-  'canada': 'ca',
-  'germany': 'de', 'deutschland': 'de',
-  'france': 'fr',
-  'italy': 'it', 'italia': 'it',
-  'japan': 'jp',
-  'china': 'cn',
-  'india': 'in',
-  'brazil': 'br', 'brasil': 'br',
-  'russia': 'ru', 'russian federation': 'ru',
-  'australia': 'au',
-  'spain': 'es', 'espana': 'es', 'españa': 'es',
-  'mexico': 'mx', 'méxico': 'mx',
-  'south korea': 'kr', 'korea': 'kr', 'republic of korea': 'kr',
-  'netherlands': 'nl', 'holland': 'nl',
-  'switzerland': 'ch',
-  'turkey': 'tr', 'türkiye': 'tr', 'turkiye': 'tr',
-  'saudi arabia': 'sa',
-  'sweden': 'se',
-  'poland': 'pl',
-  'belgium': 'be',
-  'norway': 'no',
-  'austria': 'at',
-  'denmark': 'dk',
-  'finland': 'fi',
-  'singapore': 'sg',
-  'new zealand': 'nz',
-  'ireland': 'ie',
-  'south africa': 'za',
-  'egypt': 'eg',
-  'united arab emirates': 'ae', 'uae': 'ae',
-  'argentina': 'ar',
-  'chile': 'cl',
-  'colombia': 'co',
-  'peru': 'pe', 'perú': 'pe',
-  'venezuela': 've',
-  'indonesia': 'id',
-  'malaysia': 'my',
-  'philippines': 'ph',
-  'thailand': 'th',
-  'vietnam': 'vn',
-  'pakistan': 'pk',
-  'bangladesh': 'bd',
-  'nigeria': 'ng',
-  'kenya': 'ke',
-  'morocco': 'ma',
-  'ukraine': 'ua',
-  'greece': 'gr',
-  'portugal': 'pt',
-  'hong kong': 'hk',
-  'taiwan': 'tw',
-  'czech republic': 'cz',
-  'romania': 'ro',
-  'hungary': 'hu',
-  'israel': 'il'
+  'united states': 'us', 'usa': 'us', 'u.s.': 'us', 'u.s.a.': 'us', 'united states of america': 'us', 'america': 'us',
+  'united kingdom': 'gb', 'uk': 'gb', 'u.k.': 'gb', 'great britain': 'gb', 'england': 'gb', 'scotland': 'gb', 'wales': 'gb',
+  'canada': 'ca', 'germany': 'de', 'deutschland': 'de', 'france': 'fr', 'italy': 'it', 'italia': 'it',
+  'japan': 'jp', 'china': 'cn', 'prc': 'cn', 'india': 'in', 'bharat': 'in', 'brazil': 'br', 'brasil': 'br',
+  'russia': 'ru', 'russian federation': 'ru', 'australia': 'au', 'spain': 'es', 'espana': 'es', 'españa': 'es',
+  'mexico': 'mx', 'méxico': 'mx', 'south korea': 'kr', 'korea': 'kr', 'republic of korea': 'kr', 'north korea': 'kp',
+  'netherlands': 'nl', 'holland': 'nl', 'switzerland': 'ch', 'turkey': 'tr', 'türkiye': 'tr', 'turkiye': 'tr',
+  'saudi arabia': 'sa', 'sweden': 'se', 'poland': 'pl', 'belgium': 'be', 'norway': 'no', 'austria': 'at',
+  'denmark': 'dk', 'finland': 'fi', 'singapore': 'sg', 'new zealand': 'nz', 'ireland': 'ie', 'south africa': 'za',
+  'egypt': 'eg', 'united arab emirates': 'ae', 'uae': 'ae', 'qatar': 'qa', 'kuwait': 'kw', 'oman': 'om', 'bahrain': 'bh',
+  'argentina': 'ar', 'chile': 'cl', 'colombia': 'co', 'peru': 'pe', 'perú': 'pe', 'venezuela': 've', 'uruguay': 'uy',
+  'ecuador': 'ec', 'bolivia': 'bo', 'paraguay': 'py', 'costa rica': 'cr', 'panama': 'pa', 'cuba': 'cu',
+  'indonesia': 'id', 'malaysia': 'my', 'philippines': 'ph', 'thailand': 'th', 'vietnam': 'vn', 'myanmar': 'mm',
+  'cambodia': 'kh', 'laos': 'la', 'sri lanka': 'lk', 'nepal': 'np', 'pakistan': 'pk', 'bangladesh': 'bd',
+  'afghanistan': 'af', 'iran': 'ir', 'iraq': 'iq', 'syria': 'sy', 'lebanon': 'lb', 'israel': 'il', 'palestine': 'ps',
+  'nigeria': 'ng', 'kenya': 'ke', 'morocco': 'ma', 'algeria': 'dz', 'tunisia': 'tn', 'ethiopia': 'et', 'ghana': 'gh',
+  'tanzania': 'tz', 'uganda': 'ug', 'angola': 'ao', 'senegal': 'sn', 'ivory coast': 'ci', 'cameroon': 'cm',
+  'ukraine': 'ua', 'greece': 'gr', 'portugal': 'pt', 'hong kong': 'hk', 'taiwan': 'tw', 'macau': 'mo',
+  'czech republic': 'cz', 'czechia': 'cz', 'romania': 'ro', 'hungary': 'hu', 'slovakia': 'sk', 'bulgaria': 'bg',
+  'croatia': 'hr', 'serbia': 'rs', 'slovenia': 'si', 'lithuania': 'lt', 'latvia': 'lv', 'estonia': 'ee',
+  'iceland': 'is', 'luxembourg': 'lu', 'malta': 'mt', 'cyprus': 'cy', 'kazakhstan': 'kz', 'uzbekistan': 'uz',
+  'azerbaijan': 'az', 'armenia': 'am', 'belarus': 'by', 'mongolia': 'mn'
 };
 
 function getCountryCode(name) {

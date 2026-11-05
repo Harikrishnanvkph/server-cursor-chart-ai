@@ -160,7 +160,15 @@ DO NOT include an "options" or "chartConfig" object. The frontend handles all ch
 POINT IMAGES (only when user explicitly requests images/icons on data points):
 Include these additional fields in each dataset:
 - "pointImages": Array of null or empty strings "".
-- "pointImageSearchQueries": Array of specific search terms for each data point to help the backend search engine find correct images. Same length as labels.
+- "pointImageSearchQueries": Array of structured metadata objects (same length as labels) to help the backend resolve 100% context-accurate images across web search, brand CDNs, FlagCDN, and Wikipedia:
+  {
+    "type": "person" | "company" | "country" | "media" | "product" | "place" | "object",
+    "query": "Specific context-disambiguated web image search query (e.g. 'Beast 2022 Tamil movie Vijay poster', 'Elon Musk portrait photo', 'Apple Inc official logo')",
+    "wikiTitle": "Exact canonical Wikipedia page title if known (e.g. 'Beast_(2022_Indian_film)', 'Elon_Musk', 'Apple_Inc.') or ''",
+    "domain": "Official website domain ONLY when type is 'company' (e.g. 'apple.com', 'tesla.com', 'hdfcbank.com') or ''",
+    "countryCode": "2-letter ISO 3166-1 alpha-2 code ONLY when type is 'country' (e.g. 'us', 'in', 'gb', 'qa') or ''",
+    "context": "2-5 disambiguating keywords matching the prompt topic"
+  }
 - "pointImageConfig": Array of objects like { "type": "circle", "size": 20, "position": "center", "arrow": false }
 
 CRITICAL: Never output markdown commentary outside the JSON object.
