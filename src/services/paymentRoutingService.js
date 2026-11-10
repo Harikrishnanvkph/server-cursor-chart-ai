@@ -8,7 +8,7 @@ export const PAYMENT_PLANS = {
     category: 'ai',
     name: 'AI Lite',
     displayName: 'Lite User',
-    description: '+15 AI credits (Never Expire) + 5 Cloud Save credits on first AI payment.',
+    description: '+30 AI credits (Never Expire) + 5 Cloud Save credits on first AI payment.',
     pricing: {
       USD: {
         currency: 'USD',
@@ -27,7 +27,7 @@ export const PAYMENT_PLANS = {
     category: 'ai',
     name: 'AI Pro',
     displayName: 'Pro User',
-    description: '+60 AI credits (Never Expire) + 5 Cloud Save credits on first AI payment.',
+    description: '+100 AI credits (Never Expire) + 5 Cloud Save credits on first AI payment.',
     pricing: {
       USD: {
         currency: 'USD',
@@ -96,7 +96,7 @@ export function resolvePackId(packId, planTier = 'pro') {
 }
 
 /**
- * Determine pricing and gateway details for a credit pack (USD globally, INR 99/249 for India via Dodo)
+ * Determine pricing and gateway details for a credit pack (USD globally via Dodo, INR 99/249 for India via Razorpay)
  */
 export function getPlanPricingAndGateway({
   packId = null,
@@ -108,6 +108,7 @@ export function getPlanPricingAndGateway({
   const pack = CREDIT_PACKS[resolvedPackId] || CREDIT_PACKS.ai_pro;
   const location = resolveLocationContext(region);
   const isIndia = location.isIndia;
+  const gateway = isIndia ? 'razorpay' : 'dodo';
   const currency = isIndia ? 'INR' : 'USD';
   const currencySymbol = isIndia ? '₹' : '$';
   const amount = isIndia ? (pack.priceInr || (pack.priceUsd === 2 ? 99 : 249)) : pack.priceUsd;
@@ -119,7 +120,7 @@ export function getPlanPricingAndGateway({
     billingCycle: 'one_time',
     region: location.countryCode || 'GLOBAL',
     isIndia,
-    gateway: 'dodo',
+    gateway,
     currency,
     currencySymbol,
     amount,
@@ -157,6 +158,7 @@ export async function recordPaymentTransaction({
         gateway_subscription_id: gatewaySubscriptionId,
         amount,
         currency,
+        pack_id: resolvedPackId,
         plan_tier: planTier || resolvedPackId,
         billing_cycle: billingCycle || 'one_time',
         status,

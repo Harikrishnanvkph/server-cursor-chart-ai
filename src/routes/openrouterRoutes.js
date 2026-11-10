@@ -6,7 +6,7 @@ import {
   validateOpenRouterApiKey,
   getOpenRouterAccountInfo
 } from '../services/openrouterService.js';
-import { canConsumeAiCredit, deductAiCredit } from '../services/subscriptionService.js';
+import { canConsumeAiCredit, deductAiCredit, refundAiCredit } from '../services/subscriptionService.js';
 
 const router = express.Router();
 
@@ -19,13 +19,20 @@ const router = express.Router();
 //moonshotai/kimi-k2:free
 //deepseek/deepseek-chat-v3-0324:free
 router.post('/process-chart', async (req, res) => {
+  let creditDeducted = false;
+  let deductDetails = null;
+  const userId = req.user?.user_id || req.user?.id;
+
   try {
     const {
       input,
       model = 'deepseek/deepseek-chat-v3-0324:free',
       conversationId,
       currentChartState,
-      messageHistory
+      messageHistory,
+      mode,
+      templateStructure,
+      formatStructure
     } = req.body;
 
     if (!input) {
@@ -36,16 +43,34 @@ router.post('/process-chart', async (req, res) => {
       return res.status(500).json({ error: 'OpenRouter API key not configured' });
     }
 
-    const userId = req.user?.user_id || req.user?.id;
+    // Determine required AI credits: 1 for chart mode, 2 for template/format mode
+    const isTemplateMode =
+      mode === 'template' ||
+      Boolean(templateStructure && Object.keys(templateStructure).length > 0) ||
+      Boolean(formatStructure && Object.keys(formatStructure).length > 0);
+    const requiredCredits = isTemplateMode ? 2 : 1;
+
+    let updatedSubscription = null;
     if (userId) {
-      const creditCheck = await canConsumeAiCredit(userId);
-      if (!creditCheck.allowed) {
+      const deductResult = await deductAiCredit(userId, requiredCredits);
+      if (!deductResult || deductResult.exhausted || deductResult.success === false) {
         return res.status(403).json({
-          error: creditCheck.error,
+          error: requiredCredits > 1
+            ? `Template mode requires ${requiredCredits} AI credits, but you have ${deductResult?.ai_credits_remaining ?? 0} remaining. Top up your AI credits to continue.`
+            : 'AI credit limit reached. Purchase an AI Credits pack to continue generating charts.',
           code: 'AI_CREDITS_EXHAUSTED',
-          subscription: creditCheck.subscription
+          requiredCredits,
+          subscription: deductResult
         });
       }
+      creditDeducted = true;
+      deductDetails = {
+        free: deductResult.deducted_free || 0,
+        purchased: deductResult.deducted_purchased || 0,
+        bucket: deductResult.deducted_bucket || 'free',
+        amount: requiredCredits
+      };
+      updatedSubscription = deductResult;
     }
 
     let aiResponse;
@@ -55,11 +80,6 @@ router.post('/process-chart', async (req, res) => {
       aiResponse = await modifyChartDataWithOpenRouter(input, currentChartState, messageHistory || [], model);
     } else {
       aiResponse = await generateChartDataWithOpenRouter(input, model);
-    }
-
-    let updatedSubscription = null;
-    if (userId) {
-      updatedSubscription = await deductAiCredit(userId);
     }
 
     // Format response to match frontend expectations
@@ -80,6 +100,13 @@ router.post('/process-chart', async (req, res) => {
 
   } catch (error) {
     console.error('Error processing OpenRouter chart request:', error);
+    if (creditDeducted && userId) {
+      try {
+        await refundAiCredit(userId, deductDetails || 'free');
+      } catch (refundErr) {
+        console.error('Failed to refund AI credit after error:', refundErr.message);
+      }
+    }
     res.status(500).json({
       error: 'Failed to process chart request with OpenRouter',
       details: error.message

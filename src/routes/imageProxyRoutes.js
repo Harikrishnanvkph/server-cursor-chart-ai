@@ -140,6 +140,17 @@ router.get('/image', async (req, res) => {
             return res.status(403).json({ error: 'Only HTTP/HTTPS URLs are allowed' });
         }
 
+        // Reject Wikimedia Commons or web placeholder / dummy files (e.g. 'thumbnail.jpg', 'Name.jpg' with red text)
+        const lowerImgUrl = imageUrl.toLowerCase();
+        if (
+            lowerImgUrl.includes('special:filepath/thumbnail.jpg') ||
+            lowerImgUrl.includes('special:filepath/name.jpg') ||
+            lowerImgUrl.includes('/5/5b/name.jpg') ||
+            /(?:^|\/|[?&=_/-])(thumbnail|placeholder|no_image|no-image|image_needed|image-needed|missing_image|missing-image|avatar-default|blank_profile)\.(?:jpg|jpeg|png|svg|webp)(?:$|[?&#])/i.test(lowerImgUrl)
+        ) {
+            return res.status(404).json({ error: 'Placeholder image rejected' });
+        }
+
         // Security: Validate the hostname doesn't resolve to a private/internal IP
         // This catches: IPv6 loopback, 0.0.0.0, 172.16.x.x, decimal IPs, DNS rebinding,
         // cloud metadata (169.254.169.254), and all other private ranges

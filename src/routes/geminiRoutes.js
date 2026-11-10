@@ -14,28 +14,43 @@ const router = express.Router();
  */
 router.post('/process-chart', async (req, res) => {
     let creditDeducted = false;
-    let deductedBucket = 'free';
+    let deductDetails = null;
     const userId = req.user?.user_id || req.user?.id;
 
     try {
-        const { input, model, conversationId, currentChartState, messageHistory } = req.body;
+        const { input, model, conversationId, currentChartState, messageHistory, mode, templateStructure, formatStructure } = req.body;
 
         if (!input) return res.status(400).json({ error: 'Input text is required' });
         if (!process.env.GEMINI_API_KEY) return res.status(500).json({ error: 'Gemini API key not configured' });
 
+        // Determine required AI credits: 1 for chart mode, 2 for template/format mode
+        const isTemplateMode =
+            mode === 'template' ||
+            Boolean(templateStructure && Object.keys(templateStructure).length > 0) ||
+            Boolean(formatStructure && Object.keys(formatStructure).length > 0);
+        const requiredCredits = isTemplateMode ? 2 : 1;
+
         // Phase 1: Pre-reserve credit atomically before invoking upstream LLM
         let updatedSubscription = null;
         if (userId) {
-            const deductResult = await deductAiCredit(userId);
+            const deductResult = await deductAiCredit(userId, requiredCredits);
             if (!deductResult || deductResult.exhausted || deductResult.success === false) {
                 return res.status(403).json({
-                    error: 'AI credit limit reached. Purchase an AI Credits pack to continue generating charts.',
+                    error: requiredCredits > 1
+                        ? `Template mode requires ${requiredCredits} AI credits, but you have ${deductResult?.ai_credits_remaining ?? 0} remaining. Top up your AI credits to continue.`
+                        : 'AI credit limit reached. Purchase an AI Credits pack to continue generating charts.',
                     code: 'AI_CREDITS_EXHAUSTED',
+                    requiredCredits,
                     subscription: deductResult
                 });
             }
             creditDeducted = true;
-            deductedBucket = deductResult.deducted_bucket || 'free';
+            deductDetails = {
+                free: deductResult.deducted_free || 0,
+                purchased: deductResult.deducted_purchased || 0,
+                bucket: deductResult.deducted_bucket || 'free',
+                amount: requiredCredits
+            };
             updatedSubscription = deductResult;
         }
 
@@ -65,7 +80,7 @@ router.post('/process-chart', async (req, res) => {
         // Rollback credit deduction if generation failed
         if (creditDeducted && userId) {
             try {
-                await refundAiCredit(userId, deductedBucket);
+                await refundAiCredit(userId, deductDetails || 'free');
             } catch (refundErr) {
                 console.error('Failed to refund AI credit after error:', refundErr.message);
             }

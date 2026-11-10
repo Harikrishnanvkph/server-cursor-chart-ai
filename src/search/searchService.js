@@ -2,11 +2,13 @@ import { GoogleGenerativeAI } from '@google/generative-ai';
 import { OpenAI } from 'openai';
 import { createTavilyProvider } from './tavilyProvider.js';
 import { createBraveProvider } from './braveProvider.js';
+import { createDeepSeekSearchProvider } from './deepseekSearchProvider.js';
 
 // Provider Registry
 const PROVIDERS = {
   tavily: createTavilyProvider,
   brave: createBraveProvider,
+  deepseek: createDeepSeekSearchProvider,
   // Future providers like exa can be mapped here:
   // exa: createExaProvider
 };
@@ -76,22 +78,28 @@ class SearchService {
    */
   async determineSearchQuery(inputText, messageHistory = [], serviceName = 'deepseek') {
     const currentYear = new Date().getFullYear();
-    const systemPrompt = `You are a search query optimizer for a chart generation AI. The current year is ${currentYear}. Your task is to analyze the user request and recent history, then decide if we need to search the web for new factual data, statistics, or real-world information.
+    const systemPrompt = `You are a search query optimizer for a chart generation AI. Your task is to analyze the user request and recent history, then decide if we need to search the web for new factual data, statistics, or real-world information.
 
 Rules:
 1. If the request is purely visual, formatting-related, or structural (e.g., changing colors, changing chart type like bar to pie, sorting data, updating text titles, styling, or requesting simple explanations of existing data), output exactly: NO_SEARCH
-2. If the request requires looking up facts, figures, rankings, stock prices, or statistics from the web, output ONLY the search keywords (no punctuation, no explanation, no quotes).
-   DEFAULT TO LATEST: Users naturally expect the freshest, most current data as of today. Unless the user explicitly asked for a past historical year (e.g. "in 2020"), ALWAYS include specific entity names, metrics, and "${currentYear} latest" or "real time" to retrieve current figures.
+2. If the request requires looking up facts, figures, rankings, stock prices, or statistics from the web, output ONLY concise search keywords (no punctuation, no explanation, no quotes).
+   - Produce high-signal keywords that return verified, current data and real-world statistics.
+   - For fast-moving data like stock prices, crypto, or net worth, you may include "latest" or "real time".
+   - For technology benchmarks, rankings, or market shares, use natural search terms (e.g. "benchmark leaderboard", "market share", "latest") without forcing speculative future dates.
+   - Keep queries concise and under 100 characters.
 3. If the user explicitly requests images, photos, logos, or flags of specific entities, ensure the generated search query includes the names of the entities followed by "official photo" or "logo" or "flag" (e.g. "Virat Kohli official photo") to help the search provider locate valid image URLs.
 
 Examples:
 - Request: "Make the bars blue" -> NO_SEARCH
 - Request: "Change the chart to a line chart" -> NO_SEARCH
-- Request: "Top 5 billionaires" -> top 5 billionaires net worth ${currentYear} latest real time
-- Request: "Top tech companies by market cap" -> top tech companies market cap ${currentYear} latest
-- Request: "Add GDP of Germany" -> Germany GDP ${currentYear} latest
+- Request: "Top 5 billionaires" -> top 5 billionaires net worth latest
+- Request: "Top 10 AI models for reasoning" -> top AI models for reasoning benchmark leaderboard
+- Request: "Bitcoin price" -> bitcoin price latest real time
+- Request: "Top tech companies by market cap" -> top tech companies market cap
+- Request: "Add GDP of Germany" -> Germany GDP latest
+- Request: "Global EV market share" -> global electric vehicle market share latest
 - Request: "Compare revenue of Apple and Microsoft in 2021" -> Apple Microsoft revenue 2021
-- Request: "Compare revenue of Apple and Microsoft" -> Apple Microsoft revenue ${currentYear} latest
+- Request: "Compare revenue of Apple and Microsoft" -> Apple Microsoft revenue latest
 - Request: "Sort the data ascending" -> NO_SEARCH
 - Request: "Show Virat Kohli, Steve Smith, Joe Root with pictures" -> Virat Kohli Steve Smith Joe Root official photo`;
 

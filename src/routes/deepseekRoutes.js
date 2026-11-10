@@ -5,7 +5,7 @@ import {
   getAvailableDeepSeekModels,
   validateDeepSeekApiKey
 } from '../services/deepseekService.js';
-import { canConsumeAiCredit, deductAiCredit } from '../services/subscriptionService.js';
+import { canConsumeAiCredit, deductAiCredit, refundAiCredit } from '../services/subscriptionService.js';
 
 const router = express.Router();
 
@@ -13,35 +13,54 @@ const router = express.Router();
  * POST /api/deepseek/process-chart
  */
 router.post('/process-chart', async (req, res) => {
+  let creditDeducted = false;
+  let deductDetails = null;
+  const userId = req.user?.user_id || req.user?.id;
+
   try {
-    const { input, model, conversationId, currentChartState, messageHistory, webSearch, searchProvider } = req.body;
+    const { input, model, conversationId, currentChartState, messageHistory, mode, templateStructure, formatStructure, webSearch, searchProvider } = req.body;
 
     if (!input) return res.status(400).json({ error: 'Input text is required' });
     if (!process.env.DEEPSEEK_API_KEY) return res.status(500).json({ error: 'DeepSeek API key not configured' });
 
-    const userId = req.user?.user_id || req.user?.id;
-    if (userId) {
-      const creditCheck = await canConsumeAiCredit(userId);
-      if (!creditCheck.allowed) {
-        return res.status(403).json({
-          error: creditCheck.error,
-          code: 'AI_CREDITS_EXHAUSTED',
-          subscription: creditCheck.subscription
-        });
-      }
-    }
-
-    const aiResponse = currentChartState && conversationId
-      ? await modifyChartDataWithDeepSeek(input, currentChartState, messageHistory || [], model, null, null, webSearch, searchProvider)
-      : await generateChartDataWithDeepSeek(input, model, null, null, webSearch, searchProvider);
-
-    if (!aiResponse.chartType || !aiResponse.chartData) {
-      throw new Error('AI response missing required chart data');
-    }
+    // Determine required AI credits: 1 for chart mode, 2 for template/format mode
+    const isTemplateMode =
+      mode === 'template' ||
+      Boolean(templateStructure && Object.keys(templateStructure).length > 0) ||
+      Boolean(formatStructure && Object.keys(formatStructure).length > 0);
+    const requiredCredits = isTemplateMode ? 2 : 1;
 
     let updatedSubscription = null;
     if (userId) {
-      updatedSubscription = await deductAiCredit(userId);
+      const deductResult = await deductAiCredit(userId, requiredCredits);
+      if (!deductResult || deductResult.exhausted || deductResult.success === false) {
+        return res.status(403).json({
+          error: requiredCredits > 1
+            ? `Template mode requires ${requiredCredits} AI credits, but you have ${deductResult?.ai_credits_remaining ?? 0} remaining. Top up your AI credits to continue.`
+            : 'AI credit limit reached. Purchase an AI Credits pack to continue generating charts.',
+          code: 'AI_CREDITS_EXHAUSTED',
+          requiredCredits,
+          subscription: deductResult
+        });
+      }
+      creditDeducted = true;
+      deductDetails = {
+        free: deductResult.deducted_free || 0,
+        purchased: deductResult.deducted_purchased || 0,
+        bucket: deductResult.deducted_bucket || 'free',
+        amount: requiredCredits
+      };
+      updatedSubscription = deductResult;
+    }
+
+    const effectiveSearchProvider = searchProvider || (webSearch ? 'deepseek' : null);
+
+    const aiResponse = currentChartState && conversationId
+      ? await modifyChartDataWithDeepSeek(input, currentChartState, messageHistory || [], model, templateStructure, formatStructure, webSearch, effectiveSearchProvider)
+      : await generateChartDataWithDeepSeek(input, model, templateStructure, formatStructure, webSearch, effectiveSearchProvider);
+
+    if (!aiResponse.chartType || !aiResponse.chartData) {
+      throw new Error('AI response missing required chart data');
     }
 
     res.json({
@@ -59,6 +78,13 @@ router.post('/process-chart', async (req, res) => {
 
   } catch (error) {
     console.error('DeepSeek chart request error:', error.message);
+    if (creditDeducted && userId) {
+      try {
+        await refundAiCredit(userId, deductDetails || 'free');
+      } catch (refundErr) {
+        console.error('Failed to refund AI credit after error:', refundErr.message);
+      }
+    }
     res.status(500).json({ error: 'Failed to process chart request with DeepSeek', details: error.message, service: 'deepseek' });
   }
 });

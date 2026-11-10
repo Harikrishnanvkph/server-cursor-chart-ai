@@ -3,6 +3,7 @@ import {
   getPaymentConfig,
   createCheckout,
   verifyRazorpayPayment,
+  verifyDodoPayment,
   confirmSimulationPayment,
   handleRazorpayWebhook,
   handleDodoWebhook
@@ -19,6 +20,9 @@ router.post('/create-checkout', requireAuthEnhanced, createCheckout);
 
 // Protected: Verify Razorpay signature upon modal success
 router.post('/razorpay/verify', requireAuthEnhanced, verifyRazorpayPayment);
+
+// Protected: Verify Dodo Payments completion upon return to /payment/success
+router.post('/dodo/verify', requireAuthEnhanced, verifyDodoPayment);
 
 // Protected: Developer simulation checkout confirmation (when running without real API keys)
 router.post('/confirm-simulation', requireAuthEnhanced, confirmSimulationPayment);

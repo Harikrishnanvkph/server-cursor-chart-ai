@@ -78,7 +78,7 @@ export class DeepSeekAdapter {
 
   getAvailableModels() {
     return [
-      { id: 'deepseek-chat', name: 'DeepSeek Chat', description: 'General purpose — fast and capable', cost_tier: 'standard' },
+      { id: 'deepseek-chat', name: 'Deepseek Web', description: 'DeepSeek with native real-time web search', cost_tier: 'standard' },
       { id: 'deepseek-reasoner', name: 'DeepSeek Reasoner', description: 'Advanced reasoning (R1)', cost_tier: 'premium' }
     ];
   }

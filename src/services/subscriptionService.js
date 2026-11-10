@@ -16,11 +16,11 @@ export const CREDIT_PACKS = {
     badge: 'lite',
     priceUsd: 2,
     priceInr: 99,
-    aiCredits: 15,
+    aiCredits: 30,
     cloudCredits: 0,
     firstPaymentCloudBonus: 5,
     validityMonths: null, // Never expires
-    description: '+15 AI credits (Never Expire) + 5 Cloud Save credits on first AI purchase',
+    description: '+30 AI credits (Never Expire) + 5 Cloud Save credits on first AI purchase',
   },
   ai_pro: {
     id: 'ai_pro',
@@ -30,11 +30,11 @@ export const CREDIT_PACKS = {
     badge: 'pro',
     priceUsd: 5,
     priceInr: 249,
-    aiCredits: 60,
+    aiCredits: 100,
     cloudCredits: 0,
     firstPaymentCloudBonus: 5,
     validityMonths: null, // Never expires
-    description: '+60 AI credits (Never Expire) + 5 Cloud Save credits on first AI purchase',
+    description: '+100 AI credits (Never Expire) + 5 Cloud Save credits on first AI purchase',
   },
   cloud_lite: {
     id: 'cloud_lite',
@@ -77,13 +77,13 @@ export const TIER_CONFIG = {
   lite: {
     name: 'Lite',
     priceMonthly: 2,
-    aiCreditsLimit: 25,
+    aiCreditsLimit: 40,
     cloudChartsLimit: 10,
   },
   pro: {
     name: 'Pro',
     priceMonthly: 5,
-    aiCreditsLimit: 70,
+    aiCreditsLimit: 110,
     cloudChartsLimit: 10,
   },
   enterprise: {
@@ -133,6 +133,7 @@ async function readUserWalletState(userId, profile) {
       return {
         mode: 'native',
         purchased_ai_credits: Math.max(0, extProfile.purchased_ai_credits ?? 0),
+        total_purchased_ai_credits: 0,
         permanent_cloud_credits: Math.max(
           FREE_BASELINE.permanentCloudCredits,
           extProfile.permanent_cloud_credits ?? FREE_BASELINE.permanentCloudCredits
@@ -168,6 +169,7 @@ async function readUserWalletState(userId, profile) {
     mode: 'fallback',
     walletRowId: walletRow?.id || null,
     purchased_ai_credits: Math.max(0, Number(meta.purchased_ai_credits) || 0),
+    total_purchased_ai_credits: Math.max(0, Number(meta.total_purchased_ai_credits) || 0),
     permanent_cloud_credits: Math.max(
       FREE_BASELINE.permanentCloudCredits,
       Number(meta.permanent_cloud_credits) || FREE_BASELINE.permanentCloudCredits
@@ -202,6 +204,7 @@ async function writeUserWalletState(userId, walletState) {
   // Fallback mode: persist in payment_transactions (gateway = 'wallet_state') + sync cloud_charts_limit on profiles
   const metadataPayload = {
     purchased_ai_credits: walletState.purchased_ai_credits,
+    total_purchased_ai_credits: walletState.total_purchased_ai_credits || 0,
     permanent_cloud_credits: walletState.permanent_cloud_credits,
     first_ai_bonus_claimed: walletState.first_ai_bonus_claimed,
     cloud_grants: activeGrants,
@@ -245,11 +248,12 @@ export async function getUserSubscription(userId) {
   if (!userId) return null;
 
   try {
-    // Run profile query, saved-chart count, and wallet state lookup concurrently
+    // Run profile query, saved-chart count, wallet state lookup, and completed orders concurrently
     const [
       { data: profile, error: profileErr },
       { count: savedCount },
-      walletState
+      walletState,
+      { data: completedTx }
     ] = await Promise.all([
       supabaseAdminClient
         .from('profiles')
@@ -261,7 +265,12 @@ export async function getUserSubscription(userId) {
         .select('id', { count: 'exact', head: true })
         .eq('user_id', userId)
         .eq('is_active', true),
-      readUserWalletState(userId)
+      readUserWalletState(userId),
+      supabaseAdminClient
+        .from('payment_transactions')
+        .select('pack_id, metadata, created_at')
+        .eq('user_id', userId)
+        .eq('status', 'completed')
     ]);
 
     if (profileErr || !profile) {
@@ -312,7 +321,33 @@ export async function getUserSubscription(userId) {
     const freeAiRemaining = Math.max(0, freeAiLimit - freeAiUsed);
     const purchasedAiCredits = walletState.purchased_ai_credits;
     const totalAiRemaining = freeAiRemaining + purchasedAiCredits;
-    const totalAiLimit = freeAiLimit + purchasedAiCredits;
+
+    // Calculate total purchased AI credits ever granted across all completed orders
+    let totalPurchasedAiGranted = walletState.total_purchased_ai_credits || 0;
+    if (Array.isArray(completedTx) && completedTx.length > 0) {
+      let txPurchasedSum = 0;
+      for (const tx of completedTx) {
+        const pId = tx.pack_id || tx.metadata?.packId;
+        if (pId === 'ai_lite') {
+          const isLegacy15 = tx.metadata?.aiCredits === 15 || (new Date(tx.created_at || 0) < new Date('2026-11-09T15:00:00Z') && tx.metadata?.aiCredits !== 30);
+          txPurchasedSum += isLegacy15 ? 15 : CREDIT_PACKS.ai_lite.aiCredits;
+        } else if (pId === 'ai_pro') {
+          const isLegacy60 = tx.metadata?.aiCredits === 60 || (new Date(tx.created_at || 0) < new Date('2026-11-09T15:00:00Z') && tx.metadata?.aiCredits !== 100);
+          txPurchasedSum += isLegacy60 ? 60 : CREDIT_PACKS.ai_pro.aiCredits;
+        }
+      }
+      totalPurchasedAiGranted = Math.max(totalPurchasedAiGranted, txPurchasedSum);
+    }
+
+    const tier = profile.subscription_tier || 'free';
+    const tierConfigLimit = TIER_CONFIG[tier]?.aiCreditsLimit || freeAiLimit;
+
+    // Total AI limit is Free Monthly Allowance (10) + Total Purchased Credits Ever Granted
+    // It NEVER shrinks as credits are consumed!
+    const totalAiLimit = Math.max(
+      totalPurchasedAiGranted > 0 ? (freeAiLimit + totalPurchasedAiGranted) : tierConfigLimit,
+      totalAiRemaining
+    );
 
     const permanentCloudCredits = walletState.permanent_cloud_credits;
     const activeCloudGrants = walletState.cloud_grants || [];
@@ -323,20 +358,18 @@ export async function getUserSubscription(userId) {
     const totalCloudLimit = permanentCloudCredits + bonusCloudCredits;
     const activeSavedCount = savedCount || 0;
 
-    // Sync profile's cloud_charts_limit if it drifted (e.g., after a temporary grant expired)
-    if (profile.cloud_charts_limit !== totalCloudLimit || profile.ai_credits_limit !== freeAiLimit) {
+    // Sync profile's limits if drifted
+    if (profile.cloud_charts_limit !== totalCloudLimit || profile.ai_credits_limit !== totalAiLimit) {
       supabaseAdminClient
         .from('profiles')
         .update({
           cloud_charts_limit: totalCloudLimit,
-          ai_credits_limit: freeAiLimit,
+          ai_credits_limit: totalAiLimit,
         })
         .eq('id', userId)
         .then(() => {})
         .catch(() => {});
     }
-
-    const tier = profile.subscription_tier || 'free';
 
     return {
       is_admin: profile.is_admin || false,
@@ -386,18 +419,23 @@ export async function getUserSubscription(userId) {
 
 /**
  * Check whether user has sufficient AI credits to make a request
+ * @param {string} userId
+ * @param {number} requiredCredits - 1 for chart mode, 2 for template mode
  */
-export async function canConsumeAiCredit(userId) {
+export async function canConsumeAiCredit(userId, requiredCredits = 1) {
   const sub = await getUserSubscription(userId);
   if (!sub) {
     return { allowed: false, error: 'User not found' };
   }
 
-  if (sub.ai_credits_remaining <= 0) {
+  if (sub.ai_credits_remaining < requiredCredits) {
     return {
       allowed: false,
       subscription: sub,
-      error: 'You have used all your AI credits. Purchase an AI Credits pack ($2 Lite or $5 Pro) to continue generating charts.',
+      requiredCredits,
+      error: requiredCredits > 1
+        ? `Template mode requires ${requiredCredits} AI credits, but you have ${sub.ai_credits_remaining} remaining. Top up your AI credits to continue.`
+        : 'You have used all your AI credits. Purchase an AI Credits pack ($2 Lite or $5 Pro) to continue generating charts.',
     };
   }
 
@@ -405,19 +443,36 @@ export async function canConsumeAiCredit(userId) {
 }
 
 /**
- * Deduct 1 AI credit:
+ * Deduct AI credits (1 for chart mode, 2 for template mode):
  * Priority 1: Monthly Free AI Credits (10/month)
  * Priority 2: Purchased AI Credits (Never Expire)
- * Returns the updated subscription state along with `deducted_bucket: 'free' | 'purchased'`.
+ * Supports multi-credit deductions across free and purchased pools.
+ * Returns the updated subscription state along with `deducted_amount`, `deducted_free`, `deducted_purchased`, and `deducted_bucket`.
+ * @param {string} userId
+ * @param {number} amount - Credits to deduct (default 1)
  */
-export async function deductAiCredit(userId) {
+export async function deductAiCredit(userId, amount = 1) {
   try {
     const sub = await getUserSubscription(userId);
     if (!sub) return null;
 
-    // Priority 1: Consume from Monthly Free AI Credits (10/month)
-    if (sub.free_ai_credits_remaining > 0) {
-      const nextUsed = sub.free_ai_credits_used + 1;
+    if (sub.ai_credits_remaining < amount) {
+      return {
+        ...sub,
+        success: false,
+        exhausted: true,
+        requiredCredits: amount,
+        deducted_bucket: 'none',
+      };
+    }
+
+    const freeAvailable = sub.free_ai_credits_remaining || 0;
+    const freeToDeduct = Math.min(amount, freeAvailable);
+    const purchasedToDeduct = amount - freeToDeduct;
+
+    // Deduct free credits from profile if any
+    if (freeToDeduct > 0) {
+      const nextUsed = sub.free_ai_credits_used + freeToDeduct;
       const { error } = await supabaseAdminClient
         .from('profiles')
         .update({ ai_credits_used: nextUsed })
@@ -427,44 +482,30 @@ export async function deductAiCredit(userId) {
         console.error('Failed to deduct free AI credit:', error.message);
         return null;
       }
-
-      const updated = await getUserSubscription(userId);
-      return {
-        ...updated,
-        success: true,
-        deducted_bucket: 'free',
-      };
     }
 
-    // Priority 2: Consume from Purchased (Never-Expiring) AI Credits
-    if (sub.purchased_ai_credits > 0) {
+    // Deduct purchased credits from wallet state if any
+    if (purchasedToDeduct > 0) {
       const walletState = await readUserWalletState(userId);
-      if (walletState.purchased_ai_credits <= 0) {
-        return {
-          ...sub,
-          success: false,
-          exhausted: true,
-          deducted_bucket: 'none',
-        };
-      }
-
-      walletState.purchased_ai_credits = Math.max(0, walletState.purchased_ai_credits - 1);
+      walletState.purchased_ai_credits = Math.max(0, (walletState.purchased_ai_credits || 0) - purchasedToDeduct);
       await writeUserWalletState(userId, walletState);
-
-      const updated = await getUserSubscription(userId);
-      return {
-        ...updated,
-        success: true,
-        deducted_bucket: 'purchased',
-      };
     }
 
-    // Both buckets exhausted
+    const updated = await getUserSubscription(userId);
+    const bucket =
+      freeToDeduct > 0 && purchasedToDeduct > 0
+        ? 'split'
+        : freeToDeduct > 0
+        ? 'free'
+        : 'purchased';
+
     return {
-      ...sub,
-      success: false,
-      exhausted: true,
-      deducted_bucket: 'none',
+      ...updated,
+      success: true,
+      deducted_amount: amount,
+      deducted_free: freeToDeduct,
+      deducted_purchased: purchasedToDeduct,
+      deducted_bucket: bucket,
     };
   } catch (error) {
     console.error('Error deducting AI credit:', error);
@@ -473,42 +514,56 @@ export async function deductAiCredit(userId) {
 }
 
 /**
- * Refund 1 AI credit when an upstream AI generation fails or is aborted.
+ * Refund AI credits when an upstream AI generation fails or is aborted.
  * Refunds back to the exact bucket ('free' or 'purchased') that was deducted.
+ * Supports refunding breakdown object { free, purchased } or legacy bucket string.
+ * @param {string} userId
+ * @param {string | { free?: number, purchased?: number, amount?: number, bucket?: string }} details
  */
-export async function refundAiCredit(userId, bucket = 'free') {
+export async function refundAiCredit(userId, details = 'free') {
   if (!userId) return null;
   try {
-    if (bucket === 'purchased') {
+    let freeToRefund = 0;
+    let purchasedToRefund = 0;
+
+    if (typeof details === 'string') {
+      if (details === 'purchased') {
+        purchasedToRefund = 1;
+      } else {
+        freeToRefund = 1;
+      }
+    } else if (typeof details === 'object' && details !== null) {
+      freeToRefund = Number(details.free) || 0;
+      purchasedToRefund = Number(details.purchased) || 0;
+      if (freeToRefund === 0 && purchasedToRefund === 0) {
+        if (details.bucket === 'purchased') {
+          purchasedToRefund = Number(details.amount) || 1;
+        } else {
+          freeToRefund = Number(details.amount) || 1;
+        }
+      }
+    }
+
+    if (purchasedToRefund > 0) {
       const walletState = await readUserWalletState(userId);
-      walletState.purchased_ai_credits = (walletState.purchased_ai_credits || 0) + 1;
+      walletState.purchased_ai_credits = (walletState.purchased_ai_credits || 0) + purchasedToRefund;
       await writeUserWalletState(userId, walletState);
-      return await getUserSubscription(userId);
     }
 
-    // Default: refund back to monthly free AI credits bucket
-    const { data: profile, error } = await supabaseAdminClient
-      .from('profiles')
-      .select('ai_credits_used')
-      .eq('id', userId)
-      .single();
+    if (freeToRefund > 0) {
+      const { data: profile, error } = await supabaseAdminClient
+        .from('profiles')
+        .select('ai_credits_used')
+        .eq('id', userId)
+        .single();
 
-    if (error || !profile) {
-      console.warn('Could not fetch profile to refund credit:', error?.message);
-      return null;
-    }
-
-    const currentUsed = profile.ai_credits_used ?? 0;
-    if (currentUsed <= 0) return await getUserSubscription(userId);
-
-    const { error: updateError } = await supabaseAdminClient
-      .from('profiles')
-      .update({ ai_credits_used: Math.max(0, currentUsed - 1) })
-      .eq('id', userId);
-
-    if (updateError) {
-      console.error('Failed to update profile for refundAiCredit:', updateError.message);
-      return null;
+      if (!error && profile) {
+        const currentUsed = profile.ai_credits_used ?? 0;
+        await supabaseAdminClient
+          .from('profiles')
+          .update({ ai_credits_used: Math.max(0, currentUsed - freeToRefund) })
+          .eq('id', userId);
+      }
     }
 
     return await getUserSubscription(userId);
@@ -574,9 +629,10 @@ export async function fulfillCreditPackPurchase({
   let expiresAtIso = null;
 
   if (pack.category === 'ai') {
-    // 1. Add never-expiring AI credits (+15 for Lite, +60 for Pro)
+    // 1. Add never-expiring AI credits (+30 for Lite, +100 for Pro)
     aiCreditsAdded = pack.aiCredits;
-    walletState.purchased_ai_credits += aiCreditsAdded;
+    walletState.purchased_ai_credits = (walletState.purchased_ai_credits || 0) + aiCreditsAdded;
+    walletState.total_purchased_ai_credits = (walletState.total_purchased_ai_credits || 0) + aiCreditsAdded;
 
     // 2. Grant +5 permanent cloud save credits ONLY on the user's very first AI pack purchase
     if (!walletState.first_ai_bonus_claimed) {

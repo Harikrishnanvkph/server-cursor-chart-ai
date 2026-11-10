@@ -58,29 +58,39 @@ export class ChartProcessor {
 
       let searchResults = null;
       let searchWarning = null;
+      const searchInfo = {
+        enabled: Boolean(webSearch),
+        query: null,
+        provider: searchProvider || (webSearch ? (this.adapter.serviceName === 'deepseek' ? 'deepseek' : 'tavily') : null),
+        sources: []
+      };
+
       if (webSearch && !this.adapter.hasNativeSearch) {
         let searchQuery = inputText;
         try {
           const queryDecision = await searchService.determineSearchQuery(inputText, [], this.adapter.serviceName);
-          if (queryDecision === 'NO_SEARCH') {
-            searchQuery = null;
-            console.log('ℹ️ [WebSearch] Query optimizer determined NO_SEARCH is needed for generation.');
-          } else if (queryDecision) {
+          if (queryDecision && queryDecision !== 'NO_SEARCH') {
             searchQuery = queryDecision;
+          } else {
+            console.log('ℹ️ [WebSearch] Query optimizer returned NO_SEARCH for generation; falling back to input text so search is guaranteed.');
+            searchQuery = inputText;
           }
         } catch (queryErr) {
           console.warn('⚠️ [WebSearch] Query optimizer error, falling back to user input:', queryErr.message);
         }
 
         if (searchQuery) {
-          // Ensure search query stays within Tavily API limit (350 chars)
-          if (searchQuery.length > 350) {
-            searchQuery = searchQuery.substring(0, 350);
+          const providerToUse = searchProvider || (this.adapter.serviceName === 'deepseek' ? 'deepseek' : null);
+          const charLimit = providerToUse === 'deepseek' ? 128 : 350;
+          if (searchQuery.length > charLimit) {
+            searchQuery = searchQuery.substring(0, charLimit);
           }
+          searchInfo.query = searchQuery;
+          searchInfo.provider = providerToUse || searchService.activeProvider.name;
 
           try {
-            searchResults = searchProvider
-              ? await searchService.searchWithProvider(searchQuery, searchProvider)
+            searchResults = providerToUse
+              ? await searchService.searchWithProvider(searchQuery, providerToUse)
               : await searchService.search(searchQuery);
           } catch (searchError) {
             console.error('❌ [WebSearch] Search failed:', searchError.message);
@@ -115,7 +125,9 @@ export class ChartProcessor {
 
       // Ensure user_message exists
       if (!chartData.user_message) {
-        chartData.user_message = `Chart generated successfully using ${this.adapter.serviceName}`;
+        chartData.user_message = searchInfo.query
+          ? `Chart generated using real-time web search (${searchInfo.provider || 'web'})`
+          : `Chart generated successfully using ${this.adapter.serviceName}`;
       }
 
       if (searchWarning) {
@@ -155,7 +167,7 @@ export class ChartProcessor {
       }
 
       // Add metadata
-      chartData._metadata = this.buildMetadata(response, model);
+      chartData._metadata = this.buildMetadata(response, model, searchInfo);
 
       return chartData;
 
@@ -181,6 +193,13 @@ export class ChartProcessor {
 
       let searchResults = null;
       let searchWarning = null;
+      const searchInfo = {
+        enabled: Boolean(webSearch),
+        query: null,
+        provider: searchProvider || (webSearch ? (this.adapter.serviceName === 'deepseek' ? 'deepseek' : 'tavily') : null),
+        sources: []
+      };
+
       if (webSearch && !this.adapter.hasNativeSearch) {
         let searchQuery = inputText;
         try {
@@ -196,14 +215,17 @@ export class ChartProcessor {
         }
 
         if (searchQuery) {
-          // Ensure search query stays within Tavily API limit (350 chars)
-          if (searchQuery.length > 350) {
-            searchQuery = searchQuery.substring(0, 350);
+          const providerToUse = searchProvider || (this.adapter.serviceName === 'deepseek' ? 'deepseek' : null);
+          const charLimit = providerToUse === 'deepseek' ? 128 : 350;
+          if (searchQuery.length > charLimit) {
+            searchQuery = searchQuery.substring(0, charLimit);
           }
+          searchInfo.query = searchQuery;
+          searchInfo.provider = providerToUse || searchService.activeProvider.name;
 
           try {
-            searchResults = searchProvider
-              ? await searchService.searchWithProvider(searchQuery, searchProvider)
+            searchResults = providerToUse
+              ? await searchService.searchWithProvider(searchQuery, providerToUse)
               : await searchService.search(searchQuery);
           } catch (searchError) {
             console.error('❌ [WebSearch] Search failed:', searchError.message);
@@ -279,7 +301,7 @@ export class ChartProcessor {
       }
 
       // Add metadata
-      chartData._metadata = this.buildMetadata(response, model);
+      chartData._metadata = this.buildMetadata(response, model, searchInfo);
 
       return chartData;
 
@@ -912,9 +934,10 @@ The user explicitly requested a "grouped chart" or multiple comparative metrics 
    * Build metadata object
    * @param {Object} response - API response
    * @param {string} model - Model used
+   * @param {Object|null} searchInfo - Search execution details
    * @returns {Object} - Metadata object
    */
-  buildMetadata(response, model) {
+  buildMetadata(response, model, searchInfo = null) {
     if (response.usage) {
       console.log(`📊 [${this.adapter.serviceName.toUpperCase()} Telemetry] Sent: ${response.usage.sent} | Received: ${response.usage.received} | Total: ${response.usage.total}`);
     }
@@ -924,7 +947,11 @@ The user explicitly requested a "grouped chart" or multiple comparative metrics 
       model: model,
       timestamp: new Date().toISOString(),
       tokens_used: response.tokensUsed || null,
-      usage: response.usage || null
+      usage: response.usage || null,
+      webSearch: searchInfo?.enabled || false,
+      searchQuery: searchInfo?.query || null,
+      searchProvider: searchInfo?.provider || null,
+      searchSources: searchInfo?.sources || []
     };
 
     // Add service-specific metadata
@@ -1171,7 +1198,7 @@ The user explicitly requested a "grouped chart" or multiple comparative metrics 
 
         const promise = (async () => {
           // If a non-duplicate URL was already provided (e.g., user-preserved or search-grounded), verify it first
-          if (isUrl(currentImg) && !isDuplicate) {
+          if (isUrl(currentImg) && !isDuplicate && !isPlaceholderImageUrl(currentImg)) {
             const normalizedExisting = normalizeWikimediaUrl(currentImg);
             if (await validateImageUrl(normalizedExisting)) {
               ds.pointImages[idx] = normalizedExisting;
@@ -1225,61 +1252,47 @@ function parsePointImageMeta(rawMeta, cleanLabel, userPrompt = '', chartTitle = 
     query = rawMeta.trim();
   }
 
-  // Derive cleanEntityName from wikiTitle or cleanLabel (never from the long web search query)
-  const rawEntityBase = wikiTitle
-    ? wikiTitle.replace(/_/g, ' ').replace(/\s*\([^)]*\)\s*/g, ' ')
-    : cleanLabel;
+  const rawEntityBase = (wikiTitle ? wikiTitle.replace(/_/g, ' ').replace(/\s*\([^)]*\)\s*/g, ' ') : '') || cleanLabel;
   const cleanEntityName = rawEntityBase
-    .replace(/\b(official\s+photo|profile\s+photo|face\s+profile\s+photo|portrait\s+photo|official\s+portrait|portrait|headshot|official\s+logo|brand\s+logo|logo\s+png|logo|flag|official\s+poster|movie\s+poster|film\s+poster|poster|product\s+photo|photo|picture|image|icon)\b/gi, '')
+    .replace(/\b(official|profile|face|portrait|headshot|brand|logo|png|svg|flag|poster|movie|film|product|photo|picture|image|icon)\b/gi, '')
     .replace(/\s+/g, ' ')
     .trim() || cleanLabel;
 
-  // Infer entity type if not explicitly provided or invalid
+  // Normalize entity type from LLM metadata (with lightweight fallback only when LLM omits type)
   const validTypes = new Set(['person', 'company', 'country', 'media', 'product', 'place', 'object']);
-  if (!validTypes.has(type)) {
-    const inspectStr = `${query} ${cleanLabel} ${context} ${contextLower}`.toLowerCase();
-    const directCountryCode = getCountryCode(cleanLabel);
+  if (type === 'logo' || type === 'brand' || type === 'software') type = 'company';
+  if (type === 'flag') type = 'country';
 
-    if (wantsFlags || (directCountryCode && /\b(country|countries|nation|nations|gdp|population|export|import|olympic|continent|world|global|tariff|economy|economies|flag)\b/i.test(contextLower))) {
+  // If the LLM's own search query or domain indicates a brand/logo lookup, route to the logo pipeline
+  if (domain || /\b(logo|icon)\b/i.test(query)) {
+    type = 'company';
+  }
+
+  if (!validTypes.has(type)) {
+    const directCountryCode = getCountryCode(cleanLabel);
+    if (wantsFlags || directCountryCode) {
       type = 'country';
       if (!countryCode && directCountryCode) countryCode = directCountryCode;
-    } else if (domain || KNOWN_COMPANY_DOMAINS[cleanLabel.toLowerCase()] || /\b(logo|brand|company|companies|corporation|bank|banks|startup|startups|airline|airlines|automaker|stock|market\s+cap|revenue|valuation|tech\s+giant|insurer|retailer|exchange|crypto)\b/i.test(inspectStr)) {
+    } else if (/\b(people|person|persons|man|men|woman|women|researcher|researchers|scientist|scientists|founder|founders|leader|leaders|author|authors|singer|singers|actor|actors|actress|actresses|player|players|billionaire|billionaires|executive|executives|artist|artists|director|directors|athlete|athletes|engineer|engineers|politician|politicians|musician|musicians|celebrity|celebrities)\b/i.test(contextLower)) {
+      type = 'person';
+    } else if (/\b(model|models|ai|llm|software|app|apps|platform|tool|tools|engine|browser|company|companies|brand|brands|startup|startups|crypto|token|coin|currency|exchange)\b/i.test(contextLower)) {
       type = 'company';
-    } else if (/\b(movie|movies|film|films|cinema|box\s+office|song|songs|album|albums|show|series|anime|game|games|book|books|novel|novels|soundtrack|actor|starring|director)\b/i.test(inspectStr)) {
+    } else if (/\b(movie|movies|film|films|song|songs|album|albums|track|tracks|series|anime|game|games|book|books)\b/i.test(contextLower)) {
       type = 'media';
-    } else if (/\b(iphone|galaxy|pixel|macbook|laptop|smartphone|phone|car|cars|vehicle|ev|suv|truck|console|gpu|processor|chip|watch|headphone|camera|device|model)\b/i.test(inspectStr)) {
+    } else if (/\b(car|cars|phone|phones|smartphone|smartphones|laptop|laptops|console|device|devices|hardware)\b/i.test(contextLower)) {
       type = 'product';
-    } else if (/\b(city|cities|landmark|landmarks|mountain|mountains|peak|river|building|tower|temple|monument|island|beach|airport|stadium|park|bridge|state|province|tourism|destination)\b/i.test(inspectStr)) {
-      type = 'place';
-    } else if (/\b(food|fruit|vegetable|drink|beverage|coffee|tea|dish|cuisine|animal|breed|bird|dog|cat|flower|plant|metal|commodity|element|vitamin|sport)\b/i.test(inspectStr)) {
-      type = 'object';
     } else {
       type = 'person';
     }
-  }
-
-  if (type === 'company' && !domain) {
-    domain = KNOWN_COMPANY_DOMAINS[cleanLabel.toLowerCase()] || KNOWN_COMPANY_DOMAINS[cleanEntityName.toLowerCase()] || '';
   }
 
   if (type === 'country' && !countryCode) {
     countryCode = getCountryCode(cleanLabel) || getCountryCode(cleanEntityName) || '';
   }
 
-  // Build disambiguated web search query if missing or too generic
-  if (!query || query.toLowerCase() === cleanLabel.toLowerCase()) {
+  if (!query) {
     const contextHint = context || extractPromptTopicHint(userPrompt, chartTitle, cleanLabel);
-    if (type === 'company') {
-      query = `${cleanLabel} ${contextHint} official logo png`.replace(/\s+/g, ' ').trim();
-    } else if (type === 'media') {
-      query = `${cleanLabel} ${contextHint} official poster`.replace(/\s+/g, ' ').trim();
-    } else if (type === 'product') {
-      query = `${cleanLabel} ${contextHint} official product photo`.replace(/\s+/g, ' ').trim();
-    } else if (type === 'person') {
-      query = `${cleanLabel} ${contextHint} portrait photo`.replace(/\s+/g, ' ').trim();
-    } else {
-      query = `${cleanLabel} ${contextHint} photo`.replace(/\s+/g, ' ').trim();
-    }
+    query = `${cleanLabel} ${contextHint}`.replace(/\s+/g, ' ').trim();
   }
 
   const contextTokens = extractContextTokens(`${context} ${query} ${userPrompt} ${chartTitle}`, cleanLabel);
@@ -1396,8 +1409,8 @@ async function resolveEntityImage(meta, cleanLabel, userPrompt = '', chartTitle 
   const resolveWithNetwork = async () => {
     // 1. COMPANY / BRAND / STARTUP / CRYPTO PIPELINE
     if (meta.type === 'company') {
-      // 1a. Free source: Wikimedia Commons official vector/PNG logo file
-      const wikiLogo = await fetchWikimediaLogo(meta.cleanEntityName, cleanLabel);
+      // 1a. Free source: Wikimedia Commons / Wikipedia official vector/PNG logo file
+      const wikiLogo = await fetchWikimediaLogo(meta, cleanLabel);
       if (wikiLogo && await validateImageUrl(wikiLogo, 2000)) {
         return wikiLogo;
       }
@@ -1418,7 +1431,6 @@ async function resolveEntityImage(meta, cleanLabel, userPrompt = '', chartTitle 
 
       // 1d. LIVE WEB IMAGE SEARCH (Brave Images + Tavily Images)
       // Triggered ONLY if free sources were missing or returned a 404 / broken URL.
-      // Fetches real, high-resolution logos directly from the live web.
       const webLogo = await fetchWebImageWithContext(meta, cleanLabel);
       if (webLogo) return webLogo;
 
@@ -1504,7 +1516,7 @@ async function resolveEntityImage(meta, cleanLabel, userPrompt = '', chartTitle 
   try {
     const resultUrl = await Promise.race([
       resolveWithNetwork(),
-      new Promise(resolve => setTimeout(() => resolve(null), 6500))
+      new Promise(resolve => setTimeout(() => resolve(null), 9500))
     ]);
 
     if (resultUrl) {
@@ -1517,67 +1529,74 @@ async function resolveEntityImage(meta, cleanLabel, userPrompt = '', chartTitle 
 }
 
 /**
- * Search Wikipedia and Wikimedia Commons File namespace specifically for official brand/company logos
+ * Search Wikipedia and Wikimedia Commons File namespace (gsrnamespace=6) for official vector/PNG logos
+ * using the LLM-supplied wikiTitle, query, and label — no hardcoded brand lists.
  */
-async function fetchWikimediaLogo(cleanEntityName, rawLabel) {
-  const baseName = (rawLabel || cleanEntityName || '')
-    .replace(/\b(inc\.?|corp\.?|corporation|ltd\.?|limited|plc|llc|group|holdings|co\.?)\b/gi, '')
-    .replace(/[^\w\s&-]/g, ' ')
+async function fetchWikimediaLogo(meta, rawLabel) {
+  const cleanTerm = (str) => String(str || '')
+    .replace(/_/g, ' ')
+    .replace(/\s*\([^)]*\)\s*/g, ' ')
+    .replace(/\b(inc\.?|corp\.?|corporation|ltd\.?|limited|plc|llc|group|holdings|co\.?|official|brand|logo|icon|symbol|png|svg|photo|image)\b/gi, ' ')
+    .replace(/[^\w\s&.-]/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
-  if (!baseName) return null;
+
+  const searchTerms = [...new Set([
+    cleanTerm(meta.wikiTitle),
+    cleanTerm(rawLabel),
+    cleanTerm(meta.query)
+  ].filter(t => t && t.length >= 2))];
+
+  if (!searchTerms.length) return null;
 
   const endpoints = [
     'https://en.wikipedia.org/w/api.php',
     'https://commons.wikimedia.org/w/api.php'
   ];
 
-  const searchVariants = [`${baseName} logo`, `${baseName} icon`];
+  for (const term of searchTerms) {
+    const searchVariants = [`${term} logo`, `${term} icon`];
+    const entityWords = term.toLowerCase().split(/\W+/).filter(w => w.length > 1);
 
-  for (const endpoint of endpoints) {
-    for (const searchQuery of searchVariants) {
-      try {
-        const url = `${endpoint}?action=query&generator=search&gsrsearch=${encodeURIComponent(searchQuery)}&gsrnamespace=6&gsrlimit=6&prop=imageinfo&iiprop=url&iiurlwidth=500&format=json`;
-        const res = await fetch(url, {
-          headers: { 'User-Agent': 'ChartGeneratorBot/1.0 (https://chartgenerator.app; support@chartgenerator.app)' }
-        });
+    for (const endpoint of endpoints) {
+      for (const searchQuery of searchVariants) {
+        try {
+          const url = `${endpoint}?action=query&generator=search&gsrsearch=${encodeURIComponent(searchQuery)}&gsrnamespace=6&gsrlimit=6&prop=imageinfo&iiprop=url&iiurlwidth=500&format=json`;
+          const res = await fetch(url, {
+            headers: { 'User-Agent': 'ChartGeneratorBot/1.0 (https://chartgenerator.app; support@chartgenerator.app)' }
+          });
 
-        if (!res.ok) continue;
-        const data = await res.json();
-        const pages = data.query?.pages ? Object.values(data.query.pages) : [];
-        if (!pages.length) continue;
+          if (!res.ok) continue;
+          const data = await res.json();
+          const pages = data.query?.pages ? Object.values(data.query.pages) : [];
+          if (!pages.length) continue;
 
-        const entityWords = baseName.toLowerCase().split(/\W+/).filter(w => w.length > 1);
-        let bestUrl = null;
-        let bestScore = -1;
+          let bestUrl = null;
+          let bestScore = -1;
 
-        for (const page of pages) {
-          const titleLower = (page.title || '').toLowerCase();
-          const thumbUrl = page.imageinfo?.[0]?.thumburl || page.imageinfo?.[0]?.url;
-          if (!thumbUrl) continue;
+          for (const page of pages) {
+            const titleLower = (page.title || '').toLowerCase();
+            const thumbUrl = page.imageinfo?.[0]?.thumburl || page.imageinfo?.[0]?.url;
+            if (!thumbUrl) continue;
 
-          // Skip non-logo files like building photos, store interiors, white-on-transparent logos, or maps
-          if (/\b(building|headquarters|office|store|shop|campus|map|founder|ceo|chart|graph|white|policies)\b/i.test(titleLower)) {
-            continue;
+            let score = 0;
+            for (const w of entityWords) {
+              if (titleLower.includes(w)) score += 4;
+            }
+            if (/\b(logo|icon|symbol|emblem|wordmark|badge)\b/i.test(titleLower)) score += 5;
+            if (titleLower.endsWith('.svg') || titleLower.endsWith('.png') || titleLower.endsWith('.webp')) score += 3;
+            if (typeof page.index === 'number') score -= page.index * 0.5;
+
+            if (score > bestScore && score >= 8) {
+              bestScore = score;
+              bestUrl = normalizeWikimediaUrl(thumbUrl);
+            }
           }
 
-          let score = 0;
-          for (const w of entityWords) {
-            if (titleLower.includes(w)) score += 4;
-          }
-          if (/\b(logo|icon|symbol|emblem|wordmark|badge)\b/i.test(titleLower)) score += 5;
-          if (titleLower.endsWith('.svg') || titleLower.endsWith('.png') || titleLower.endsWith('.webp')) score += 3;
-          if (typeof page.index === 'number') score -= page.index * 0.5;
-
-          if (score > bestScore && score >= 5) {
-            bestScore = score;
-            bestUrl = normalizeWikimediaUrl(thumbUrl);
-          }
+          if (bestUrl) return bestUrl;
+        } catch (e) {
+          // Continue
         }
-
-        if (bestUrl) return bestUrl;
-      } catch (e) {
-        // Continue to next endpoint or variant
       }
     }
   }
@@ -1593,17 +1612,25 @@ async function fetchWikimediaLogo(cleanEntityName, rawLabel) {
  */
 async function fetchContextScoredWikiImage(meta, cleanLabel) {
   const headers = { 'User-Agent': 'ChartGeneratorBot/1.0 (https://chartgenerator.app; support@chartgenerator.app)' };
-  const isBadPersonImage = (sourceUrl) => {
-    if (meta.type !== 'person') return false;
+  const isUnsuitableImage = (sourceUrl, pageDesc = '') => {
     const lower = decodeURIComponent(String(sourceUrl || '')).toLowerCase();
-    return /(?:^|[^a-z0-9])(signature|autograph|plaque|grave|tomb|memorial|statue|map|coat_of_arms|flag_of|flag|logo)(?:$|[^a-z0-9])/i.test(lower);
+    if (isPlaceholderImageUrl(lower)) return true;
+
+    if (meta.type === 'person') {
+      return /(?:^|[^a-z0-9])(signature|autograph|plaque|grave|tomb|memorial|statue|map|coat_of_arms|flag_of|flag|logo|building|headquarters|office)(?:$|[^a-z0-9])/i.test(lower);
+    }
+    // When looking for a logo/company/software/model/product, Wikipedia article pageimages are often .jpg photos of office buildings
+    // (like '1515_Third_Street.jpg' on OpenAI's page). Only accept an article image if it is actually a logo/icon/SVG.
+    if (meta.type === 'company' || meta.type === 'software' || meta.type === 'product' || meta.type === 'model' || meta.type === 'ai') {
+      const isLogoOrSvg = /\b(logo|icon|symbol|emblem|wordmark|badge)\b/i.test(lower) || /\.svg(?:\b|\.|\/|$)/i.test(lower);
+      const isBuildingOrStreet = /\b(building|headquarters|office|street|exterior|facade|campus|entrance|avenue|road|interior|room|tower)\b/i.test(lower) ||
+        /\b(building|headquarters|office|street|exterior|facade|campus|entrance|avenue|road|interior|room|tower)\b/i.test(pageDesc);
+      if (isBuildingOrStreet || !isLogoOrSvg) {
+        return true;
+      }
+    }
+    return false;
   };
-  const isBadCompanyImage = (sourceUrl) => {
-    if (meta.type !== 'company') return false;
-    const lower = decodeURIComponent(String(sourceUrl || '')).toLowerCase();
-    return /(?:^|[^a-z0-9])(aerial|campus|building|headquarters|office|store|shop|factory|facility|founder|ceo|executive|chart|graph|map|flag)(?:$|[^a-z0-9])/i.test(lower);
-  };
-  const isUnsuitableImage = (sourceUrl) => isBadPersonImage(sourceUrl) || isBadCompanyImage(sourceUrl);
 
   try {
     // 1. Explicit canonical Wikipedia Title lookup ONLY when wikiTitle is explicitly provided by the LLM
@@ -1619,7 +1646,7 @@ async function fetchContextScoredWikiImage(meta, cleanLabel) {
           if (desc.includes('topics referred to by the same term') || desc.includes('disambiguation')) continue;
 
           const thumb = page.thumbnail?.source;
-          if (thumb && !isUnsuitableImage(thumb)) {
+          if (thumb && !isUnsuitableImage(thumb, desc)) {
             return normalizeWikimediaUrl(thumb);
           }
         }
@@ -1627,8 +1654,13 @@ async function fetchContextScoredWikiImage(meta, cleanLabel) {
     }
 
     // 2. Multi-candidate Wikipedia search (gsrlimit=5) with context scoring
-    // Search with disambiguated query/context first so homonyms (e.g. 'Michael Jordan machine learning' vs NBA) are ranked properly
-    const searchQueries = [];
+    // Search the exact clean entity name first so direct hits rank #1 without query dilution
+    const searchQueries = [
+      meta.cleanEntityName
+    ];
+    if (cleanLabel && cleanLabel !== meta.cleanEntityName) {
+      searchQueries.push(cleanLabel);
+    }
     if (meta.context) {
       searchQueries.push(`${meta.cleanEntityName} ${meta.context}`.trim());
     }
@@ -1637,11 +1669,9 @@ async function fetchContextScoredWikiImage(meta, cleanLabel) {
         .replace(/\b(official\s+photo|profile\s+photo|face\s+profile\s+photo|portrait\s+photo|official\s+portrait|portrait|headshot|official\s+logo|brand\s+logo|logo\s+png|official\s+poster|movie\s+poster|film\s+poster|product\s+photo|photo|picture|image|icon)\b/gi, '')
         .replace(/\s+/g, ' ')
         .trim();
-      if (cleanedQuery) searchQueries.push(cleanedQuery);
-    }
-    searchQueries.push(meta.cleanEntityName);
-    if (cleanLabel !== meta.cleanEntityName) {
-      searchQueries.push(cleanLabel);
+      if (cleanedQuery && !searchQueries.includes(cleanedQuery)) {
+        searchQueries.push(cleanedQuery);
+      }
     }
 
     for (const sQuery of [...new Set(searchQueries)].filter(Boolean)) {
@@ -1669,7 +1699,7 @@ async function fetchContextScoredWikiImage(meta, cleanLabel) {
         }
 
         const thumb = page.thumbnail?.source;
-        if (!thumb || isUnsuitableImage(thumb)) continue;
+        if (!thumb || isUnsuitableImage(thumb, desc)) continue;
 
         if (score > bestThumbScore) {
           bestThumbScore = score;
@@ -1699,7 +1729,8 @@ async function fetchContextScoredWikiImage(meta, cleanLabel) {
         const restData = await restRes.json();
         if (restData.type !== 'disambiguation') {
           const src = restData.thumbnail?.source || restData.originalimage?.source;
-          if (src && !isUnsuitableImage(src)) {
+          const restDesc = (restData.description || '').toLowerCase();
+          if (src && !isUnsuitableImage(src, restDesc)) {
             return normalizeWikimediaUrl(src);
           }
         }
@@ -1753,6 +1784,17 @@ function scoreWikiCandidate(page, meta, cleanLabel) {
 
   // Category alignment bonus/penalty
   if (meta.type === 'person') {
+    const entityWords = cleanEntityLower.split(/\W+/).filter(w => w.length > 2);
+    // If the person has multiple name parts (e.g. 'Sam Altman', 'Arthur Mensch', 'Tim Cook'),
+    // require ALL significant words of the person's name to be present in the candidate title.
+    // This strictly prevents matching unrelated people sharing only a surname or first name (e.g. Robert Altman, Louise Mensch).
+    if (entityWords.length >= 2) {
+      const allWordsPresent = entityWords.every(w => titleLower.includes(w));
+      if (!allWordsPresent) {
+        return -100;
+      }
+    }
+
     if (/\b(born|politician|actor|actress|singer|player|cricketer|footballer|businessman|billionaire|entrepreneur|ceo|founder|author|writer|scientist|professor|director|athlete|leader|president|minister)\b/i.test(descLower)) {
       score += 5;
     }
@@ -1791,7 +1833,17 @@ function scoreWikiCandidate(page, meta, cleanLabel) {
  * 2. Tavily Search API (`include_images: true`, `include_image_descriptions: true`)
  */
 async function fetchWebImageWithContext(meta, cleanLabel) {
-  const searchQuery = meta.query || cleanLabel;
+  let searchQuery = meta.query || cleanLabel;
+  // Construct clean, high-precision targeted web image query by entity type to avoid query dilution
+  if (meta.type === 'person') {
+    searchQuery = `${meta.cleanEntityName || cleanLabel} photo`;
+  } else if (meta.type === 'company') {
+    searchQuery = `${meta.cleanEntityName || cleanLabel} logo`;
+  } else if (meta.type === 'media') {
+    searchQuery = `${meta.cleanEntityName || cleanLabel} poster`;
+  } else if (meta.type === 'product') {
+    searchQuery = `${meta.cleanEntityName || cleanLabel} product`;
+  }
 
   // 1. Try Brave Dedicated Image Search API first if BRAVE_SEARCH_API_KEY is configured
   if (process.env.BRAVE_SEARCH_API_KEY) {
@@ -1847,6 +1899,24 @@ async function fetchBraveImageSearch(query, meta, cleanLabel) {
 
   const entityWords = (meta.cleanEntityName || cleanLabel).toLowerCase().split(/\W+/).filter(w => w.length > 2);
 
+  const isBadCandidateUrl = (url, titleLower = '') => {
+    if (!url) return true;
+    const lower = url.toLowerCase();
+    if (isPlaceholderImageUrl(lower)) return true;
+    if (meta.type === 'person') {
+      if (/(?:^|\/|[?&=_/-])(logo|symbol|icon|badge|banner|favicon|avatar-default|placeholder)\.(?:jpg|jpeg|png|svg|webp)/i.test(lower)) return true;
+      if (lower.includes('/logo/') || lower.includes('/logos/') || lower.includes('/favicon/')) return true;
+      if (/\b(logo|icon|symbol|emblem|flag)\b/i.test(titleLower)) return true;
+    }
+    if (meta.type === 'company' || meta.type === 'software') {
+      if (/\b(building|office|headquarters|street|exterior|facade|campus|entrance)\b/i.test(lower) ||
+          /\b(building|office|headquarters|street|exterior|facade|campus|entrance)\b/i.test(titleLower)) {
+        return true;
+      }
+    }
+    return false;
+  };
+
   // Score candidates by title/source relevance
   const scored = results.map((item, idx) => {
     const titleLower = `${item.title || ''} ${item.source || ''}`.toLowerCase();
@@ -1859,14 +1929,14 @@ async function fetchBraveImageSearch(query, meta, cleanLabel) {
     }
     const directUrl = item.properties?.url;
     const thumbUrl = item.thumbnail?.src;
-    return { directUrl, thumbUrl, score };
+    return { directUrl, thumbUrl, titleLower, score };
   }).sort((a, b) => b.score - a.score);
 
   for (const candidate of scored) {
-    if (candidate.directUrl && await validateImageUrl(candidate.directUrl, 2200)) {
+    if (candidate.directUrl && !isBadCandidateUrl(candidate.directUrl, candidate.titleLower) && await validateImageUrl(candidate.directUrl, 2200)) {
       return candidate.directUrl;
     }
-    if (candidate.thumbUrl && await validateImageUrl(candidate.thumbUrl, 2000)) {
+    if (candidate.thumbUrl && !isBadCandidateUrl(candidate.thumbUrl, candidate.titleLower) && await validateImageUrl(candidate.thumbUrl, 2000)) {
       return candidate.thumbUrl;
     }
   }
@@ -1901,6 +1971,24 @@ async function fetchTavilyImageWithContext(query, meta, cleanLabel) {
 
   const entityWords = (meta.cleanEntityName || cleanLabel).toLowerCase().split(/\W+/).filter(w => w.length > 2);
 
+  const isBadCandidateUrl = (url, inspectText = '') => {
+    if (!url) return true;
+    const lower = url.toLowerCase();
+    if (isPlaceholderImageUrl(lower)) return true;
+    if (meta.type === 'person') {
+      if (/(?:^|\/|[?&=_/-])(logo|symbol|icon|badge|banner|favicon|avatar-default|placeholder)\.(?:jpg|jpeg|png|svg|webp)/i.test(lower)) return true;
+      if (lower.includes('/logo/') || lower.includes('/logos/') || lower.includes('/favicon/')) return true;
+      if (/\b(logo|icon|symbol|emblem|flag)\b/i.test(inspectText)) return true;
+    }
+    if (meta.type === 'company' || meta.type === 'software') {
+      if (/\b(building|office|headquarters|street|exterior|facade|campus|entrance)\b/i.test(lower) ||
+          /\b(building|office|headquarters|street|exterior|facade|campus|entrance)\b/i.test(inspectText)) {
+        return true;
+      }
+    }
+    return false;
+  };
+
   const candidates = data.images
     .map((imgItem, idx) => {
       const rawUrl = typeof imgItem === 'string' ? imgItem : (imgItem.url || '');
@@ -1911,6 +1999,8 @@ async function fetchTavilyImageWithContext(query, meta, cleanLabel) {
       if (/\b(sprite|pixel|spacer|1x1|blank|avatar-default|placeholder)\b/i.test(rawUrl)) return null;
 
       const inspectText = `${desc} ${rawUrl}`.toLowerCase();
+      if (isBadCandidateUrl(rawUrl, inspectText)) return null;
+
       let score = 10 - idx;
 
       for (const w of entityWords) {
@@ -1965,6 +2055,37 @@ function cacheValidation(url, isValid) {
   urlValidationCache.set(url, isValid);
 }
 
+/**
+ * Detect placeholder, dummy, or error image files across Wikimedia Commons and the web
+ * (e.g. 'thumbnail.jpg', 'Name.jpg' with red text, 'placeholder.png', 'no_image.svg').
+ */
+function isPlaceholderImageUrl(url) {
+  if (!url || typeof url !== 'string') return true;
+  const lowerUrl = url.toLowerCase();
+
+  // Specific Wikimedia Commons dummy placeholder image (Name.jpg / thumbnail.jpg)
+  if (
+    lowerUrl.includes('special:filepath/thumbnail.jpg') ||
+    lowerUrl.includes('special:filepath/name.jpg') ||
+    lowerUrl.includes('special:filepath/placeholder') ||
+    lowerUrl.includes('/5/5b/name.jpg') ||
+    lowerUrl.includes('commons/5/5b/name.jpg') ||
+    lowerUrl.includes('thumbnail.jpg') ||
+    lowerUrl.includes('please_choose_a_more_precise_name') ||
+    lowerUrl.includes('please+choose+a+more+precise+name')
+  ) {
+    return true;
+  }
+
+  // Generic placeholder / dummy / no-image filenames across the web
+  const placeholderRegex = /(?:^|\/|[?&=_/-])(thumbnail|placeholder|no_image|no-image|image_needed|image-needed|missing_image|missing-image|name|avatar-default|default_avatar|example|blank_profile)\.(?:jpg|jpeg|png|svg|webp)(?:$|[?&#])/i;
+  if (placeholderRegex.test(lowerUrl)) {
+    return true;
+  }
+
+  return false;
+}
+
 async function checkWikipediaFile(name) {
   const url = `https://commons.wikimedia.org/wiki/Special:FilePath/${encodeURIComponent(name)}?width=500`;
   return await validateImageUrl(url, 2000);
@@ -1972,6 +2093,11 @@ async function checkWikipediaFile(name) {
 
 async function validateImageUrl(url, timeoutMs = 2500) {
   if (!url || typeof url !== 'string' || !url.startsWith('http')) return false;
+
+  // Immediately reject known dummy/placeholder images without network overhead
+  if (isPlaceholderImageUrl(url)) {
+    return false;
+  }
 
   // Trusted ultra-reliable CDN for country flags
   if (url.includes('flagcdn.com')) {
@@ -2012,6 +2138,12 @@ async function validateImageUrl(url, timeoutMs = 2500) {
 
     clearTimeout(timeoutId);
 
+    // If redirected to a placeholder (e.g. Wikimedia redirecting Special:FilePath/thumbnail.jpg to Name.jpg)
+    if (res.url && isPlaceholderImageUrl(res.url)) {
+      cacheValidation(url, false);
+      return false;
+    }
+
     if (res.ok) {
       const contentType = (res.headers.get('content-type') || '').toLowerCase();
       const isValid = contentType.includes('image/') ||
@@ -2029,40 +2161,6 @@ async function validateImageUrl(url, timeoutMs = 2500) {
     return false;
   }
 }
-
-const KNOWN_COMPANY_DOMAINS = {
-  'apple': 'apple.com', 'apple inc': 'apple.com', 'apple inc.': 'apple.com',
-  'microsoft': 'microsoft.com', 'google': 'google.com', 'alphabet': 'abc.xyz',
-  'amazon': 'amazon.com', 'meta': 'meta.com', 'facebook': 'facebook.com',
-  'tesla': 'tesla.com', 'nvidia': 'nvidia.com', 'netflix': 'netflix.com',
-  'samsung': 'samsung.com', 'intel': 'intel.com', 'amd': 'amd.com',
-  'tsmc': 'tsmc.com', 'broadcom': 'broadcom.com', 'oracle': 'oracle.com',
-  'salesforce': 'salesforce.com', 'adobe': 'adobe.com', 'ibm': 'ibm.com',
-  'cisco': 'cisco.com', 'uber': 'uber.com', 'airbnb': 'airbnb.com',
-  'spotify': 'spotify.com', 'paypal': 'paypal.com', 'stripe': 'stripe.com',
-  'shopify': 'shopify.com', 'openai': 'openai.com', 'anthropic': 'anthropic.com',
-  'walmart': 'walmart.com', 'costco': 'costco.com', 'target': 'target.com',
-  'nike': 'nike.com', 'adidas': 'adidas.com', 'coca-cola': 'coca-cola.com',
-  'pepsi': 'pepsi.com', 'mcdonalds': 'mcdonalds.com', "mcdonald's": 'mcdonalds.com',
-  'starbucks': 'starbucks.com', 'disney': 'disney.com', 'sony': 'sony.com',
-  'toyota': 'toyota.com', 'bmw': 'bmw.com', 'mercedes-benz': 'mercedes-benz.com',
-  'ferrari': 'ferrari.com', 'porsche': 'porsche.com', 'ford': 'ford.com',
-  'jpmorgan': 'jpmorganchase.com', 'jpmorgan chase': 'jpmorganchase.com',
-  'goldman sachs': 'goldmansachs.com', 'morgan stanley': 'morganstanley.com',
-  'bank of america': 'bankofamerica.com', 'visa': 'visa.com', 'mastercard': 'mastercard.com',
-  'berkshire hathaway': 'berkshirehathaway.com', 'eli lilly': 'lilly.com',
-  'novo nordisk': 'novonordisk.com', 'johnson & johnson': 'jnj.com',
-  'exxonmobil': 'exxonmobil.com', 'chevron': 'chevron.com', 'shell': 'shell.com',
-  'saudi aramco': 'aramco.com', 'aramco': 'aramco.com', 'lvmh': 'lvmh.com',
-  'reliance': 'ril.com', 'reliance industries': 'ril.com', 'tcs': 'tcs.com',
-  'tata consultancy services': 'tcs.com', 'infosys': 'infosys.com',
-  'hdfc bank': 'hdfcbank.com', 'hdfc': 'hdfcbank.com', 'icici bank': 'icicibank.com',
-  'icici': 'icicibank.com', 'sbi': 'sbi.co.in', 'state bank of india': 'sbi.co.in',
-  'wipro': 'wipro.com', 'bharti airtel': 'airtel.in', 'airtel': 'airtel.in',
-  'zomato': 'zomato.com', 'swiggy': 'swiggy.com', 'flipkart': 'flipkart.com',
-  'paytm': 'paytm.com', 'zepto': 'zeptonow.com', 'ola': 'olacabs.com',
-  'byjus': 'byjus.com', 'razorpay': 'razorpay.com', 'cred': 'cred.club'
-};
 
 const COUNTRY_MAP = {
   'united states': 'us', 'usa': 'us', 'u.s.': 'us', 'u.s.a.': 'us', 'united states of america': 'us', 'america': 'us',

@@ -260,15 +260,23 @@ app.post('/api/process-chart-enhanced', requireAuth, aiLimiter, async (req, res)
     messageHistory,
     templateStructure, // NEW: Template structure metadata for generating template text content
     formatStructure,
+    mode, // NEW: 'template' | 'chart'
     webSearch, // NEW
     searchProvider, // NEW: Override search provider ('brave' | 'tavily')
     includeImages // NEW: Toggle to force image fetching
   } = req.body;
 
   let creditDeducted = false;
-  let deductedBucket = 'free';
+  let deductDetails = null;
   const userId = req.user?.user_id || req.user?.id;
   const abortController = new AbortController();
+
+  // Determine required AI credits: 1 for chart mode, 2 for template/format mode
+  const isTemplateMode =
+    mode === 'template' ||
+    Boolean(templateStructure && Object.keys(templateStructure).length > 0) ||
+    Boolean(formatStructure && Object.keys(formatStructure).length > 0);
+  const requiredCredits = isTemplateMode ? 2 : 1;
 
   // Listen for early client abort / disconnect to kill downstream LLM operations
   req.on('close', () => {
@@ -299,18 +307,27 @@ app.post('/api/process-chart-enhanced', requireAuth, aiLimiter, async (req, res)
     }
 
     // Phase 1: Atomically pre-reserve AI credit before executing expensive LLM inferences
+    // Differential pricing: 1 AI credit for Chart mode, 2 AI credits for Template mode
     let updatedSubscription = null;
     if (userId) {
-      const deductResult = await deductAiCredit(userId);
+      const deductResult = await deductAiCredit(userId, requiredCredits);
       if (!deductResult || deductResult.exhausted || deductResult.success === false) {
         return res.status(403).json({
-          error: 'AI credit limit reached. Purchase an AI Credits pack to continue generating charts.',
+          error: requiredCredits > 1
+            ? `Template mode requires ${requiredCredits} AI credits, but you have ${deductResult?.ai_credits_remaining ?? 0} remaining. Top up your AI credits to continue.`
+            : 'AI credit limit reached. Purchase an AI Credits pack to continue generating charts.',
           code: 'AI_CREDITS_EXHAUSTED',
+          requiredCredits,
           subscription: deductResult
         });
       }
       creditDeducted = true;
-      deductedBucket = deductResult.deducted_bucket || 'free';
+      deductDetails = {
+        free: deductResult.deducted_free || 0,
+        purchased: deductResult.deducted_purchased || 0,
+        bucket: deductResult.deducted_bucket || 'free',
+        amount: requiredCredits
+      };
       updatedSubscription = deductResult;
     }
 
@@ -389,7 +406,7 @@ app.post('/api/process-chart-enhanced', requireAuth, aiLimiter, async (req, res)
     // Rollback reserved credit if generation failed or was aborted
     if (creditDeducted && userId) {
       try {
-        await refundAiCredit(userId, deductedBucket);
+        await refundAiCredit(userId, deductDetails || 'free');
       } catch (refundErr) {
         console.error('Failed to refund AI credit after error:', refundErr.message);
       }

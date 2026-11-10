@@ -17,6 +17,7 @@ import {
 } from '../services/razorpayService.js';
 import {
   createDodoCheckoutSession,
+  retrieveDodoPayment,
   verifyDodoWebhook,
   isDodoConfigured
 } from '../services/dodoPaymentsService.js';
@@ -33,10 +34,10 @@ export async function getPaymentConfig(req, res) {
     res.json({
       success: true,
       detectedCountry: locationContext.countryCode,
-      isIndia: false,
-      recommendedGateway: 'dodo',
-      defaultCurrency: 'USD',
-      currencySymbol: '$',
+      isIndia: locationContext.isIndia,
+      recommendedGateway: locationContext.recommendedGateway,
+      defaultCurrency: locationContext.currency,
+      currencySymbol: locationContext.currencySymbol,
       razorpayKeyId: getRazorpayPublicKey(),
       isRazorpayConfigured,
       isDodoConfigured,
@@ -52,6 +53,7 @@ export async function getPaymentConfig(req, res) {
 /**
  * POST /payments/create-checkout
  * Initiates checkout for the selected credit pack ('ai_lite' | 'ai_pro' | 'cloud_lite' | 'cloud_pro')
+ * Routes India to Razorpay (INR) and Global to Dodo Payments (USD)
  */
 export async function createCheckout(req, res) {
   try {
@@ -77,7 +79,50 @@ export async function createCheckout(req, res) {
       region: effectiveRegion
     });
 
-    // Dodo Payments (USD pricing for all packs)
+    // ─── GATEWAY 1: RAZORPAY (INDIA / INR) ───
+    if (routingInfo.gateway === 'razorpay') {
+      const rzpOrder = await createRazorpayOrder({
+        amountInInr: routingInfo.amount,
+        receipt: `rcpt_${userId}_${resolvedPackId}_${Date.now()}`.slice(0, 40),
+        notes: {
+          packId: resolvedPackId,
+          userId,
+          planTier: routingInfo.planTier,
+        },
+      });
+
+      await recordPaymentTransaction({
+        userId,
+        gateway: 'razorpay',
+        gatewayOrderId: rzpOrder.id,
+        amount: routingInfo.amount,
+        currency: 'INR',
+        packId: resolvedPackId,
+        planTier: routingInfo.planTier,
+        billingCycle: 'one_time',
+        status: 'pending',
+        customerEmail: userEmail,
+        customerCountry: 'IN',
+        metadata: { rzpOrder, packId: resolvedPackId },
+      });
+
+      return res.json({
+        success: true,
+        gateway: 'razorpay',
+        orderId: rzpOrder.id,
+        keyId: rzpOrder.keyId,
+        amount: rzpOrder.amount, // in paise for Razorpay modal
+        amountDisplay: routingInfo.amount, // in INR for UI
+        currency: 'INR',
+        currencySymbol: '₹',
+        isSimulation: rzpOrder.isSimulation,
+        packId: resolvedPackId,
+        planTier: routingInfo.planTier,
+        billingCycle: 'one_time',
+      });
+    }
+
+    // ─── GATEWAY 2: DODO PAYMENTS (GLOBAL / USD) ───
     const dodoSession = await createDodoCheckoutSession({
       userId,
       customerEmail: userEmail,
@@ -161,7 +206,7 @@ export async function verifyRazorpayPayment(req, res) {
       paymentId,
       transactionId: txId,
       countryCode: 'IN',
-      currency: 'USD'
+      currency: 'INR'
     });
 
     res.json({
@@ -284,7 +329,7 @@ export async function handleRazorpayWebhook(req, res) {
           paymentId: paymentEntity?.id,
           transactionId: txId,
           countryCode: 'IN',
-          currency: 'USD',
+          currency: 'INR',
         });
       }
     }
@@ -293,6 +338,105 @@ export async function handleRazorpayWebhook(req, res) {
   } catch (error) {
     console.error('handleRazorpayWebhook error:', error);
     res.status(500).send('Webhook processing error');
+  }
+}
+
+/**
+ * POST /payments/dodo/verify
+ * Verifies Dodo Payment completion upon customer return to /payment/success
+ * Enables instant fulfillment without waiting for webhook delivery
+ */
+export async function verifyDodoPayment(req, res) {
+  try {
+    const userId = req.user?.user_id || req.user?.id;
+    if (!userId) {
+      return res.status(401).json({ error: 'Authentication required' });
+    }
+
+    const { paymentId, packId, planTier = 'pro' } = req.body;
+    if (!paymentId) {
+      return res.status(400).json({ error: 'Missing paymentId' });
+    }
+
+    const resolvedPackId = resolvePackId(packId, planTier);
+
+    // If running simulated checkout in development
+    if (paymentId.startsWith('dodo_sim_')) {
+      const fulfillment = await fulfillSubscriptionUpgrade({
+        userId,
+        packId: resolvedPackId,
+        tier: planTier,
+        gateway: 'dodo_simulated',
+        orderId: paymentId,
+        paymentId,
+        currency: 'USD',
+      });
+      return res.json({
+        success: true,
+        message: 'Simulated payment verified!',
+        subscription: fulfillment,
+      });
+    }
+
+    // Retrieve payment directly from Dodo Payments API
+    const payment = await retrieveDodoPayment(paymentId);
+    if (!payment) {
+      return res.status(400).json({ error: 'Payment record could not be retrieved from Dodo' });
+    }
+
+    if (payment.status !== 'succeeded') {
+      return res.status(400).json({
+        error: `Payment is not completed. Current status: ${payment.status}`,
+        status: payment.status,
+      });
+    }
+
+    // Ensure metadata matches current user
+    if (payment.metadata?.user_id && payment.metadata.user_id !== userId) {
+      return res.status(403).json({ error: 'Payment was initiated by a different account' });
+    }
+
+    const finalPackId = resolvePackId(payment.metadata?.pack_id || resolvedPackId, planTier);
+    const checkoutSessionId = payment.checkout_session_id;
+
+    // Update transaction record in DB
+    let txRows = null;
+    if (checkoutSessionId) {
+      txRows = await updatePaymentTransaction(
+        { gatewayOrderId: checkoutSessionId },
+        { gateway_payment_id: paymentId, status: 'completed' }
+      );
+    }
+    if (!txRows || txRows.length === 0) {
+      txRows = await updatePaymentTransaction(
+        { gatewayOrderId: paymentId },
+        { gateway_payment_id: paymentId, status: 'completed' }
+      );
+    }
+
+    const txId = Array.isArray(txRows) && txRows[0] ? txRows[0].id : null;
+
+    const fulfillment = await fulfillSubscriptionUpgrade({
+      userId,
+      packId: finalPackId,
+      tier: planTier,
+      gateway: 'dodo',
+      gatewayCustomerId: payment.customer?.customer_id,
+      orderId: checkoutSessionId || paymentId,
+      paymentId,
+      transactionId: txId,
+      countryCode: payment.billing?.country || 'GLOBAL',
+      currency: payment.currency || 'USD',
+    });
+
+    res.json({
+      success: true,
+      message: 'Payment verified and credits added to your account!',
+      subscription: fulfillment,
+    });
+  } catch (error) {
+    console.error('verifyDodoPayment error:', error);
+    res.status(500).json({ error: error.message || 'Payment verification failed' });
   }
 }
 
@@ -321,16 +465,24 @@ export async function handleDodoWebhook(req, res) {
         data?.metadata?.pack_id,
         data?.metadata?.plan_tier || 'pro'
       );
-      const orderId = data?.payment_id || data?.id;
+      const checkoutSessionId = data?.checkout_session_id;
+      const paymentId = data?.payment_id || data?.id;
+      const orderId = checkoutSessionId || paymentId;
 
       if (userId) {
-        const txRows = await updatePaymentTransaction(
-          { gatewayOrderId: orderId },
-          {
-            gateway_payment_id: orderId,
-            status: 'completed'
-          }
-        );
+        let txRows = null;
+        if (checkoutSessionId) {
+          txRows = await updatePaymentTransaction(
+            { gatewayOrderId: checkoutSessionId },
+            { gateway_payment_id: paymentId, status: 'completed' }
+          );
+        }
+        if (!txRows || txRows.length === 0) {
+          txRows = await updatePaymentTransaction(
+            { gatewayOrderId: paymentId },
+            { gateway_payment_id: paymentId, status: 'completed' }
+          );
+        }
         const txId = Array.isArray(txRows) && txRows[0] ? txRows[0].id : null;
 
         await fulfillSubscriptionUpgrade({
@@ -339,7 +491,7 @@ export async function handleDodoWebhook(req, res) {
           gateway: 'dodo',
           gatewayCustomerId: data?.customer?.customer_id,
           orderId,
-          paymentId: orderId,
+          paymentId,
           transactionId: txId,
           countryCode: data?.billing?.country || 'GLOBAL',
           currency: 'USD',

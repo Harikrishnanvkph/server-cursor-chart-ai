@@ -100,9 +100,9 @@ Include these additional fields in each dataset:
 - "pointImages": Array of null or empty strings "" (DO NOT invent or guess image URLs; the backend multi-source image engine automatically resolves verified web/CDN/Wikipedia URLs using your metadata).
 - "pointImageSearchQueries": Array of structured metadata objects (same length as labels) to help the backend resolve 100% context-accurate images across web search, brand CDNs, FlagCDN, and Wikipedia:
   {
-    "type": "person" | "company" | "country" | "media" | "product" | "place" | "object",
-    "query": "Specific context-disambiguated web image search query (e.g. 'Beast 2022 Tamil movie Vijay poster', 'Elon Musk portrait photo', 'Apple Inc official logo', 'iPhone 16 Pro Max product photo')",
-    "wikiTitle": "Exact canonical Wikipedia page title if known (e.g. 'Beast_(2022_Indian_film)', 'Elon_Musk', 'Michael_Jordan', 'Apple_Inc.') or ''",
+    "type": "person" | "company" (use 'company' for any entity represented by a logo/icon: companies, brands, AI models, software, apps, crypto, organizations) | "country" | "media" | "product" (physical hardware only) | "place" | "object",
+    "query": "Specific context-disambiguated web image search query (e.g. 'Beast 2022 Tamil movie Vijay poster', 'Elon Musk portrait photo', 'ChatGPT official logo', 'iPhone 16 Pro Max product photo')",
+    "wikiTitle": "Exact canonical Wikipedia page title if known (for versioned software/AI models, use the main model/brand title e.g. 'ChatGPT', 'Claude_(language_model)', 'Google_Gemini') or ''",
     "domain": "Official website domain ONLY when type is 'company' (e.g. 'apple.com', 'tesla.com', 'hdfcbank.com', 'zepto.co.in') or ''",
     "countryCode": "2-letter ISO 3166-1 alpha-2 code ONLY when type is 'country' (e.g. 'us', 'in', 'gb', 'qa') or ''",
     "context": "2-5 disambiguating keywords matching the prompt topic (e.g. 'Indian Tamil action film Vijay 2022')"
