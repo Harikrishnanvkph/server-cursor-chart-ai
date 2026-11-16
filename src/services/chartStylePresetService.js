@@ -126,7 +126,7 @@ class ChartStylePresetService {
    * @param {Object} presetData - Preset data
    * @returns {Promise<Object>} Created preset
    */
-  async createPreset(userId, presetData) {
+  async createPreset(userId, presetData, isAdmin = false) {
     try {
       const {
         name,
@@ -158,9 +158,9 @@ class ChartStylePresetService {
           tags: tags || [],
           thumbnail_url: thumbnailUrl || null,
           user_id: userId,
-          is_official: isOfficial || false,
-          is_public: isPublic || false,
-          sort_order: sortOrder || 100
+          is_official: isAdmin ? Boolean(isOfficial) : false,
+          is_public: isAdmin ? Boolean(isPublic) : false,
+          sort_order: isAdmin && typeof sortOrder === 'number' ? sortOrder : 100
         })
         .select('*')
         .single();

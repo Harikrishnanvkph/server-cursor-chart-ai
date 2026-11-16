@@ -6,6 +6,7 @@ import {
   validatePerplexityApiKey
 } from '../services/perplexityService.js';
 import { canConsumeAiCredit, deductAiCredit, refundAiCredit } from '../services/subscriptionService.js';
+import { requireAdmin } from '../middleware/authMiddleware.js';
 
 const router = express.Router();
 
@@ -185,9 +186,9 @@ router.get('/models', (req, res) => {
 
 /**
  * GET /api/perplexity/validate
- * Validate Perplexity API key
+ * Validate Perplexity API key (admin only)
  */
-router.get('/validate', async (req, res) => {
+router.get('/validate', requireAdmin, async (req, res) => {
   try {
     if (!process.env.PERPLEXITY_API_KEY) {
       return res.status(400).json({

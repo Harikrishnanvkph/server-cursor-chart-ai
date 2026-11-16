@@ -8,7 +8,7 @@ const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:3000';
 
 export const isDodoConfigured = Boolean(DODO_API_KEY && !DODO_API_KEY.includes('placeholder'));
 
-const BASE_URL = DODO_ENVIRONMENT === 'live'
+const BASE_URL = (DODO_ENVIRONMENT === 'live' || DODO_ENVIRONMENT === 'live_mode')
   ? 'https://live.dodopayments.com'
   : 'https://test.dodopayments.com';
 
@@ -92,7 +92,11 @@ export async function createDodoCheckoutSession({
     }
   }
 
-  // Developer Simulation Mode when Dodo API key is not configured
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error('Dodo Payments gateway is not configured in production');
+  }
+
+  // Developer Simulation Mode when Dodo API key is not configured (non-production only)
   console.log('Dodo Payments API key not configured. Running in Developer Simulation Mode.');
   const simulatedSessionId = `dodo_sim_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
   const simulatedCheckoutUrl = `${FRONTEND_URL}/payment/success?gateway=dodo&session_id=${simulatedSessionId}&pack=${encodeURIComponent(packId)}&amount=${amountInUsd}`;
@@ -112,9 +116,9 @@ export async function createDodoCheckoutSession({
  * Retrieve payment status directly from Dodo Payments API
  */
 export async function retrieveDodoPayment(paymentId) {
-  if (!paymentId) return null;
+  if (!paymentId || typeof paymentId !== 'string') return null;
   if (!isDodoConfigured) {
-    if (paymentId.startsWith('dodo_sim_')) {
+    if (process.env.NODE_ENV !== 'production' && paymentId.startsWith('dodo_sim_')) {
       return {
         payment_id: paymentId,
         status: 'succeeded',
@@ -125,7 +129,7 @@ export async function retrieveDodoPayment(paymentId) {
   }
 
   try {
-    const response = await fetch(`${BASE_URL}/payments/${paymentId}`, {
+    const response = await fetch(`${BASE_URL}/payments/${encodeURIComponent(paymentId)}`, {
       method: 'GET',
       headers: {
         'Authorization': `Bearer ${DODO_API_KEY}`,
@@ -152,6 +156,10 @@ export async function retrieveDodoPayment(paymentId) {
 export function verifyDodoWebhook({ rawBody, signature, webhookId, timestamp }) {
   const secret = process.env.DODO_PAYMENTS_WEBHOOK_KEY || process.env.DODO_PAYMENTS_WEBHOOK_SECRET;
   if (!secret) {
+    if (process.env.NODE_ENV === 'production') {
+      console.error('DODO_PAYMENTS_WEBHOOK_KEY / SECRET not set in production. Rejecting webhook.');
+      return false;
+    }
     console.warn('DODO_PAYMENTS_WEBHOOK_KEY / SECRET not set. Webhook verification skipped in dev.');
     return true;
   }
@@ -190,13 +198,16 @@ export function verifyDodoWebhook({ rawBody, signature, webhookId, timestamp }) 
       .update(textToSign)
       .digest('base64');
 
+    const expectedBuf = Buffer.from(expectedSignature, 'utf8');
+
     // webhook-signature header can contain multiple space-separated signatures: "v1,abc v1,xyz"
-    const passedSignatures = signature.split(' ');
+    const passedSignatures = String(signature).split(' ');
     for (const sig of passedSignatures) {
       const parts = sig.split(',');
       const candidate = parts.length > 1 ? parts[1] : parts[0];
-      if (candidate.length === expectedSignature.length) {
-        if (crypto.timingSafeEqual(Buffer.from(candidate), Buffer.from(expectedSignature))) {
+      const candidateBuf = Buffer.from(candidate, 'utf8');
+      if (candidateBuf.byteLength === expectedBuf.byteLength) {
+        if (crypto.timingSafeEqual(candidateBuf, expectedBuf)) {
           return true;
         }
       }

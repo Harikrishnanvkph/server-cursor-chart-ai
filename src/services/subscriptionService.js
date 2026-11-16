@@ -470,18 +470,48 @@ export async function deductAiCredit(userId, amount = 1) {
     const freeToDeduct = Math.min(amount, freeAvailable);
     const purchasedToDeduct = amount - freeToDeduct;
 
-    // Deduct free credits from profile if any
+    // Deduct free credits from profile if any (with optimistic concurrency check against concurrent requests)
+    let finalFreeUsed = sub.free_ai_credits_used;
     if (freeToDeduct > 0) {
-      const nextUsed = sub.free_ai_credits_used + freeToDeduct;
-      const { error } = await supabaseAdminClient
+      let nextUsed = sub.free_ai_credits_used + freeToDeduct;
+      let { data: updatedRows, error } = await supabaseAdminClient
         .from('profiles')
         .update({ ai_credits_used: nextUsed })
-        .eq('id', userId);
+        .eq('id', userId)
+        .eq('ai_credits_used', sub.free_ai_credits_used)
+        .select('id, ai_credits_used');
+
+      // If a concurrent request updated ai_credits_used simultaneously, re-read once and retry
+      if (!error && (!updatedRows || updatedRows.length === 0)) {
+        const freshSub = await getUserSubscription(userId);
+        if (!freshSub || freshSub.ai_credits_remaining < amount) {
+          return {
+            ...(freshSub || sub),
+            success: false,
+            exhausted: true,
+            requiredCredits: amount,
+            deducted_bucket: 'none',
+          };
+        }
+        nextUsed = freshSub.free_ai_credits_used + freeToDeduct;
+        const retryRes = await supabaseAdminClient
+          .from('profiles')
+          .update({ ai_credits_used: nextUsed })
+          .eq('id', userId)
+          .eq('ai_credits_used', freshSub.free_ai_credits_used)
+          .select('id, ai_credits_used');
+        error = retryRes.error;
+        updatedRows = retryRes.data;
+        if (!error && (!updatedRows || updatedRows.length === 0)) {
+          return null;
+        }
+      }
 
       if (error) {
         console.error('Failed to deduct free AI credit:', error.message);
         return null;
       }
+      finalFreeUsed = nextUsed;
     }
 
     // Deduct purchased credits from wallet state if any
@@ -491,7 +521,18 @@ export async function deductAiCredit(userId, amount = 1) {
       await writeUserWalletState(userId, walletState);
     }
 
-    const updated = await getUserSubscription(userId);
+    const nextFreeUsed = finalFreeUsed;
+    const nextFreeRemaining = Math.max(0, sub.free_ai_credits_limit - nextFreeUsed);
+    const nextPurchasedRemaining = Math.max(0, sub.purchased_ai_credits - purchasedToDeduct);
+    const nextTotalRemaining = nextFreeRemaining + nextPurchasedRemaining;
+    const updated = {
+      ...sub,
+      free_ai_credits_used: nextFreeUsed,
+      free_ai_credits_remaining: nextFreeRemaining,
+      purchased_ai_credits: nextPurchasedRemaining,
+      ai_credits_used: nextFreeUsed,
+      ai_credits_remaining: nextTotalRemaining,
+    };
     const bucket =
       freeToDeduct > 0 && purchasedToDeduct > 0
         ? 'split'
@@ -613,8 +654,35 @@ export async function fulfillCreditPackPurchase({
 
   const walletState = await readUserWalletState(userId);
 
+  // Check database transaction table for native/cross-mode idempotency
+  let alreadyFulfilledInDb = false;
+  if (transactionId || orderId || paymentId) {
+    let txCheckQuery = supabaseAdminClient
+      .from('payment_transactions')
+      .select('id, fulfilled, metadata')
+      .eq('user_id', userId);
+
+    if (transactionId) {
+      txCheckQuery = txCheckQuery.eq('id', transactionId);
+    } else if (orderId) {
+      txCheckQuery = txCheckQuery.eq('gateway_order_id', orderId);
+    } else if (paymentId) {
+      txCheckQuery = txCheckQuery.eq('gateway_payment_id', paymentId);
+    }
+
+    const { data: existingTxRows } = await txCheckQuery.limit(5);
+    if (Array.isArray(existingTxRows)) {
+      alreadyFulfilledInDb = existingTxRows.some(
+        (row) => row.fulfilled === true || row.metadata?.fulfilled === true
+      );
+    }
+  }
+
   // Idempotency guard: if this order was already fulfilled, return current subscription without double-adding
-  if (idempotencyKey && walletState.fulfilled_orders?.includes(idempotencyKey)) {
+  if (
+    alreadyFulfilledInDb ||
+    (idempotencyKey && walletState.fulfilled_orders?.includes(idempotencyKey))
+  ) {
     const existingSub = await getUserSubscription(userId);
     return {
       ...existingSub,
@@ -683,6 +751,30 @@ export async function fulfillCreditPackPurchase({
   ];
 
   await writeUserWalletState(userId, walletState);
+
+  // Mark payment_transactions row as fulfilled for native-mode idempotency
+  if (transactionId || orderId || paymentId) {
+    let markQuery = supabaseAdminClient
+      .from('payment_transactions')
+      .update({
+        fulfilled: true,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('user_id', userId);
+
+    if (transactionId) {
+      markQuery = markQuery.eq('id', transactionId);
+    } else if (orderId) {
+      markQuery = markQuery.eq('gateway_order_id', orderId);
+    } else if (paymentId) {
+      markQuery = markQuery.eq('gateway_payment_id', paymentId);
+    }
+
+    const { error: markErr } = await markQuery;
+    if (markErr) {
+      console.warn('Could not mark payment_transactions.fulfilled:', markErr.message);
+    }
+  }
 
   // Update profile tier badge ('pro' stays 'pro' if they already bought a Pro pack)
   const { data: currentProfile } = await supabaseAdminClient

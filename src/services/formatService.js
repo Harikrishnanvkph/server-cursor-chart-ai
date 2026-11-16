@@ -120,7 +120,7 @@ class FormatService {
    * @param {Object} formatData - Format data
    * @returns {Promise<Object>} Created format
    */
-  async createFormat(userId, formatData) {
+  async createFormat(userId, formatData, isAdmin = false) {
     try {
       const { name, description, category, skeleton, dimensions, tags, thumbnailUrl, isOfficial, isPublic, sortOrder } = formatData;
 
@@ -135,9 +135,9 @@ class FormatService {
           tags: tags || [],
           thumbnail_url: thumbnailUrl || null,
           user_id: userId,
-          is_official: isOfficial || false,
-          is_public: isPublic || false,
-          sort_order: sortOrder || 0
+          is_official: isAdmin ? Boolean(isOfficial) : false,
+          is_public: isAdmin ? Boolean(isPublic) : false,
+          sort_order: isAdmin && typeof sortOrder === 'number' ? sortOrder : 0
         })
         .select('*')
         .single();
@@ -242,9 +242,12 @@ class FormatService {
 
       const deletedFormat = data[0];
 
-      // Clean up associated images from Supabase Storage
+      // Clean up associated images from Supabase Storage (scoped to owner unless admin)
       try {
-        const pathsToDelete = Array.from(extractStoragePaths(deletedFormat));
+        const allPaths = Array.from(extractStoragePaths(deletedFormat));
+        const pathsToDelete = isAdmin
+          ? allPaths
+          : allPaths.filter((p) => typeof p === 'string' && p.startsWith(`presets/${userId}/`));
         if (pathsToDelete.length > 0) {
           console.log(`Deleting associated storage assets for format ${formatId}:`, pathsToDelete);
           const { error: storageError } = await supabaseAdminClient.storage

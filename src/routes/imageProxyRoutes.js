@@ -15,25 +15,49 @@ const router = express.Router();
  * IPv6 loopback, IPv6 unique-local, IPv6 link-local.
  */
 function isPrivateIP(ip) {
+  if (!ip || typeof ip !== 'string') return true;
+  const normalized = ip.toLowerCase().trim();
+
+  // Handle IPv4-mapped IPv6 addresses (e.g. ::ffff:127.0.0.1 or ::ffff:7f00:1)
+  if (normalized.startsWith('::ffff:')) {
+    const mapped = normalized.slice(7);
+    if (mapped.includes('.')) {
+      return isPrivateIP(mapped);
+    }
+    const hexParts = mapped.split(':');
+    if (hexParts.length === 2) {
+      const hi = parseInt(hexParts[0], 16);
+      const lo = parseInt(hexParts[1], 16);
+      if (!isNaN(hi) && !isNaN(lo)) {
+        const ipv4 = `${(hi >> 8) & 0xff}.${hi & 0xff}.${(lo >> 8) & 0xff}.${lo & 0xff}`;
+        return isPrivateIP(ipv4);
+      }
+    }
+    return true;
+  }
+
   // IPv4 check
-  const v4parts = ip.split('.').map(Number);
-  if (v4parts.length === 4 && v4parts.every(p => p >= 0 && p <= 255)) {
+  const v4parts = normalized.split('.').map(Number);
+  if (v4parts.length === 4 && v4parts.every(p => Number.isInteger(p) && p >= 0 && p <= 255)) {
     return (
-      v4parts[0] === 0 ||                                             // 0.0.0.0/8
-      v4parts[0] === 10 ||                                            // 10.0.0.0/8
-      v4parts[0] === 127 ||                                           // 127.0.0.0/8 (loopback)
-      (v4parts[0] === 172 && v4parts[1] >= 16 && v4parts[1] <= 31) || // 172.16.0.0/12
-      (v4parts[0] === 192 && v4parts[1] === 168) ||                   // 192.168.0.0/16
-      (v4parts[0] === 169 && v4parts[1] === 254)                      // 169.254.0.0/16 (link-local + cloud metadata)
+      v4parts[0] === 0 ||                                              // 0.0.0.0/8
+      v4parts[0] === 10 ||                                             // 10.0.0.0/8
+      v4parts[0] === 127 ||                                            // 127.0.0.0/8 (loopback)
+      (v4parts[0] === 100 && v4parts[1] >= 64 && v4parts[1] <= 127) || // 100.64.0.0/10 (CGNAT)
+      (v4parts[0] === 172 && v4parts[1] >= 16 && v4parts[1] <= 31) ||  // 172.16.0.0/12
+      (v4parts[0] === 192 && v4parts[1] === 168) ||                    // 192.168.0.0/16
+      (v4parts[0] === 169 && v4parts[1] === 254) ||                    // 169.254.0.0/16 (link-local + cloud metadata)
+      (v4parts[0] === 198 && (v4parts[1] === 18 || v4parts[1] === 19)) || // 198.18.0.0/15
+      v4parts[0] >= 224                                                // 224.0.0.0/4 multicast & reserved
     );
   }
 
   // IPv6 check
-  const normalized = ip.toLowerCase();
   if (normalized === '::1' || normalized === '::' ||
-      normalized.startsWith('fe80:') ||   // Link-local
-      normalized.startsWith('fc00:') ||   // Unique local
-      normalized.startsWith('fd00:')) {    // Unique local
+      normalized.startsWith('fe8') || normalized.startsWith('fe9') ||
+      normalized.startsWith('fea') || normalized.startsWith('feb') ||  // fe80::/10 Link-local
+      normalized.startsWith('fc') || normalized.startsWith('fd') ||    // fc00::/7 Unique local
+      normalized.startsWith('ff')) {                                   // ff00::/8 Multicast
     return true;
   }
 
@@ -41,24 +65,22 @@ function isPrivateIP(ip) {
 }
 
 /**
- * Resolve a hostname to its IP and verify it doesn't point to a private network.
- * Blocks SSRF via IPv6, decimal IPs, DNS rebinding, 0.0.0.0, cloud metadata, etc.
- * Uses the OS DNS resolver (getaddrinfo) which handles all IP notation formats.
+ * Resolve a hostname to all of its IPs and verify none point to a private network.
  */
 async function validateNotPrivate(hostname) {
   // Strip IPv6 brackets if present
   const cleanHost = hostname.replace(/^\[|\]$/g, '');
 
-  // Fast-path: obvious local hostnames
+  // Fast-path: obvious local hostnames or literal private IP
   const lower = cleanHost.toLowerCase();
-  if (lower === 'localhost' || lower === '0.0.0.0' || lower === '::1') {
+  if (lower === 'localhost' || lower === '0.0.0.0' || lower === '::1' || isPrivateIP(lower)) {
     throw new Error('Local network proxying disabled for security');
   }
 
-  // Resolve hostname → IP via OS resolver (handles IPv4, IPv6, decimal IPs, hex IPs, etc.)
+  // Resolve all hostname IPs via OS resolver
   try {
-    const { address } = await dns.lookup(cleanHost);
-    if (isPrivateIP(address)) {
+    const records = await dns.lookup(cleanHost, { all: true });
+    if (!Array.isArray(records) || records.length === 0 || records.some(r => isPrivateIP(r.address))) {
       throw new Error('Local network proxying disabled for security');
     }
   } catch (err) {
@@ -163,7 +185,13 @@ router.get('/image', async (req, res) => {
         let finalFetchUrl = imageUrl;
         let fallbackWikiUrl = null;
         let isWiki = false;
-        if (parsedUrl.hostname.includes('wikimedia.org') || parsedUrl.hostname.includes('wikipedia.org')) {
+        const lowerHost = parsedUrl.hostname.toLowerCase();
+        if (
+            lowerHost === 'wikimedia.org' ||
+            lowerHost.endsWith('.wikimedia.org') ||
+            lowerHost === 'wikipedia.org' ||
+            lowerHost.endsWith('.wikipedia.org')
+        ) {
             isWiki = true;
             // Extract the actual filename from the URL route
             const pathParts = parsedUrl.pathname.split('/');
@@ -243,13 +271,25 @@ router.get('/image', async (req, res) => {
             throw new Error(`Upstream server responded with ${response.status} ${response.statusText}`);
         }
 
+        const MAX_IMAGE_BYTES = 15 * 1024 * 1024; // 15MB ceiling
+        const contentLengthHeader = parseInt(response.headers.get('content-length') || '0', 10);
+        if (contentLengthHeader > MAX_IMAGE_BYTES) {
+            return res.status(413).json({ error: 'Upstream image exceeds maximum allowed size' });
+        }
+
         // Read the image stream into a buffer for processing/caching
         const arrayBuffer = await response.arrayBuffer();
+        if (arrayBuffer.byteLength > MAX_IMAGE_BYTES) {
+            return res.status(413).json({ error: 'Upstream image exceeds maximum allowed size' });
+        }
         const buffer = Buffer.from(arrayBuffer);
 
-        const contentType = response.headers.get('content-type');
-        const isSvg = contentType && contentType.includes('svg');
-        const isGif = contentType && contentType.includes('gif');
+        res.setHeader('X-Content-Type-Options', 'nosniff');
+        res.setHeader('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'");
+
+        const contentType = (response.headers.get('content-type') || '').toLowerCase();
+        const isSvg = contentType.includes('svg');
+        const isGif = contentType.includes('gif');
         const shouldProcess = (width || quality || format) && !isSvg && !isGif;
 
         if (shouldProcess) {
@@ -286,10 +326,12 @@ router.get('/image', async (req, res) => {
             }
         }
 
-        // Fallback or skip resizing: Forward original contentType and stream raw buffer
-        if (contentType) {
-            res.setHeader('Content-Type', contentType);
+        // Reject non-image upstream responses (e.g., text/html error pages)
+        if (!contentType.startsWith('image/')) {
+            return res.status(415).json({ error: 'Upstream resource is not a valid image' });
         }
+
+        res.setHeader('Content-Type', contentType);
         res.setHeader('Cache-Control', 'public, max-age=86400'); // Cache raw image for 1 day
         res.send(buffer);
 

@@ -152,10 +152,17 @@ class ChartDataService {
 
   async updateConversation(conversationId, userId, updates) {
     try {
+      const safeUpdates = {};
+      if (updates && typeof updates === 'object') {
+        if (typeof updates.title === 'string') safeUpdates.title = updates.title;
+        if (updates.description !== undefined) safeUpdates.description = updates.description;
+        if (updates.project_id !== undefined) safeUpdates.project_id = updates.project_id;
+      }
+
       const { data, error } = await supabaseAdminClient
         .from('conversations')
         .update({
-          ...updates,
+          ...safeUpdates,
           updated_at: new Date().toISOString()
         })
         .eq('id', conversationId)
@@ -173,16 +180,30 @@ class ChartDataService {
 
   async deleteConversation(conversationId, userId) {
     try {
+      // 0. Verify conversation ownership before reading snapshots or deleting storage assets
+      const { data: ownedConv, error: ownErr } = await supabaseAdminClient
+        .from('conversations')
+        .select('id')
+        .eq('id', conversationId)
+        .eq('user_id', userId)
+        .maybeSingle();
+
+      if (ownErr) throw ownErr;
+      if (!ownedConv) {
+        throw new Error('Conversation not found or access denied');
+      }
+
       // 1. Fetch all snapshots for this conversation before deletion
       const { data: snapshots } = await supabaseAdminClient
         .from('chart_snapshots')
         .select('chart_config, template_structure')
         .eq('conversation_id', conversationId);
 
-      // 2. Extract image paths
+      // 2. Extract image paths owned by this user
       if (snapshots && snapshots.length > 0) {
         const paths = [];
         const bucketUrlPart = '/format-assets/';
+        const userPrefix = `presets/${userId}/`;
         
         snapshots.forEach(snap => {
           const checkShapes = (shapes) => {
@@ -192,7 +213,7 @@ class ChartDataService {
                   const idx = shape.imageUrl.indexOf(bucketUrlPart);
                   if (idx !== -1) {
                     const path = shape.imageUrl.substring(idx + bucketUrlPart.length);
-                    if (path && !paths.includes(path)) {
+                    if (path && path.startsWith(userPrefix) && !paths.includes(path)) {
                       paths.push(path);
                     }
                   }
@@ -357,6 +378,79 @@ class ChartDataService {
       return data;
     } catch (error) {
       console.error('Error fetching chart snapshot:', error);
+      throw error;
+    }
+  }
+
+  async getBatchCurrentSnapshots(userId, conversationIds = []) {
+    try {
+      const uniqueIds = [...new Set((conversationIds || []).filter((id) => typeof id === 'string' && id.trim()))];
+      if (uniqueIds.length === 0) return {};
+
+      // 1. Verify ownership for all requested conversations in a single query
+      const { data: ownedConvs, error: convError } = await supabaseAdminClient
+        .from('conversations')
+        .select('id')
+        .in('id', uniqueIds)
+        .eq('user_id', userId)
+        .eq('is_active', true);
+
+      if (convError) throw convError;
+      const ownedIds = (ownedConvs || []).map((c) => c.id);
+      if (ownedIds.length === 0) return {};
+
+      // 2. Fetch current snapshots for all owned conversations in a single query
+      const { data: snapshots, error: snapError } = await supabaseAdminClient
+        .from('chart_snapshots')
+        .select('*')
+        .in('conversation_id', ownedIds)
+        .eq('is_current', true);
+
+      if (snapError) throw snapError;
+      if (!snapshots || snapshots.length === 0) return {};
+
+      // 3. Collect referenced format IDs that still need their blueprint skeleton
+      const formatIdsToFetch = new Set();
+      snapshots.forEach((snap) => {
+        const formatData = snap.chart_config?.formatData;
+        const formatId = formatData?.formatId;
+        const hasEmbeddedSkeleton = Boolean(formatData?.formatSnapshot?.skeleton);
+        const hasZones = Boolean(snap.template_structure && !snap.template_structure.isFormatReference && snap.template_structure.zones);
+        if (formatId && !hasEmbeddedSkeleton && !hasZones) {
+          formatIdsToFetch.add(formatId);
+        }
+      });
+
+      const formatSkeletonMap = new Map();
+      if (formatIdsToFetch.size > 0) {
+        const { data: formats, error: fmtError } = await supabaseAdminClient
+          .from('format_blueprints')
+          .select('id, skeleton')
+          .in('id', Array.from(formatIdsToFetch))
+          .or(`is_official.eq.true,is_public.eq.true,user_id.eq.${userId}`);
+
+        if (!fmtError && formats) {
+          formats.forEach((fmt) => {
+            if (fmt.skeleton) {
+              formatSkeletonMap.set(fmt.id, fmt.skeleton);
+            }
+          });
+        }
+      }
+
+      // 4. Key snapshots by conversation_id and attach pre-resolved format skeletons
+      const result = {};
+      snapshots.forEach((snap) => {
+        const formatId = snap.chart_config?.formatData?.formatId;
+        const resolvedSkeleton = formatId ? formatSkeletonMap.get(formatId) : null;
+        result[snap.conversation_id] = resolvedSkeleton
+          ? { ...snap, template_structure: resolvedSkeleton }
+          : snap;
+      });
+
+      return result;
+    } catch (error) {
+      console.error('Error fetching batch chart snapshots:', error);
       throw error;
     }
   }

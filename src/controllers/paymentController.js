@@ -71,7 +71,11 @@ export async function createCheckout(req, res) {
     } = req.body;
 
     const resolvedPackId = resolvePackId(packId, planTier);
-    const effectiveRegion = regionOverride || detectCountryFromRequest(req);
+    const allowedOverride =
+      process.env.NODE_ENV !== 'production' && typeof regionOverride === 'string'
+        ? regionOverride
+        : null;
+    const effectiveRegion = allowedOverride || detectCountryFromRequest(req);
     const routingInfo = getPlanPricingAndGateway({
       packId: resolvedPackId,
       planTier,
@@ -180,7 +184,7 @@ export async function verifyRazorpayPayment(req, res) {
     }
 
     const { orderId, paymentId, signature, packId, planTier = 'pro' } = req.body;
-    const resolvedPackId = resolvePackId(packId, planTier);
+    const fallbackPackId = resolvePackId(packId, planTier);
 
     const verification = verifyRazorpaySignature({ orderId, paymentId, signature });
     if (!verification.verified) {
@@ -188,19 +192,27 @@ export async function verifyRazorpayPayment(req, res) {
     }
 
     const txRows = await updatePaymentTransaction(
-      { gatewayOrderId: orderId },
+      { gatewayOrderId: orderId, userId },
       {
         gateway_payment_id: paymentId,
         gateway_signature: signature,
         status: 'completed'
       }
     );
-    const txId = Array.isArray(txRows) && txRows[0] ? txRows[0].id : null;
+    const txRecord = Array.isArray(txRows) && txRows[0] ? txRows[0] : null;
+    if (!txRecord && process.env.NODE_ENV === 'production') {
+      return res.status(403).json({ error: 'Matching order not found for this account' });
+    }
+    const txId = txRecord ? txRecord.id : null;
+    const resolvedPackId = resolvePackId(
+      txRecord?.pack_id || txRecord?.metadata?.packId || (process.env.NODE_ENV !== 'production' ? fallbackPackId : null),
+      txRecord?.plan_tier || planTier
+    );
 
     const fulfillment = await fulfillSubscriptionUpgrade({
       userId,
       packId: resolvedPackId,
-      tier: planTier,
+      tier: txRecord?.plan_tier || planTier,
       gateway: 'razorpay',
       orderId,
       paymentId,
@@ -354,14 +366,17 @@ export async function verifyDodoPayment(req, res) {
     }
 
     const { paymentId, packId, planTier = 'pro' } = req.body;
-    if (!paymentId) {
+    if (!paymentId || typeof paymentId !== 'string') {
       return res.status(400).json({ error: 'Missing paymentId' });
     }
 
     const resolvedPackId = resolvePackId(packId, planTier);
 
-    // If running simulated checkout in development
+    // If running simulated checkout in non-production environments only
     if (paymentId.startsWith('dodo_sim_')) {
+      if (process.env.NODE_ENV === 'production') {
+        return res.status(403).json({ error: 'Simulated payments are disabled in production' });
+      }
       const fulfillment = await fulfillSubscriptionUpgrade({
         userId,
         packId: resolvedPackId,
@@ -396,25 +411,33 @@ export async function verifyDodoPayment(req, res) {
       return res.status(403).json({ error: 'Payment was initiated by a different account' });
     }
 
-    const finalPackId = resolvePackId(payment.metadata?.pack_id || resolvedPackId, planTier);
     const checkoutSessionId = payment.checkout_session_id;
 
-    // Update transaction record in DB
+    // Update transaction record in DB scoped to current user
     let txRows = null;
     if (checkoutSessionId) {
       txRows = await updatePaymentTransaction(
-        { gatewayOrderId: checkoutSessionId },
+        { gatewayOrderId: checkoutSessionId, userId },
         { gateway_payment_id: paymentId, status: 'completed' }
       );
     }
     if (!txRows || txRows.length === 0) {
       txRows = await updatePaymentTransaction(
-        { gatewayOrderId: paymentId },
+        { gatewayOrderId: paymentId, userId },
         { gateway_payment_id: paymentId, status: 'completed' }
       );
     }
 
-    const txId = Array.isArray(txRows) && txRows[0] ? txRows[0].id : null;
+    const txRecord = Array.isArray(txRows) && txRows[0] ? txRows[0] : null;
+    if (!payment.metadata?.user_id && !txRecord) {
+      return res.status(403).json({ error: 'Could not verify payment ownership for this account' });
+    }
+
+    const finalPackId = resolvePackId(
+      payment.metadata?.pack_id || txRecord?.pack_id || txRecord?.metadata?.packId || resolvedPackId,
+      txRecord?.plan_tier || planTier
+    );
+    const txId = txRecord ? txRecord.id : null;
 
     const fulfillment = await fulfillSubscriptionUpgrade({
       userId,

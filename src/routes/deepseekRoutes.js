@@ -6,6 +6,7 @@ import {
   validateDeepSeekApiKey
 } from '../services/deepseekService.js';
 import { canConsumeAiCredit, deductAiCredit, refundAiCredit } from '../services/subscriptionService.js';
+import { requireAdmin } from '../middleware/authMiddleware.js';
 
 const router = express.Router();
 
@@ -104,7 +105,7 @@ router.get('/models', (req, res) => {
 /**
  * GET /api/deepseek/validate
  */
-router.get('/validate', async (req, res) => {
+router.get('/validate', requireAdmin, async (req, res) => {
   try {
     if (!process.env.DEEPSEEK_API_KEY) {
       return res.status(400).json({ valid: false, error: 'DeepSeek API key not configured' });

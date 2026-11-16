@@ -109,16 +109,28 @@ class TemplateService {
     try {
       const { name, description, templateStructure } = updates;
       
-      if (!name && !description && !templateStructure) {
+      if (name === undefined && description === undefined && templateStructure === undefined) {
         throw new Error('At least one field must be provided for update');
+      }
+
+      const { data: existing, error: existingErr } = await supabaseAdminClient
+        .from('user_templates')
+        .select('*')
+        .eq('id', templateId)
+        .eq('user_id', userId)
+        .maybeSingle();
+
+      if (existingErr) throw existingErr;
+      if (!existing) {
+        throw new Error('Template not found or access denied');
       }
       
       const { data, error } = await supabaseAdminClient
         .rpc('upsert_user_template', {
           user_uuid: userId,
-          template_name: name,
-          template_description: description || null,
-          template_structure_json: templateStructure,
+          template_name: name !== undefined ? name : existing.name,
+          template_description: description !== undefined ? description : existing.description,
+          template_structure_json: templateStructure !== undefined ? templateStructure : existing.template_structure,
           template_id: templateId // Update existing
         });
       

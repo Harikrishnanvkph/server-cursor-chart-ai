@@ -81,7 +81,8 @@ router.post('/chart-style-presets', requireAuth, async (req, res) => {
       return res.status(400).json({ error: 'name, chartType, and colorStrategy are required' });
     }
 
-    const preset = await chartStylePresetService.createPreset(userId, req.body);
+    const isAdmin = req.user?.is_admin === true;
+    const preset = await chartStylePresetService.createPreset(userId, req.body, isAdmin);
     res.status(201).json(preset);
   } catch (error) {
     console.error('Error creating chart style preset:', error);

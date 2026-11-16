@@ -21,13 +21,15 @@ const COUNTRY_HEADER_KEYS = [
 export function detectCountryFromRequest(req) {
   if (!req) return 'GLOBAL';
 
-  // 1. Check direct query/header override if provided by client
-  const clientHint = req.headers['x-client-country'] || req.query?.country;
-  if (clientHint && typeof clientHint === 'string' && clientHint.length === 2) {
-    return clientHint.toUpperCase();
+  // 1. Check direct query/header override only in non-production environments
+  if (process.env.NODE_ENV !== 'production') {
+    const clientHint = req.headers['x-client-country'] || req.query?.country;
+    if (clientHint && typeof clientHint === 'string' && clientHint.length === 2) {
+      return clientHint.toUpperCase();
+    }
   }
 
-  // 2. Check cloud / proxy headers
+  // 2. Check trusted cloud / proxy headers
   for (const headerKey of COUNTRY_HEADER_KEYS) {
     const value = req.headers[headerKey];
     if (value && typeof value === 'string' && value.length === 2 && value !== 'XX' && value !== 'T1') {
@@ -35,16 +37,7 @@ export function detectCountryFromRequest(req) {
     }
   }
 
-  // 3. Check Accept-Language header for regional clues (e.g., en-IN, hi, ta, te, kn, mr, bn)
-  const acceptLanguage = req.headers['accept-language'];
-  if (acceptLanguage && typeof acceptLanguage === 'string') {
-    const upperLang = acceptLanguage.toUpperCase();
-    if (upperLang.includes('-IN') || upperLang.includes('HI') || upperLang.includes('TA') || upperLang.includes('TE') || upperLang.includes('KN') || upperLang.includes('MR')) {
-      return 'IN';
-    }
-  }
-
-  // Default fallback: In local development, default to IN so Indian payment methods (Razorpay) can be tested locally
+  // 3. Fallback:In local development, default to IN so Indian payment methods (Razorpay) can be tested locally
   if (process.env.NODE_ENV !== 'production') {
     return 'IN';
   }
@@ -57,7 +50,8 @@ export function detectCountryFromRequest(req) {
  * @param {string} countryCode
  */
 export function resolveLocationContext(countryCode) {
-  const normalizedCountry = (countryCode || 'GLOBAL').toUpperCase();
+  const safeCode = typeof countryCode === 'string' && countryCode.trim() ? countryCode.trim() : 'GLOBAL';
+  const normalizedCountry = safeCode.toUpperCase();
   const isIndia = normalizedCountry === 'IN';
 
   return {

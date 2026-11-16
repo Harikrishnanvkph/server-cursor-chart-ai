@@ -1,17 +1,32 @@
 import { z } from 'zod'
 
+export const emailSchema = z.string().trim().email('Invalid email format')
+
+export const passwordSchema = z
+  .string()
+  .min(8, 'Password must be at least 8 characters')
+  .regex(/^(?=.*[A-Za-z])(?=.*\d).+$/, 'Password must include a letter and a number')
+
 export const signUpSchema = z.object({
-  email: z.string().email('Invalid email format'),
-  password: z
-    .string()
-    .min(8, 'Password must be at least 8 characters')
-    .regex(/^(?=.*[A-Za-z])(?=.*\d).+$/, 'Password must include a letter and a number'),
+  email: emailSchema,
+  password: passwordSchema,
   fullName: z.string().trim().min(1, 'Full name is required').max(120),
 })
 
 export const signInSchema = z.object({
-  email: z.string().email('Invalid email format'),
+  email: emailSchema,
   password: z.string().min(1, 'Password is required'),
+})
+
+export const sendOtpSchema = z.object({
+  email: emailSchema,
+  mode: z.enum(['signin', 'signup']).default('signin'),
+  fullName: z.string().trim().min(1, 'Full name is required').max(120).optional(),
+})
+
+export const verifyOtpSchema = z.object({
+  email: emailSchema,
+  token: z.string().trim().regex(/^\d{6}$/, 'Verification code must be 6 digits'),
 })
 
 /**

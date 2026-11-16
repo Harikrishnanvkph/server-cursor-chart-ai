@@ -7,6 +7,7 @@ import {
   getOpenRouterAccountInfo
 } from '../services/openrouterService.js';
 import { canConsumeAiCredit, deductAiCredit, refundAiCredit } from '../services/subscriptionService.js';
+import { requireAdmin } from '../middleware/authMiddleware.js';
 
 const router = express.Router();
 
@@ -149,9 +150,9 @@ router.get('/models', (req, res) => {
 
 /**
  * GET /api/openrouter/validate
- * Validate OpenRouter API key
+ * Validate OpenRouter API key (admin only)
  */
-router.get('/validate', async (req, res) => {
+router.get('/validate', requireAdmin, async (req, res) => {
   try {
     if (!process.env.OPENROUTER_API_KEY) {
       return res.status(400).json({
@@ -193,9 +194,9 @@ router.get('/status', async (req, res) => {
     const hasApiKey = !!process.env.OPENROUTER_API_KEY;
     const models = getAvailableOpenRouterModels();
 
-    // Try to get account info if API key is available
+    // Only expose account balance/usage details to admins
     let accountInfo = null;
-    if (hasApiKey) {
+    if (hasApiKey && req.user?.is_admin) {
       accountInfo = await getOpenRouterAccountInfo();
     }
 
@@ -231,9 +232,9 @@ router.get('/status', async (req, res) => {
 
 /**
  * GET /api/openrouter/account
- * Get OpenRouter account information
+ * Get OpenRouter account information (admin only)
  */
-router.get('/account', async (req, res) => {
+router.get('/account', requireAdmin, async (req, res) => {
   try {
     if (!process.env.OPENROUTER_API_KEY) {
       return res.status(400).json({

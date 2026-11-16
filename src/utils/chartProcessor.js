@@ -1018,6 +1018,10 @@ The user explicitly requested a "grouped chart" or multiple comparative metrics 
   clearCache() {
     this.aiContextCache = null;
     this.modificationContextCache = null;
+    imageResolutionCache.clear();
+    if (typeof urlValidationCache !== 'undefined') {
+      urlValidationCache.clear();
+    }
   }
 
   /**
@@ -2093,6 +2097,30 @@ async function checkWikipediaFile(name) {
 
 async function validateImageUrl(url, timeoutMs = 2500) {
   if (!url || typeof url !== 'string' || !url.startsWith('http')) return false;
+
+  try {
+    const parsed = new URL(url);
+    if (!['http:', 'https:'].includes(parsed.protocol)) return false;
+    const host = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, '');
+    if (
+      host === 'localhost' ||
+      host === '0.0.0.0' ||
+      host === '::1' ||
+      host.startsWith('127.') ||
+      host.startsWith('10.') ||
+      host.startsWith('192.168.') ||
+      host.startsWith('169.254.') ||
+      host.startsWith('::ffff:127.') ||
+      host.startsWith('fe80:') ||
+      host.startsWith('fc00:') ||
+      host.startsWith('fd00:') ||
+      /^172\.(1[6-9]|2\d|3[0-1])\./.test(host)
+    ) {
+      return false;
+    }
+  } catch {
+    return false;
+  }
 
   // Immediately reject known dummy/placeholder images without network overhead
   if (isPlaceholderImageUrl(url)) {

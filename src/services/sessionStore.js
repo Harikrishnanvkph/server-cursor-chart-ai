@@ -127,21 +127,25 @@ class SecureSessionStore {
           throw new Error('Failed to create user profile');
         }
       } else {
-        // Only update profile if the OAuth provider details actually changed (saves a database write query)
-        const needsUpdate = 
-          user.full_name !== (userData.name || userData.full_name) ||
-          user.avatar_url !== userData.picture ||
+        // Preserve existing full_name and avatar_url if already set; only fill missing values
+        const nextFullName = user.full_name || userData.name || userData.full_name || null;
+        const nextAvatarUrl = user.avatar_url || userData.picture || null;
+        const nextProviderId = String(userData.sub || userData.id);
+
+        const needsUpdate =
+          user.full_name !== nextFullName ||
+          user.avatar_url !== nextAvatarUrl ||
           user.provider !== provider ||
-          user.provider_id !== String(userData.sub || userData.id);
+          user.provider_id !== nextProviderId;
 
         if (needsUpdate) {
           const { data: updatedUser, error: updateError } = await supabaseAdminClient
             .from('profiles')
             .update({
-              full_name: userData.name || userData.full_name,
-              avatar_url: userData.picture,
+              full_name: nextFullName,
+              avatar_url: nextAvatarUrl,
               provider: provider,
-              provider_id: userData.sub || userData.id,
+              provider_id: nextProviderId,
               updated_at: new Date().toISOString()
             })
             .eq('id', user.id)

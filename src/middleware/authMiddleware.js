@@ -135,11 +135,17 @@ const SUSPICIOUS_IPS = new Map(); // IPs with suspicious activity
 
 // Helper function to get client IP
 function getClientIP(req) {
-  return req.headers['x-forwarded-for'] ||
+  const forwarded = req.headers['x-forwarded-for'];
+  if (typeof forwarded === 'string' && forwarded.length > 0) {
+    return forwarded.split(',')[0].trim();
+  }
+  return (
     req.headers['x-real-ip'] ||
+    req.ip ||
     req.connection?.remoteAddress ||
     req.socket?.remoteAddress ||
-    'unknown';
+    'unknown'
+  );
 }
 
 // ============================================================
@@ -194,7 +200,7 @@ setInterval(() => {
   for (const [ip, info] of SUSPICIOUS_IPS.entries()) {
     if (now > info.blockedUntil) SUSPICIOUS_IPS.delete(ip);
   }
-}, 15 * 60 * 1000);
+}, 15 * 60 * 1000).unref?.();
 
 function rateLimitMiddleware(req, res, next) {
   const clientIP = getClientIP(req);

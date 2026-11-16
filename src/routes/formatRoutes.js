@@ -79,7 +79,8 @@ router.post('/formats', requireAuth, async (req, res) => {
       return res.status(400).json({ error: 'name, skeleton, and dimensions are required' });
     }
 
-    const format = await formatService.createFormat(userId, req.body);
+    const isAdmin = req.user?.is_admin === true;
+    const format = await formatService.createFormat(userId, req.body, isAdmin);
     res.status(201).json(format);
   } catch (error) {
     console.error('Error creating format:', error);

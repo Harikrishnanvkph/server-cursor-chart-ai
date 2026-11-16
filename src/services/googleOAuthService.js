@@ -125,6 +125,9 @@ class GoogleOAuthService {
 
       // Get user information
       const userInfo = await this.getUserInfo(tokens.access_token);
+      if (!userInfo?.email || userInfo.verified_email === false) {
+        throw new Error('Google account email is missing or not verified');
+      }
 
       const result = {
         user: {

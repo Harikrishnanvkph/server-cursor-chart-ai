@@ -248,6 +248,32 @@ router.post('/chart-snapshots/:id/share', async (req, res) => {
   }
 });
 
+// Batch fetch current chart snapshots for multiple conversations
+router.post('/conversations/batch-snapshots', async (req, res) => {
+  try {
+    const userId = req.user?.id || req.user?.user_id;
+    const { conversationIds } = req.body || {};
+
+    if (!Array.isArray(conversationIds)) {
+      return res.status(400).json({ error: 'conversationIds must be an array' });
+    }
+
+    const sanitizedIds = [...new Set(
+      conversationIds.filter((id) => typeof id === 'string' && id.trim().length > 0)
+    )].slice(0, 24);
+
+    if (sanitizedIds.length === 0) {
+      return res.json({ snapshots: {} });
+    }
+
+    const snapshots = await chartDataService.getBatchCurrentSnapshots(userId, sanitizedIds);
+    res.json({ snapshots });
+  } catch (error) {
+    console.error('Error fetching batch snapshots:', error);
+    res.status(500).json({ error: 'Failed to fetch batch snapshots' });
+  }
+});
+
 // Get current chart snapshot for conversation
 router.get('/conversations/:id/current-snapshot', async (req, res) => {
   try {
@@ -414,16 +440,37 @@ router.post('/upload-image', async (req, res) => {
       return res.status(400).json({ error: 'Invalid data URI format' });
     }
 
-    let contentType = match[1];
+    let contentType = match[1].toLowerCase().trim();
+    const allowedMimeTypes = new Set([
+      'image/png',
+      'image/jpeg',
+      'image/jpg',
+      'image/webp',
+      'image/gif',
+      'image/svg+xml'
+    ]);
+    if (!allowedMimeTypes.has(contentType)) {
+      return res.status(400).json({ error: 'Unsupported image MIME type' });
+    }
+
     const base64String = match[2];
     let buffer = Buffer.from(base64String, 'base64');
 
-    const isSvg = contentType.includes('svg');
-    let finalExtension = contentType.split('/')[1] || 'png';
+    const isSvg = contentType === 'image/svg+xml';
+    let finalExtension = isSvg ? 'svg' : (contentType.split('/')[1] || 'png');
     let processedBuffer = buffer;
 
-    // Apply compression logic if not SVG
-    if (!isSvg) {
+    if (isSvg) {
+      const sanitizedSvg = buffer
+        .toString('utf8')
+        .replace(/<script[\s\S]*?>[\s\S]*?<\/script>/gi, '')
+        .replace(/<foreignObject[\s\S]*?>[\s\S]*?<\/foreignObject>/gi, '')
+        .replace(/<(iframe|object|embed)[\s\S]*?>/gi, '')
+        .replace(/\bon\w+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '')
+        .replace(/javascript\s*:/gi, '');
+      processedBuffer = Buffer.from(sanitizedSvg, 'utf8');
+    } else {
+      // Apply compression logic & verify valid raster image via sharp
       try {
         const metadata = await sharp(buffer).metadata();
         const originalWidth = metadata.width || 0;
@@ -452,7 +499,8 @@ router.post('/upload-image', async (req, res) => {
           console.log(`[ImageUpload] Compressed image from ${originalSizeKB.toFixed(1)}KB to ${(processedBuffer.length / 1024).toFixed(1)}KB (webp)`);
         }
       } catch (sharpError) {
-        console.warn('[ImageUpload] Sharp compression failed, uploading original buffer:', sharpError);
+        console.warn('[ImageUpload] Sharp validation/compression failed:', sharpError);
+        return res.status(400).json({ error: 'Invalid or corrupted image file' });
       }
     }
 
@@ -597,15 +645,17 @@ router.get('/my-images', async (req, res) => {
       searchStr: JSON.stringify({ skeleton: fmt.skeleton, thumbnail_url: fmt.thumbnail_url })
     }));
 
-    // Build usage mappings for each image using pre-computed strings
+    // Build usage mappings for each image using pre-computed strings (match unique storage path or full URL)
     const imagesWithMappings = images.map(img => {
-      const filename = img.image_path.split('/').pop();
+      const storagePath = img.image_path;
       const imageUrl = img.image_url;
+      const matchesImage = (str) =>
+        (storagePath && str.includes(storagePath)) || (imageUrl && str.includes(imageUrl));
 
       // Find mapped charts
       const mappedCharts = [];
       snapSearchData.forEach(({ snap, searchStr }) => {
-        if (searchStr.includes(filename) || searchStr.includes(imageUrl)) {
+        if (matchesImage(searchStr)) {
           const conv = conversations.find(c => c.id === snap.conversation_id);
           if (conv) {
             mappedCharts.push({ id: conv.id, title: conv.title, snapshotId: snap.id });
@@ -616,7 +666,7 @@ router.get('/my-images', async (req, res) => {
       // Find mapped templates
       const mappedTemplates = [];
       tplSearchData.forEach(({ tpl, searchStr }) => {
-        if (searchStr.includes(filename) || searchStr.includes(imageUrl)) {
+        if (matchesImage(searchStr)) {
           mappedTemplates.push({ id: tpl.id, name: tpl.name });
         }
       });
@@ -624,7 +674,7 @@ router.get('/my-images', async (req, res) => {
       // Find mapped formats
       const mappedFormats = [];
       fmtSearchData.forEach(({ fmt, searchStr }) => {
-        if (searchStr.includes(filename) || searchStr.includes(imageUrl)) {
+        if (matchesImage(searchStr)) {
           mappedFormats.push({ id: fmt.id, name: fmt.name });
         }
       });
@@ -664,8 +714,10 @@ router.delete('/my-images/:id', async (req, res) => {
       return res.status(404).json({ error: 'Image not found or unauthorized' });
     }
 
-    const filename = img.image_path.split('/').pop();
+    const storagePath = img.image_path;
     const imageUrl = img.image_url;
+    const matchesImage = (str) =>
+      (storagePath && str.includes(storagePath)) || (imageUrl && str.includes(imageUrl));
 
     // 2. Identify all associated charts (conversations)
     const { data: conversations, error: convsError } = await supabaseAdminClient
@@ -690,7 +742,7 @@ router.delete('/my-images/:id', async (req, res) => {
           chart_config: snap.chart_config,
           template_structure: snap.template_structure
         });
-        if (snapString.includes(filename) || snapString.includes(imageUrl)) {
+        if (matchesImage(snapString)) {
           if (!conversationsToDelete.includes(snap.conversation_id)) {
             conversationsToDelete.push(snap.conversation_id);
           }
@@ -709,7 +761,7 @@ router.delete('/my-images/:id', async (req, res) => {
     const templatesToDelete = [];
     templates.forEach(tpl => {
       const tplString = JSON.stringify(tpl.template_structure);
-      if (tplString.includes(filename) || tplString.includes(imageUrl)) {
+      if (matchesImage(tplString)) {
         templatesToDelete.push(tpl.id);
       }
     });
@@ -725,7 +777,7 @@ router.delete('/my-images/:id', async (req, res) => {
     const formatsToDelete = [];
     formats.forEach(fmt => {
       const fmtString = JSON.stringify({ skeleton: fmt.skeleton, thumbnail_url: fmt.thumbnail_url });
-      if (fmtString.includes(filename) || fmtString.includes(imageUrl)) {
+      if (matchesImage(fmtString)) {
         formatsToDelete.push(fmt.id);
       }
     });

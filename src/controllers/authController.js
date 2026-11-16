@@ -1,6 +1,7 @@
 import { supabaseUserClient, supabaseAdminClient, getSupabaseAuthUrls } from '../supabase/client.js'
-import { signInSchema, signUpSchema } from '../utils/validators.js'
+import { signInSchema, signUpSchema, sendOtpSchema, verifyOtpSchema, emailSchema, passwordSchema } from '../utils/validators.js'
 import googleOAuthService from '../services/googleOAuthService.js'
+import githubOAuthService from '../services/githubOAuthService.js'
 import secureSessionStore from '../services/sessionStore.js'
 import { getUserSubscription, setSubscriptionTier } from '../services/subscriptionService.js'
 import { invalidateCachedUser, isJwtFormat } from '../middleware/authMiddleware.js'
@@ -43,17 +44,34 @@ function clearSessionCookies(res) {
 export async function signUp(req, res) {
   try {
     const { email, password, fullName } = signUpSchema.parse(req.body)
+    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000'
 
     const { data, error } = await supabaseUserClient.auth.signUp({
       email,
       password,
       options: {
-        data: { full_name: fullName }
+        data: { full_name: fullName },
+        emailRedirectTo: `${frontendUrl}/auth/confirm`,
       }
     })
 
     if (error) {
       return res.status(400).json({ error: error.message })
+    }
+
+    // When email confirmation is enabled, Supabase returns 200 with identities: []
+    // for already-registered emails instead of an error.
+    const isExistingUser = Boolean(
+      data.user && Array.isArray(data.user.identities) && data.user.identities.length === 0
+    )
+
+    if (isExistingUser) {
+      return res.status(409).json({
+        error: 'An account with this email already exists. Try signing in instead.',
+        code: 'EMAIL_ALREADY_REGISTERED',
+        wasNewUser: false,
+        requiresEmailConfirmation: false,
+      })
     }
 
     if (data.session) {
@@ -69,6 +87,9 @@ export async function signUp(req, res) {
       requiresEmailConfirmation: !data.session
     })
   } catch (error) {
+    if (error?.name === 'ZodError') {
+      return res.status(400).json({ error: error.errors?.[0]?.message || 'Invalid input data' })
+    }
     console.error('Sign up error:', error)
     res.status(400).json({ error: 'Invalid input data' })
   }
@@ -93,8 +114,15 @@ export async function signIn(req, res) {
     })
 
     if (error) {
+      const msg = String(error.message || '')
+      if (msg.toLowerCase().includes('email not confirmed')) {
+        return res.status(403).json({
+          error: 'Email not confirmed. Please verify your email address before signing in.',
+          code: 'EMAIL_NOT_CONFIRMED',
+        })
+      }
       secureSessionStore.recordFailedAttempt(`login:${normalizedEmail}`)
-      return res.status(400).json({ error: error.message })
+      return res.status(401).json({ error: msg })
     }
 
     // Reset rate limit counter on successful login
@@ -121,8 +149,156 @@ export async function signIn(req, res) {
       user: user
     })
   } catch (error) {
+    if (error?.name === 'ZodError') {
+      return res.status(400).json({ error: error.errors?.[0]?.message || 'Invalid input data' })
+    }
     console.error('Sign in error:', error)
     res.status(400).json({ error: 'Invalid input data' })
+  }
+}
+
+// Send passwordless verification code (OTP) + magic link
+export async function sendOtp(req, res) {
+  try {
+    const { email, mode, fullName } = sendOtpSchema.parse(req.body)
+    const normalizedEmail = email.toLowerCase().trim()
+    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000'
+
+    if (!secureSessionStore.checkRateLimit(`otp_send:${normalizedEmail}`)) {
+      return res.status(429).json({
+        error: 'Too many code requests for this email. Please wait 15 minutes before trying again.'
+      })
+    }
+
+    if (mode === 'signup') {
+      if (!fullName) {
+        return res.status(400).json({ error: 'Full name is required' })
+      }
+      const { data: existingProfile } = await supabaseAdminClient
+        .from('profiles')
+        .select('id')
+        .eq('email', normalizedEmail)
+        .maybeSingle()
+
+      if (existingProfile) {
+        const { data: authData } = await supabaseAdminClient.auth.admin.getUserById(existingProfile.id)
+        if (authData?.user?.email_confirmed_at) {
+          return res.status(409).json({
+            error: 'An account with this email already exists. Please sign in instead.',
+            code: 'EMAIL_ALREADY_REGISTERED',
+          })
+        }
+
+        // Unconfirmed user re-signing up: update their pending name and let signInWithOtp send a fresh code
+        await Promise.allSettled([
+          supabaseAdminClient.auth.admin.updateUserById(existingProfile.id, {
+            user_metadata: { ...(authData?.user?.user_metadata || {}), full_name: fullName },
+          }),
+          supabaseAdminClient
+            .from('profiles')
+            .update({ full_name: fullName })
+            .eq('id', existingProfile.id),
+        ])
+      }
+    }
+
+    secureSessionStore.recordFailedAttempt(`otp_send:${normalizedEmail}`)
+
+    const { error } = await supabaseUserClient.auth.signInWithOtp({
+      email: normalizedEmail,
+      options: {
+        shouldCreateUser: mode === 'signup',
+        data: mode === 'signup' && fullName ? { full_name: fullName } : undefined,
+        emailRedirectTo: `${frontendUrl}/auth/confirm`,
+      }
+    })
+
+    if (error) {
+      const msg = String(error.message || '')
+      if (mode === 'signin' && (msg.toLowerCase().includes('signups not allowed') || msg.toLowerCase().includes('user not found'))) {
+        return res.status(404).json({
+          error: 'No account found with this email. Please sign up first.',
+          code: 'USER_NOT_FOUND',
+        })
+      }
+      return res.status(400).json({ error: msg })
+    }
+
+    res.json({
+      success: true,
+      message: 'Verification code sent to your email.'
+    })
+  } catch (error) {
+    if (error?.name === 'ZodError') {
+      return res.status(400).json({ error: error.errors?.[0]?.message || 'Invalid input data' })
+    }
+    console.error('Send OTP error:', error)
+    res.status(500).json({ error: 'Failed to send verification code' })
+  }
+}
+
+// Verify 6-digit email OTP and issue httpOnly session cookies
+export async function verifyOtp(req, res) {
+  try {
+    const { email, token } = verifyOtpSchema.parse(req.body)
+    const normalizedEmail = email.toLowerCase().trim()
+
+    if (!secureSessionStore.checkRateLimit(`otp_verify:${normalizedEmail}`)) {
+      return res.status(429).json({
+        error: 'Too many failed verification attempts. Please wait 15 minutes before trying again.'
+      })
+    }
+
+    let { data, error } = await supabaseUserClient.auth.verifyOtp({
+      email: normalizedEmail,
+      token,
+      type: 'email'
+    })
+
+    // Fallback for first-time unconfirmed signup tokens in GoTrue
+    if (error || !data?.session) {
+      const signupVerify = await supabaseUserClient.auth.verifyOtp({
+        email: normalizedEmail,
+        token,
+        type: 'signup'
+      })
+      if (!signupVerify.error && signupVerify.data?.session) {
+        data = signupVerify.data
+        error = null
+      }
+    }
+
+    if (error || !data?.session || !data?.user) {
+      secureSessionStore.recordFailedAttempt(`otp_verify:${normalizedEmail}`)
+      return res.status(401).json({
+        error: 'Invalid or expired verification code. Please try again.'
+      })
+    }
+
+    secureSessionStore.resetRateLimit(`otp_verify:${normalizedEmail}`)
+    secureSessionStore.resetRateLimit(`otp_send:${normalizedEmail}`)
+
+    let user = data.user
+    try {
+      const sub = await getUserSubscription(user.id)
+      user = sub ? { ...user, ...sub } : { ...user, is_admin: false }
+    } catch (profileError) {
+      console.warn('Failed to fetch admin/subscription status for user:', user.id, profileError?.message)
+      user = { ...user, is_admin: false }
+    }
+
+    setSessionCookies(res, data.session)
+    res.json({
+      success: true,
+      message: 'Verified successfully',
+      user
+    })
+  } catch (error) {
+    if (error?.name === 'ZodError') {
+      return res.status(400).json({ error: error.errors?.[0]?.message || 'Invalid verification code' })
+    }
+    console.error('Verify OTP error:', error)
+    res.status(500).json({ error: 'Verification failed' })
   }
 }
 
@@ -217,6 +393,13 @@ export async function downgradeSubscription(req, res) {
     if (!userId) {
       return res.status(401).json({ error: 'Authentication required' })
     }
+
+    if (isProd && !req.user?.is_admin) {
+      return res.status(403).json({
+        error: 'Direct subscription reset is restricted to administrators.'
+      })
+    }
+
     const updatedSub = await setSubscriptionTier(userId, 'free')
     res.json({ success: true, message: 'Downgraded to Free', subscription: updatedSub })
   } catch (error) {
@@ -347,14 +530,81 @@ export async function googleCallback(req, res) {
   }
 }
 
+// Start GitHub OAuth flow
+export async function githubStart(req, res) {
+  try {
+    const state = crypto.randomBytes(32).toString('hex')
+
+    res.cookie('oauth_state', state, {
+      httpOnly: true,
+      secure: isProd,
+      sameSite: isProd ? 'none' : 'lax',
+      path: '/',
+      maxAge: 10 * 60 * 1000
+    })
+
+    const authUrl = githubOAuthService.getAuthorizationUrl(state)
+    res.json({ authUrl })
+  } catch (error) {
+    console.error('GitHub OAuth start error:', error)
+    res.status(500).json({ error: 'Failed to start GitHub OAuth flow' })
+  }
+}
+
+// GitHub OAuth callback
+export async function githubCallback(req, res) {
+  try {
+    const { code, state } = req.query
+
+    if (!code) {
+      return res.status(400).json({ error: 'Authorization code required' })
+    }
+
+    const storedState = req.cookies?.oauth_state
+    if (!state || !storedState || state !== storedState) {
+      console.warn('GitHub OAuth state mismatch - possible CSRF attack')
+      await secureSessionStore.logSecurityEvent('suspicious_activity', req.ip, req.get('User-Agent'), {
+        reason: 'OAuth state mismatch',
+        provider: 'github'
+      })
+      const errorUrl = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/signin?error=${encodeURIComponent('Authentication failed: invalid state')}`
+      return res.redirect(errorUrl)
+    }
+
+    res.clearCookie('oauth_state', { httpOnly: true, secure: isProd, sameSite: isProd ? 'none' : 'lax', path: '/' })
+
+    const tokens = await githubOAuthService.exchangeCodeForToken(code)
+    const userInfo = await githubOAuthService.getUserInfo(tokens.access_token)
+
+    const sessionToken = `oauth_${crypto.randomBytes(32).toString('hex')}`
+    await secureSessionStore.createSession(sessionToken, userInfo, 'github')
+
+    const cookieOptions = {
+      httpOnly: true,
+      secure: isProd,
+      sameSite: isProd ? 'none' : 'lax',
+      path: '/',
+      maxAge: 15 * 24 * 60 * 60 * 1000
+    }
+
+    res.cookie('access_token', sessionToken, cookieOptions)
+    const redirectUrl = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/auth/success?provider=github`
+    res.redirect(redirectUrl)
+  } catch (error) {
+    console.error('GitHub OAuth callback error:', error)
+    await secureSessionStore.logSecurityEvent('oauth_callback_failed', req.ip, req.get('User-Agent'), {
+      provider: 'github',
+      error: error.message
+    })
+    const errorUrl = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/signin?error=${encodeURIComponent('GitHub authentication failed')}`
+    res.redirect(errorUrl)
+  }
+}
+
 // Password forgot
 export async function passwordForgot(req, res) {
   try {
-    const { email } = req.body
-
-    if (!email) {
-      return res.status(400).json({ error: 'Email required' })
-    }
+    const email = emailSchema.parse(req.body?.email)
 
     const { error } = await supabaseUserClient.auth.resetPasswordForEmail(email, {
       redirectTo: `${process.env.FRONTEND_URL || 'http://localhost:3000'}/auth/reset`
@@ -365,8 +615,11 @@ export async function passwordForgot(req, res) {
     }
 
     // Generic response prevents email enumeration
-    res.json({ message: 'If an account exists with this email, a password reset link has been sent.' })
+    res.json({ success: true, message: 'If an account exists with this email, a password reset link has been sent.' })
   } catch (error) {
+    if (error?.name === 'ZodError') {
+      return res.status(400).json({ error: error.errors?.[0]?.message || 'Valid email is required' })
+    }
     console.error('Password forgot error:', error)
     res.status(500).json({ error: 'Internal server error' })
   }
@@ -375,11 +628,7 @@ export async function passwordForgot(req, res) {
 // Password reset
 export async function passwordReset(req, res) {
   try {
-    const { password } = req.body
-
-    if (!password) {
-      return res.status(400).json({ error: 'New password required' })
-    }
+    const password = passwordSchema.parse(req.body?.password)
 
     // The access_token should come from the reset email link (via cookie or Authorization header)
     // Never accept tokens from request body — they may appear in proxy/server access logs
@@ -405,8 +654,11 @@ export async function passwordReset(req, res) {
       return res.status(400).json({ error: error.message })
     }
 
-    res.json({ message: 'Password updated successfully' })
+    res.json({ success: true, message: 'Password updated successfully' })
   } catch (error) {
+    if (error?.name === 'ZodError') {
+      return res.status(400).json({ error: error.errors?.[0]?.message || 'Invalid password' })
+    }
     console.error('Password reset error:', error)
     res.status(500).json({ error: 'Internal server error' })
   }
@@ -415,87 +667,65 @@ export async function passwordReset(req, res) {
 // Resend verification email
 export async function resendVerification(req, res) {
   try {
-    const { email } = req.body
+    const email = emailSchema.parse(req.body?.email)
+    const normalizedEmail = email.toLowerCase().trim()
 
-    if (!email) {
-      return res.status(400).json({ error: 'Email required' })
+    if (!secureSessionStore.checkRateLimit(`resend:${normalizedEmail}`)) {
+      return res.status(429).json({
+        error: 'Too many verification email requests. Please wait 15 minutes before trying again.'
+      })
     }
+    secureSessionStore.recordFailedAttempt(`resend:${normalizedEmail}`)
 
     const { error } = await supabaseUserClient.auth.resend({
       type: 'signup',
-      email: email
+      email,
+      options: {
+        emailRedirectTo: `${process.env.FRONTEND_URL || 'http://localhost:3000'}/auth/confirm`,
+      }
     })
 
     if (error) {
       return res.status(400).json({ error: error.message })
     }
 
-    res.json({ message: 'Verification email resent' })
+    res.json({ success: true, message: 'Verification email resent' })
   } catch (error) {
+    if (error?.name === 'ZodError') {
+      return res.status(400).json({ error: error.errors?.[0]?.message || 'Valid email is required' })
+    }
     console.error('Resend verification error:', error)
     res.status(500).json({ error: 'Internal server error' })
   }
 }
 
-// Guest sign-in — temporary, for testing only
-const GUEST_EMAIL = 'guest@aichartor.local'
-const GUEST_PASSWORD = 'GuestTester@2026!'
-
-export async function guestSignIn(req, res) {
+// Exchange a Supabase confirmation/recovery access token for httpOnly session cookies
+export async function exchangeSession(req, res) {
   try {
-    // Try signing in with guest credentials first
-    let { data, error } = await supabaseUserClient.auth.signInWithPassword({
-      email: GUEST_EMAIL,
-      password: GUEST_PASSWORD,
-    })
+    const accessToken = req.headers.authorization?.replace('Bearer ', '')
+    const refreshToken = req.body?.refresh_token
 
-    // If guest user doesn't exist yet, create it
-    if (error && (error.message.includes('Invalid login') || error.message.includes('invalid'))) {
-      const { data: newUser, error: createError } = await supabaseAdminClient.auth.admin.createUser({
-        email: GUEST_EMAIL,
-        password: GUEST_PASSWORD,
-        email_confirm: true,
-        user_metadata: { full_name: 'Guest User' },
-      })
-
-      if (createError) {
-        console.error('Failed to create guest user:', createError.message)
-        return res.status(500).json({ error: 'Failed to create guest account' })
-      }
-
-      // Now sign in with the newly created user
-      const signInResult = await supabaseUserClient.auth.signInWithPassword({
-        email: GUEST_EMAIL,
-        password: GUEST_PASSWORD,
-      })
-      data = signInResult.data
-      error = signInResult.error
+    if (!accessToken) {
+      return res.status(401).json({ error: 'Access token required' })
     }
 
-    if (error) {
-      console.error('Guest sign-in error:', error.message)
-      return res.status(400).json({ error: error.message })
+    const { data: { user: supabaseUser }, error } = await supabaseUserClient.auth.getUser(accessToken)
+    if (error || !supabaseUser) {
+      return res.status(401).json({ error: 'Invalid or expired verification token' })
     }
 
-    let guestUser = { ...data.user, full_name: 'Guest User' }
-
-    // Enrich with subscription data so guest users see credit pills and quotas
+    let user = supabaseUser
     try {
-      const sub = await getUserSubscription(guestUser.id)
-      if (sub) {
-        guestUser = { ...guestUser, ...sub }
-      }
-    } catch (subErr) {
-      console.warn('Failed to fetch subscription for guest user:', subErr?.message)
+      const sub = await getUserSubscription(user.id)
+      user = sub ? { ...user, ...sub } : { ...user, is_admin: false }
+    } catch {
+      user = { ...user, is_admin: false }
     }
 
-    setSessionCookies(res, data.session)
-    res.json({
-      message: 'Signed in as guest',
-      user: guestUser,
-    })
+    setSessionCookies(res, { access_token: accessToken, refresh_token: refreshToken })
+    res.json({ success: true, user })
   } catch (error) {
-    console.error('Guest sign-in error:', error)
+    console.error('Exchange session error:', error)
     res.status(500).json({ error: 'Internal server error' })
   }
 }

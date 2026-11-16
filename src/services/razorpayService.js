@@ -64,7 +64,11 @@ export async function createRazorpayOrder({ amountInInr, receipt, notes = {} }) 
     }
   }
 
-  // Developer Simulation Mode when keys are not configured yet
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error('Razorpay payment gateway is not configured in production');
+  }
+
+  // Developer Simulation Mode when keys are not configured yet (non-production only)
   console.log('Razorpay API keys not configured. Running in Developer Simulation Mode.');
   const simulatedOrderId = `order_sim_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
   return {
@@ -86,10 +90,14 @@ export function verifyRazorpaySignature({ orderId, paymentId, signature }) {
     return { verified: false, error: 'Missing order ID, payment ID, or signature' };
   }
 
-  // Allow simulation mode when keys are not provided
-  if (!isRazorpayConfigured || orderId.startsWith('order_sim_')) {
+  // Allow simulation mode only in non-production environments
+  if (process.env.NODE_ENV !== 'production' && (!isRazorpayConfigured || String(orderId).startsWith('order_sim_'))) {
     console.log('Verifying payment signature in Simulation Mode.');
     return { verified: true, isSimulation: true };
+  }
+
+  if (!KEY_SECRET) {
+    return { verified: false, error: 'Razorpay key secret not configured' };
   }
 
   try {
@@ -99,7 +107,11 @@ export function verifyRazorpaySignature({ orderId, paymentId, signature }) {
       .update(text)
       .digest('hex');
 
-    const verified = expectedSignature === signature;
+    const expectedBuf = Buffer.from(expectedSignature, 'utf8');
+    const actualBuf = Buffer.from(String(signature), 'utf8');
+    const verified =
+      expectedBuf.byteLength === actualBuf.byteLength &&
+      crypto.timingSafeEqual(expectedBuf, actualBuf);
     return {
       verified,
       error: verified ? null : 'Invalid payment signature',
@@ -116,8 +128,16 @@ export function verifyRazorpaySignature({ orderId, paymentId, signature }) {
  */
 export function verifyRazorpayWebhook({ rawBody, signature }) {
   if (!WEBHOOK_SECRET) {
+    if (process.env.NODE_ENV === 'production') {
+      console.error('RAZORPAY_WEBHOOK_SECRET not set in production. Rejecting webhook.');
+      return false;
+    }
     console.warn('RAZORPAY_WEBHOOK_SECRET not set. Webhook verification skipped in dev.');
     return true;
+  }
+
+  if (!signature) {
+    return false;
   }
 
   try {
@@ -126,7 +146,12 @@ export function verifyRazorpayWebhook({ rawBody, signature }) {
       .update(typeof rawBody === 'string' ? rawBody : JSON.stringify(rawBody))
       .digest('hex');
 
-    return expectedSignature === signature;
+    const expectedBuf = Buffer.from(expectedSignature, 'utf8');
+    const actualBuf = Buffer.from(String(signature), 'utf8');
+    return (
+      expectedBuf.byteLength === actualBuf.byteLength &&
+      crypto.timingSafeEqual(expectedBuf, actualBuf)
+    );
   } catch (error) {
     console.error('Webhook verification error:', error);
     return false;

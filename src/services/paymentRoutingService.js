@@ -202,6 +202,10 @@ export async function updatePaymentTransaction(identifier, updates) {
       query = query.eq('gateway_payment_id', identifier.gatewayPaymentId);
     }
 
+    if (identifier.userId) {
+      query = query.eq('user_id', identifier.userId);
+    }
+
     const { data, error } = await query.select();
     if (error) {
       console.warn('Could not update payment transaction in Supabase:', error.message);
