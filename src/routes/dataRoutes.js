@@ -248,6 +248,30 @@ router.post('/chart-snapshots/:id/share', async (req, res) => {
   }
 });
 
+// Generate or fetch a share link for a conversation's current snapshot
+router.post('/conversations/:id/share', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const userId = req.user.id; // guaranteed by requireAuth
+
+    if (!id) {
+      return res.status(400).json({ error: 'Conversation ID is required' });
+    }
+
+    const shareInfo = await chartDataService.generateShareLinkForConversation(id, userId);
+    res.json(shareInfo);
+  } catch (error) {
+    if (
+      error.message === 'Conversation not found or unauthorized' ||
+      error.message === 'Snapshot not found for conversation'
+    ) {
+      return res.status(404).json({ error: error.message });
+    }
+    console.error('Error generating share link for conversation:', error);
+    res.status(500).json({ error: 'Failed to generate share link' });
+  }
+});
+
 // Batch fetch current chart snapshots for multiple conversations
 router.post('/conversations/batch-snapshots', async (req, res) => {
   try {

@@ -1,6 +1,54 @@
 import { z } from 'zod'
+import { createRequire } from 'module'
+
+const require = createRequire(import.meta.url)
+const disposableDomainsList = require('disposable-email-domains')
+
+const EXTRA_BLOCKED_DOMAINS = [
+  'example.com',
+  'example.org',
+  'example.net',
+  'test.com',
+  'localhost',
+]
+
+const BLOCKED_TLDS = ['.local', '.invalid', '.localhost', '.test', '.example']
+
+const DISPOSABLE_DOMAIN_SET = new Set([
+  ...disposableDomainsList.map((d) => String(d).toLowerCase()),
+  ...EXTRA_BLOCKED_DOMAINS,
+])
+
+/**
+ * Returns true if the email's domain (or parent domain) is a known disposable/temporary/test domain.
+ */
+export function isDisposableEmail(email) {
+  const atIndex = String(email || '').lastIndexOf('@')
+  if (atIndex === -1) return false
+  const domain = email.slice(atIndex + 1).trim().toLowerCase()
+  if (!domain) return false
+
+  if (BLOCKED_TLDS.some((tld) => domain.endsWith(tld))) {
+    return true
+  }
+
+  // Check exact domain and parent domains (e.g. sub.mailinator.com -> mailinator.com)
+  const parts = domain.split('.')
+  for (let i = 0; i <= parts.length - 2; i++) {
+    const candidate = parts.slice(i).join('.')
+    if (DISPOSABLE_DOMAIN_SET.has(candidate)) {
+      return true
+    }
+  }
+  return false
+}
 
 export const emailSchema = z.string().trim().email('Invalid email format')
+
+export const allowedEmailSchema = emailSchema.refine(
+  (val) => !isDisposableEmail(val),
+  'Disposable or temporary email addresses are not allowed. Please use a permanent email.'
+)
 
 export const passwordSchema = z
   .string()
@@ -8,7 +56,7 @@ export const passwordSchema = z
   .regex(/^(?=.*[A-Za-z])(?=.*\d).+$/, 'Password must include a letter and a number')
 
 export const signUpSchema = z.object({
-  email: emailSchema,
+  email: allowedEmailSchema,
   password: passwordSchema,
   fullName: z.string().trim().min(1, 'Full name is required').max(120),
 })
@@ -22,7 +70,13 @@ export const sendOtpSchema = z.object({
   email: emailSchema,
   mode: z.enum(['signin', 'signup']).default('signin'),
   fullName: z.string().trim().min(1, 'Full name is required').max(120).optional(),
-})
+}).refine(
+  (data) => data.mode !== 'signup' || !isDisposableEmail(data.email),
+  {
+    message: 'Disposable or temporary email addresses are not allowed. Please use a permanent email.',
+    path: ['email'],
+  }
+)
 
 export const verifyOtpSchema = z.object({
   email: emailSchema,

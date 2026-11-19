@@ -515,18 +515,96 @@ class ChartDataService {
     }
   }
 
+  async generateShareLinkForConversation(conversationId, userId) {
+    try {
+      // Verify conversation ownership and locate its current snapshot
+      const { data: conversation, error: convError } = await supabaseAdminClient
+        .from('conversations')
+        .select('id')
+        .eq('id', conversationId)
+        .eq('user_id', userId)
+        .maybeSingle();
+
+      if (convError) throw convError;
+      if (!conversation) {
+        throw new Error('Conversation not found or unauthorized');
+      }
+
+      const { data: currentSnapshot, error: snapError } = await supabaseAdminClient
+        .from('chart_snapshots')
+        .select('id, share_id')
+        .eq('conversation_id', conversationId)
+        .eq('is_current', true)
+        .maybeSingle();
+
+      if (snapError) throw snapError;
+
+      // Fall back to latest snapshot if is_current is missing
+      let targetSnapshot = currentSnapshot;
+      if (!targetSnapshot) {
+        const { data: latestSnapshot, error: latestErr } = await supabaseAdminClient
+          .from('chart_snapshots')
+          .select('id, share_id')
+          .eq('conversation_id', conversationId)
+          .order('created_at', { ascending: false })
+          .limit(1)
+          .maybeSingle();
+
+        if (latestErr) throw latestErr;
+        targetSnapshot = latestSnapshot;
+      }
+
+      if (!targetSnapshot) {
+        throw new Error('Snapshot not found for conversation');
+      }
+
+      if (targetSnapshot.share_id) {
+        return { share_id: targetSnapshot.share_id };
+      }
+
+      return await this.generateShareLink(targetSnapshot.id, userId);
+    } catch (error) {
+      console.error('Error generating share link for conversation:', error);
+      throw error;
+    }
+  }
+
   async getSharedChart(shareId) {
     try {
+      const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+      if (!shareId || !uuidRegex.test(String(shareId).trim())) {
+        throw new Error('Shared chart not found');
+      }
+
       // Query the snapshot explicitly by share_id. No user authentication required.
       const { data, error } = await supabaseAdminClient
         .from('chart_snapshots')
         .select('chart_data, chart_config, chart_type, created_at, template_structure, template_content')
-        .eq('share_id', shareId)
+        .eq('share_id', String(shareId).trim())
         .single();
 
       if (error && error.code !== 'PGRST116') throw error;
       if (!data) throw new Error('Shared chart not found');
-      
+
+      // Resolve format blueprint skeleton server-side when template_structure lacks zones
+      // so public viewers never have to hit authenticated /api/data/formats/:id.
+      const formatData = data.chart_config?.formatData;
+      if (formatData?.formatId && !data.template_structure?.zones) {
+        if (formatData.formatSnapshot?.skeleton?.zones) {
+          data.template_structure = formatData.formatSnapshot.skeleton;
+        } else {
+          const { data: fmt, error: fmtError } = await supabaseAdminClient
+            .from('format_blueprints')
+            .select('skeleton')
+            .eq('id', formatData.formatId)
+            .maybeSingle();
+
+          if (!fmtError && fmt?.skeleton) {
+            data.template_structure = fmt.skeleton;
+          }
+        }
+      }
+
       return data;
     } catch (error) {
       console.error('Error fetching shared chart:', error);

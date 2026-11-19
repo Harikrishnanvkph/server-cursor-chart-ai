@@ -1468,9 +1468,10 @@ async function resolveEntityImage(meta, cleanLabel, userPrompt = '', chartTitle 
     // 3. GENERIC OBJECT / FOOD / ANIMAL / CONCEPT PIPELINE
     if (meta.type === 'object') {
       // 3a. Free source: Unsplash high-res photography if configured
-      const unsplashUrl = await fetchUnsplashEntityImage(meta.query || cleanLabel);
-      if (unsplashUrl && await validateImageUrl(unsplashUrl, 2000)) {
-        return unsplashUrl;
+      const unsplashResult = await fetchUnsplashEntityImage(meta.query || cleanLabel);
+      if (unsplashResult?.url && await validateImageUrl(unsplashResult.url, 2000)) {
+        triggerUnsplashDownload(unsplashResult.downloadLocation);
+        return unsplashResult.url;
       }
 
       // 3b. Free source: Context-Scored Wikipedia
@@ -2038,15 +2039,46 @@ async function fetchUnsplashEntityImage(query) {
   if (!accessKey || !query) return null;
 
   try {
-    const res = await fetch(`https://api.unsplash.com/search/photos?query=${encodeURIComponent(query)}&per_page=3&orientation=squarish`, {
-      headers: { Authorization: `Client-ID ${accessKey}` }
+    const res = await fetch(`https://api.unsplash.com/search/photos?query=${encodeURIComponent(query)}&per_page=3&orientation=squarish&content_filter=high`, {
+      headers: {
+        Authorization: `Client-ID ${accessKey}`,
+        'Accept-Version': 'v1',
+      }
     });
     if (!res.ok) return null;
     const data = await res.json();
     const firstPhoto = data.results?.[0];
-    return firstPhoto?.urls?.small || firstPhoto?.urls?.regular || null;
+    const url = firstPhoto?.urls?.small || firstPhoto?.urls?.regular || null;
+    if (!url) return null;
+    return {
+      url,
+      downloadLocation: firstPhoto?.links?.download_location || null,
+    };
   } catch (e) {
     return null;
+  }
+}
+
+/**
+ * Fires Unsplash's required download_location tracking ping when an Unsplash image is used.
+ */
+function triggerUnsplashDownload(downloadLocation) {
+  const accessKey = process.env.UNSPLASH_ACCESS_KEY;
+  if (!accessKey || !downloadLocation) return;
+
+  try {
+    const parsed = new URL(downloadLocation);
+    if (parsed.protocol !== 'https:' || parsed.hostname !== 'api.unsplash.com') {
+      return;
+    }
+    fetch(parsed.toString(), {
+      headers: {
+        Authorization: `Client-ID ${accessKey}`,
+        'Accept-Version': 'v1',
+      },
+    }).catch(() => {});
+  } catch {
+    // Ignore malformed downloadLocation
   }
 }
 
