@@ -180,17 +180,8 @@ class ChartStylePresetService {
    * @param {Object} updates - Fields to update
    * @returns {Promise<Object>} Updated preset
    */
-  async updatePreset(presetId, userId, updates) {
+  async updatePreset(presetId, userId, updates, isAdmin = false) {
     try {
-      // First check if user is admin
-      const { data: profile } = await supabaseAdminClient
-        .from('profiles')
-        .select('is_admin')
-        .eq('id', userId)
-        .single();
-
-      const isAdmin = profile?.is_admin === true;
-
       // Build update object (only include provided fields)
       const updateObj = { updated_at: new Date().toISOString() };
       if (updates.name !== undefined) updateObj.name = updates.name;
@@ -239,17 +230,8 @@ class ChartStylePresetService {
    * @param {string} userId - User ID
    * @returns {Promise<void>}
    */
-  async deletePreset(presetId, userId) {
+  async deletePreset(presetId, userId, isAdmin = false) {
     try {
-      // Check admin status
-      const { data: profile } = await supabaseAdminClient
-        .from('profiles')
-        .select('is_admin')
-        .eq('id', userId)
-        .single();
-
-      const isAdmin = profile?.is_admin === true;
-
       let query = supabaseAdminClient
         .from('chart_style_presets')
         .delete()

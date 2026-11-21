@@ -4,7 +4,7 @@ import googleOAuthService from '../services/googleOAuthService.js'
 import githubOAuthService from '../services/githubOAuthService.js'
 import secureSessionStore from '../services/sessionStore.js'
 import { getUserSubscription, setSubscriptionTier } from '../services/subscriptionService.js'
-import { invalidateCachedUser, isJwtFormat } from '../middleware/authMiddleware.js'
+import { invalidateCachedUser, isJwtFormat, setCachedUser } from '../middleware/authMiddleware.js'
 import crypto from 'crypto'
 
 const isProd = process.env.NODE_ENV === 'production'
@@ -40,14 +40,27 @@ function clearSessionCookies(res) {
   res.clearCookie('refresh_token', clearOptions)
 }
 
+// Ensure Supabase GoTrue user objects expose top-level full_name, avatar_url, and provider
+// consistently with OAuth session users across all frontend components and payment checkout.
+function normalizeUserProfileFields(user) {
+  if (!user) return user
+  return {
+    ...user,
+    full_name: user.full_name || user.user_metadata?.full_name || user.user_metadata?.name || null,
+    avatar_url: user.avatar_url || user.user_metadata?.avatar_url || null,
+    provider: user.provider || user.app_metadata?.provider || 'email',
+  }
+}
+
 // Sign up with email/password
 export async function signUp(req, res) {
   try {
     const { email, password, fullName } = signUpSchema.parse(req.body)
+    const normalizedEmail = email.toLowerCase().trim()
     const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000'
 
     const { data, error } = await supabaseUserClient.auth.signUp({
-      email,
+      email: normalizedEmail,
       password,
       options: {
         data: { full_name: fullName },
@@ -82,7 +95,7 @@ export async function signUp(req, res) {
       message: data.session
         ? 'User signed up successfully.'
         : 'User created successfully. Please check your email for verification.',
-      user: data.user,
+      user: normalizeUserProfileFields(data.user),
       wasNewUser: true,
       requiresEmailConfirmation: !data.session
     })
@@ -99,6 +112,7 @@ export async function signUp(req, res) {
 export async function signIn(req, res) {
   try {
     const { email, password } = signInSchema.parse(req.body)
+    const adminOnly = req.body?.adminOnly === true
     const normalizedEmail = email.toLowerCase().trim()
 
     // Per-account rate limiting / lockout check
@@ -109,7 +123,7 @@ export async function signIn(req, res) {
     }
 
     const { data, error } = await supabaseUserClient.auth.signInWithPassword({
-      email,
+      email: normalizedEmail,
       password
     })
 
@@ -128,7 +142,7 @@ export async function signIn(req, res) {
     // Reset rate limit counter on successful login
     secureSessionStore.resetRateLimit(`login:${normalizedEmail}`)
 
-    let user = data.user
+    let user = normalizeUserProfileFields(data.user)
 
     // Look up admin status and subscription details (single query via getUserSubscription)
     try {
@@ -143,7 +157,22 @@ export async function signIn(req, res) {
       user = { ...user, is_admin: false }
     }
 
+    // Enforce adminOnly gate BEFORE issuing session cookies so non-admins cannot leave live cookies behind
+    if (adminOnly && !user.is_admin) {
+      if (data.session?.access_token) {
+        supabaseAdminClient.auth.admin.signOut(data.session.access_token).catch(() => {})
+      }
+      clearSessionCookies(res)
+      return res.status(403).json({
+        error: 'This account does not have admin privileges.',
+        code: 'ADMIN_REQUIRED',
+      })
+    }
+
     setSessionCookies(res, data.session)
+    if (data.session?.access_token) {
+      setCachedUser(data.session.access_token, user)
+    }
     res.json({
       message: 'Signed in successfully',
       user: user
@@ -159,6 +188,7 @@ export async function signIn(req, res) {
 
 // Send passwordless verification code (OTP) + magic link
 export async function sendOtp(req, res) {
+  const startedAt = Date.now()
   try {
     const { email, mode, fullName } = sendOtpSchema.parse(req.body)
     const normalizedEmail = email.toLowerCase().trim()
@@ -170,6 +200,7 @@ export async function sendOtp(req, res) {
       })
     }
 
+    const preCheckStart = Date.now()
     if (mode === 'signup') {
       if (!fullName) {
         return res.status(400).json({ error: 'Full name is required' })
@@ -201,9 +232,11 @@ export async function sendOtp(req, res) {
         ])
       }
     }
+    const preCheckMs = Date.now() - preCheckStart
 
     secureSessionStore.recordFailedAttempt(`otp_send:${normalizedEmail}`)
 
+    const otpStart = Date.now()
     const { error } = await supabaseUserClient.auth.signInWithOtp({
       email: normalizedEmail,
       options: {
@@ -212,6 +245,9 @@ export async function sendOtp(req, res) {
         emailRedirectTo: `${frontendUrl}/auth/confirm`,
       }
     })
+    const supabaseOtpMs = Date.now() - otpStart
+    const totalMs = Date.now() - startedAt
+    console.log(`[Auth][sendOtp] mode=${mode} status=${error ? 'error' : 'ok'} preCheckMs=${preCheckMs} supabaseOtpMs=${supabaseOtpMs} totalMs=${totalMs}`)
 
     if (error) {
       const msg = String(error.message || '')
@@ -278,7 +314,7 @@ export async function verifyOtp(req, res) {
     secureSessionStore.resetRateLimit(`otp_verify:${normalizedEmail}`)
     secureSessionStore.resetRateLimit(`otp_send:${normalizedEmail}`)
 
-    let user = data.user
+    let user = normalizeUserProfileFields(data.user)
     try {
       const sub = await getUserSubscription(user.id)
       user = sub ? { ...user, ...sub } : { ...user, is_admin: false }
@@ -288,6 +324,9 @@ export async function verifyOtp(req, res) {
     }
 
     setSessionCookies(res, data.session)
+    if (data.session?.access_token) {
+      setCachedUser(data.session.access_token, user)
+    }
     res.json({
       success: true,
       message: 'Verified successfully',
@@ -302,48 +341,16 @@ export async function verifyOtp(req, res) {
   }
 }
 
-// Get current user
+// Get current user (req.user is guaranteed by requireAuthEnhanced middleware)
 export async function me(req, res) {
   try {
-    let user = req.user
-
-    if (!user) {
-      const accessToken = req.cookies.access_token || req.headers.authorization?.replace('Bearer ', '')
-
-      if (!accessToken) {
-        return res.status(401).json({ error: 'No access token provided' })
-      }
-
-      // Try to validate as OAuth session first
-      user = await secureSessionStore.validateSession(accessToken)
-
-      if (!user) {
-        // Try Supabase auth as fallback
-        const { data: { user: supabaseUser }, error } = await supabaseUserClient.auth.getUser(accessToken)
-        if (error || !supabaseUser) {
-          return res.status(401).json({ error: 'Invalid or expired token' })
-        }
-        user = supabaseUser
-      }
-
-      // getUserSubscription now returns is_admin alongside subscription fields
-      const userId = user.user_id || user.id
-      try {
-        const sub = await getUserSubscription(userId)
-        if (sub) {
-          user = { ...user, ...sub }
-        } else {
-          user = { ...user, is_admin: false }
-        }
-      } catch (profileError) {
-        console.warn('Failed to fetch admin/subscription status for user:', userId, profileError?.message)
-        user = { ...user, is_admin: false }
-      }
+    if (!req.user) {
+      return res.status(401).json({ error: 'Authentication required' })
     }
 
+    let user = normalizeUserProfileFields(req.user)
     const userId = user.user_id || user.id
     if (userId && !user.subscription_tier) {
-      // Only fetch if not already enriched above
       try {
         const sub = await getUserSubscription(userId)
         if (sub) {
@@ -429,11 +436,11 @@ export async function signOut(req, res) {
     }
 
     clearSessionCookies(res)
-    res.json({ message: 'Signed out successfully' })
+    res.json({ success: true, message: 'Signed out successfully' })
   } catch (error) {
     console.error('Sign out error:', error)
     clearSessionCookies(res)
-    res.json({ message: 'Signed out successfully' })
+    res.json({ success: true, message: 'Signed out successfully' })
   }
 }
 
@@ -490,6 +497,9 @@ export async function googleCallback(req, res) {
     // Get user info from Google via verified API call
     // (always uses the access_token validated by Google's servers)
     const userInfo = await googleOAuthService.getUserInfo(tokens.access_token)
+    if (!userInfo?.email || userInfo.verified_email === false) {
+      throw new Error('Google account email is missing or not verified')
+    }
 
     // Generate our own secure opaque session token (decouples session lifetime from Google's 1-hour access token)
     const sessionToken = `oauth_${crypto.randomBytes(32).toString('hex')}`
@@ -500,8 +510,23 @@ export async function googleCallback(req, res) {
       userInfo,
       'google'
     )
+    if (session?.user_id) {
+      const expiresAtMs = session.expires_at ? new Date(session.expires_at).getTime() : null
+      setCachedUser(
+        sessionToken,
+        {
+          id: session.user_id,
+          email: session.email,
+          full_name: session.full_name,
+          avatar_url: session.avatar_url,
+          provider: 'google',
+          is_admin: session.is_admin === true,
+        },
+        Number.isFinite(expiresAtMs) ? expiresAtMs : null
+      )
+    }
 
-    // Set secure cookies
+    // Set secure cookies and clear any stale Supabase refresh_token from prior email logins
     const cookieOptions = {
       httpOnly: true,
       secure: isProd,
@@ -511,6 +536,12 @@ export async function googleCallback(req, res) {
     }
 
     res.cookie('access_token', sessionToken, cookieOptions)
+    res.clearCookie('refresh_token', {
+      httpOnly: true,
+      secure: isProd,
+      sameSite: isProd ? 'none' : 'lax',
+      path: '/',
+    })
 
     // Redirect to frontend with success
     const redirectUrl = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/auth/success?provider=google`
@@ -577,7 +608,22 @@ export async function githubCallback(req, res) {
     const userInfo = await githubOAuthService.getUserInfo(tokens.access_token)
 
     const sessionToken = `oauth_${crypto.randomBytes(32).toString('hex')}`
-    await secureSessionStore.createSession(sessionToken, userInfo, 'github')
+    const session = await secureSessionStore.createSession(sessionToken, userInfo, 'github')
+    if (session?.user_id) {
+      const expiresAtMs = session.expires_at ? new Date(session.expires_at).getTime() : null
+      setCachedUser(
+        sessionToken,
+        {
+          id: session.user_id,
+          email: session.email,
+          full_name: session.full_name,
+          avatar_url: session.avatar_url,
+          provider: 'github',
+          is_admin: session.is_admin === true,
+        },
+        Number.isFinite(expiresAtMs) ? expiresAtMs : null
+      )
+    }
 
     const cookieOptions = {
       httpOnly: true,
@@ -588,6 +634,13 @@ export async function githubCallback(req, res) {
     }
 
     res.cookie('access_token', sessionToken, cookieOptions)
+    // Clear any stale Supabase refresh_token from prior email logins so it cannot resurrect an old account
+    res.clearCookie('refresh_token', {
+      httpOnly: true,
+      secure: isProd,
+      sameSite: isProd ? 'none' : 'lax',
+      path: '/',
+    })
     const redirectUrl = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/auth/success?provider=github`
     res.redirect(redirectUrl)
   } catch (error) {
@@ -714,7 +767,7 @@ export async function exchangeSession(req, res) {
       return res.status(401).json({ error: 'Invalid or expired verification token' })
     }
 
-    let user = supabaseUser
+    let user = normalizeUserProfileFields(supabaseUser)
     try {
       const sub = await getUserSubscription(user.id)
       user = sub ? { ...user, ...sub } : { ...user, is_admin: false }
@@ -723,6 +776,7 @@ export async function exchangeSession(req, res) {
     }
 
     setSessionCookies(res, { access_token: accessToken, refresh_token: refreshToken })
+    setCachedUser(accessToken, user)
     res.json({ success: true, user })
   } catch (error) {
     console.error('Exchange session error:', error)

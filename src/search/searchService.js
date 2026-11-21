@@ -3,6 +3,7 @@ import { OpenAI } from 'openai';
 import { createTavilyProvider } from './tavilyProvider.js';
 import { createBraveProvider } from './braveProvider.js';
 import { createDeepSeekSearchProvider } from './deepseekSearchProvider.js';
+import { combineAbortSignals, raceWithAbort, throwIfAborted } from '../utils/abortUtils.js';
 
 // Provider Registry
 const PROVIDERS = {
@@ -49,26 +50,27 @@ class SearchService {
     return this._openai;
   }
 
-  async search(query) {
+  async search(query, options = {}) {
     console.log(`🔍 Web search query via ${this.activeProvider.name}: "${query}"`);
-    return await this.activeProvider.search(query);
+    return await this.activeProvider.search(query, options);
   }
 
   /**
    * Search using a specific provider by name (overrides the default)
    * @param {string} query - The search query string
    * @param {string} providerName - Provider key ('tavily' | 'brave')
+   * @param {Object} options - Optional abort signal options
    * @returns {Promise<string>} - Formatted search results
    */
-  async searchWithProvider(query, providerName) {
+  async searchWithProvider(query, providerName, options = {}) {
     const creator = PROVIDERS[providerName];
     if (!creator) {
       console.warn(`⚠️ Unknown search provider '${providerName}', falling back to default`);
-      return this.search(query);
+      return this.search(query, options);
     }
     const provider = creator();
     console.log(`🔍 Web search query via ${provider.name}: "${query}"`);
-    return await provider.search(query);
+    return await provider.search(query, options);
   }
 
   /**
@@ -76,7 +78,9 @@ class SearchService {
    * @param {string} serviceName - The service being used ('deepseek' or 'gemini')
    * @returns {Promise<string>} - The search query or "NO_SEARCH"
    */
-  async determineSearchQuery(inputText, messageHistory = [], serviceName = 'deepseek') {
+  async determineSearchQuery(inputText, messageHistory = [], serviceName = 'deepseek', options = {}) {
+    const parentSignal = options?.signal;
+    throwIfAborted(parentSignal);
     const currentYear = new Date().getFullYear();
     const systemPrompt = `You are a search query optimizer for a chart generation AI. Your task is to analyze the user request and recent history, then decide if we need to search the web for new factual data, statistics, or real-world information.
 
@@ -108,6 +112,7 @@ Examples:
 
     // 1. Try to use DeepSeek if requested and available
     if (serviceName === 'deepseek' && process.env.DEEPSEEK_API_KEY) {
+      const { signal: combinedSignal, cleanup } = combineAbortSignals(parentSignal, 10000);
       try {
         const response = await this.openai.chat.completions.create({
           model: 'deepseek-chat',
@@ -118,7 +123,7 @@ Examples:
           max_tokens: 60,
           temperature: 0.1
         }, {
-          signal: AbortSignal.timeout(10000)
+          signal: combinedSignal
         });
         const decision = response.choices[0]?.message?.content?.trim();
         if (decision) {
@@ -126,20 +131,27 @@ Examples:
           return decision;
         }
       } catch (error) {
+        if (parentSignal?.aborted) throw error;
         console.error('Error in DeepSeek search query determination:', error);
+      } finally {
+        cleanup();
       }
     }
 
     // 2. Fallback to Gemini if available
     if (process.env.GEMINI_API_KEY) {
+      const { signal: combinedSignal, cleanup } = combineAbortSignals(parentSignal, 10000);
       try {
         const model = this.genAI.getGenerativeModel({ model: 'gemini-3.5-flash-lite' });
-        const result = await model.generateContent(`${systemPrompt}\n\n${userContent}`);
+        const result = await raceWithAbort(model.generateContent(`${systemPrompt}\n\n${userContent}`), combinedSignal);
         const decision = result.response.text().trim();
         console.log(`🤖 Search Query Generator (Gemini) Decision: "${decision}"`);
         return decision;
       } catch (error) {
+        if (parentSignal?.aborted) throw error;
         console.error('Error in Gemini search query determination:', error);
+      } finally {
+        cleanup();
       }
     }
 

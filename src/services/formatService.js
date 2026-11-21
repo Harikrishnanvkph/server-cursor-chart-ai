@@ -157,17 +157,8 @@ class FormatService {
    * @param {Object} updates - Fields to update
    * @returns {Promise<Object>} Updated format
    */
-  async updateFormat(formatId, userId, updates) {
+  async updateFormat(formatId, userId, updates, isAdmin = false) {
     try {
-      // First check if user is admin
-      const { data: profile } = await supabaseAdminClient
-        .from('profiles')
-        .select('is_admin')
-        .eq('id', userId)
-        .single();
-
-      const isAdmin = profile?.is_admin === true;
-
       // Build update object (only include provided fields)
       const updateObj = { updated_at: new Date().toISOString() };
       if (updates.name !== undefined) updateObj.name = updates.name;
@@ -212,17 +203,8 @@ class FormatService {
    * @param {string} userId - User ID
    * @returns {Promise<Object>} Deletion result
    */
-  async deleteFormat(formatId, userId) {
+  async deleteFormat(formatId, userId, isAdmin = false) {
     try {
-      // Check if user is admin
-      const { data: profile } = await supabaseAdminClient
-        .from('profiles')
-        .select('is_admin')
-        .eq('id', userId)
-        .single();
-
-      const isAdmin = profile?.is_admin === true;
-
       let query = supabaseAdminClient
         .from('format_blueprints')
         .delete()

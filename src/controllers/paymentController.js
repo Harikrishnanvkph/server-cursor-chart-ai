@@ -259,19 +259,23 @@ export async function confirmSimulationPayment(req, res) {
     const resolvedPackId = resolvePackId(packId, planTier);
     const pack = CREDIT_PACKS[resolvedPackId] || CREDIT_PACKS.ai_pro;
     const orderKey = sessionId || `sim_order_${Date.now()}`;
+    const isIndiaSim = region === 'IN' || String(gateway).toLowerCase().includes('razorpay');
+    const simCurrency = isIndiaSim ? 'INR' : 'USD';
+    const simAmount = isIndiaSim ? (pack.priceInr || (pack.priceUsd === 2 ? 99 : 249)) : pack.priceUsd;
+    const simCountry = isIndiaSim ? 'IN' : (region || 'GLOBAL');
 
     const tx = await recordPaymentTransaction({
       userId,
       gateway: `${gateway}_simulated`,
       gatewayOrderId: orderKey,
       gatewayPaymentId: `sim_pay_${Date.now()}`,
-      amount: pack.priceUsd,
-      currency: 'USD',
+      amount: simAmount,
+      currency: simCurrency,
       packId: resolvedPackId,
       planTier: pack.badge,
       billingCycle: 'one_time',
       status: 'completed',
-      customerCountry: region,
+      customerCountry: simCountry,
       metadata: { simulated: true, packId: resolvedPackId }
     });
 
@@ -282,8 +286,8 @@ export async function confirmSimulationPayment(req, res) {
       gateway: `${gateway}_simulated`,
       orderId: orderKey,
       transactionId: tx?.id && !String(tx.id).startsWith('temp_') ? tx.id : null,
-      countryCode: region,
-      currency: 'USD',
+      countryCode: simCountry,
+      currency: simCurrency,
     });
 
     res.json({

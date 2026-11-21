@@ -1,3 +1,5 @@
+import { combineAbortSignals } from '../utils/abortUtils.js';
+
 /**
  * DeepSeek Search Provider
  * Calls DeepSeek's native Search API (`https://api.deepseek.com/v1/tools/search`)
@@ -13,12 +15,13 @@ export class DeepSeekSearchProvider {
    * @param {string} query - The search query string
    * @returns {Promise<string>} - Formatted search results
    */
-  async search(query) {
+  async search(query, options = {}) {
     const apiKey = process.env.DEEPSEEK_API_KEY;
     if (!apiKey) {
       throw new Error('DeepSeek API key is not configured. Set DEEPSEEK_API_KEY in .env');
     }
 
+    const { signal, cleanup } = combineAbortSignals(options?.signal, 15000);
     try {
       // DeepSeek search API query limit is 128 characters
       const cleanQuery = query && query.length > 128 ? query.substring(0, 128) : (query || '');
@@ -32,7 +35,8 @@ export class DeepSeekSearchProvider {
         body: JSON.stringify({
           query: cleanQuery,
           count: 8
-        })
+        }),
+        signal
       });
 
       if (!response.ok) {
@@ -62,8 +66,15 @@ Content: ${content}`;
 
       return `=== VERIFIED DEEPSEEK WEB SEARCH RESULTS ===\n\n${formattedResults}`;
     } catch (error) {
+      if (options?.signal?.aborted) {
+        const abortErr = new Error('Search cancelled');
+        abortErr.name = 'AbortError';
+        throw abortErr;
+      }
       console.error('DeepSeek search provider error:', error);
       throw new Error(`DeepSeek search failed: ${error.message}`);
+    } finally {
+      cleanup();
     }
   }
 }

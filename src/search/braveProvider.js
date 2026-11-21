@@ -1,3 +1,5 @@
+import { combineAbortSignals } from '../utils/abortUtils.js';
+
 /**
  * Brave Search Provider
  * Calls the Brave Web Search API and returns formatted results
@@ -13,12 +15,13 @@ export class BraveProvider {
    * @param {string} query - The search query string
    * @returns {Promise<string>} - Formatted search results
    */
-  async search(query) {
+  async search(query, options = {}) {
     const apiKey = process.env.BRAVE_SEARCH_API_KEY;
     if (!apiKey) {
       throw new Error('Brave Search API key is not configured. Set BRAVE_SEARCH_API_KEY in .env');
     }
 
+    const { signal, cleanup } = combineAbortSignals(options?.signal, 15000);
     try {
       const params = new URLSearchParams({
         q: query,
@@ -34,7 +37,8 @@ export class BraveProvider {
           'Accept': 'application/json',
           'Accept-Encoding': 'gzip',
           'X-Subscription-Token': apiKey
-        }
+        },
+        signal
       });
 
       if (!response.ok) {
@@ -102,8 +106,15 @@ Content: ${allContent}`;
 
       return answerSection + formattedResults + imageSection;
     } catch (error) {
+      if (options?.signal?.aborted) {
+        const abortErr = new Error('Search cancelled');
+        abortErr.name = 'AbortError';
+        throw abortErr;
+      }
       console.error('Brave search provider error:', error);
       throw new Error(`Brave search failed: ${error.message}`);
+    } finally {
+      cleanup();
     }
   }
 }

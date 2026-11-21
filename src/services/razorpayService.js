@@ -1,5 +1,4 @@
 import crypto from 'crypto';
-import Razorpay from 'razorpay';
 
 const KEY_ID = process.env.RAZORPAY_KEY_ID;
 const KEY_SECRET = process.env.RAZORPAY_KEY_SECRET;
@@ -7,16 +6,23 @@ const WEBHOOK_SECRET = process.env.RAZORPAY_WEBHOOK_SECRET;
 
 export const isRazorpayConfigured = Boolean(KEY_ID && KEY_SECRET);
 
+// Lazy-load Razorpay SDK only when creating an order (avoids cold-start overhead on auth/data endpoints)
 let razorpayInstance = null;
-if (isRazorpayConfigured) {
-  try {
-    razorpayInstance = new Razorpay({
-      key_id: KEY_ID,
-      key_secret: KEY_SECRET,
-    });
-  } catch (err) {
-    console.error('Failed to initialize Razorpay client:', err.message);
+async function getRazorpayClient() {
+  if (!isRazorpayConfigured) return null;
+  if (!razorpayInstance) {
+    try {
+      const { default: Razorpay } = await import('razorpay');
+      razorpayInstance = new Razorpay({
+        key_id: KEY_ID,
+        key_secret: KEY_SECRET,
+      });
+    } catch (err) {
+      console.error('Failed to initialize Razorpay client:', err.message);
+      return null;
+    }
   }
+  return razorpayInstance;
 }
 
 /**
@@ -40,9 +46,10 @@ export async function createRazorpayOrder({ amountInInr, receipt, notes = {} }) 
     throw new Error('Order amount must be at least 100 paise (₹1.00)');
   }
 
-  if (isRazorpayConfigured && razorpayInstance) {
+  const client = await getRazorpayClient();
+  if (isRazorpayConfigured && client) {
     try {
-      const order = await razorpayInstance.orders.create({
+      const order = await client.orders.create({
         amount: amountInPaise,
         currency: 'INR',
         receipt: receipt || `rcpt_${Date.now()}`,

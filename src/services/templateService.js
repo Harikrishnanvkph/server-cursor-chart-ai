@@ -160,17 +160,8 @@ class TemplateService {
    * @param {string} userId - User ID
    * @returns {Promise<void>}
    */
-  async deleteTemplate(templateId, userId) {
+  async deleteTemplate(templateId, userId, isAdmin = false) {
     try {
-      // First check if user is an admin
-      const { data: profile } = await supabaseAdminClient
-        .from('profiles')
-        .select('is_admin')
-        .eq('id', userId)
-        .single();
-        
-      const isAdmin = profile?.is_admin === true;
-
       // Check if template exists
       const { data: existingTemplate, error: fetchError } = await supabaseAdminClient
         .from('user_templates')

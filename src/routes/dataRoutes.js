@@ -1,11 +1,76 @@
 import express from 'express';
+import crypto from 'crypto';
 import { requireAuth } from '../middleware/authMiddleware.js';
 import chartDataService from '../services/chartDataService.js';
 import templateService from '../services/templateService.js';
 import formatService from '../services/formatService.js';
 import { supabaseAdminClient } from '../supabase/client.js';
-import sharp from 'sharp';
 import { canSaveCloudChart } from '../services/subscriptionService.js';
+
+const MAX_SHARP_UPLOAD_PIXELS = 40_000_000;
+
+export function sanitizeSvgContent(svgText) {
+  if (typeof svgText !== 'string') return '';
+
+  const dangerousTagPatterns = [
+    /<script[\s\S]*?>[\s\S]*?<\/script\s*>/gi,
+    /<script\b[^>]*\/?\s*>/gi,
+    /<foreignObject[\s\S]*?>[\s\S]*?<\/foreignObject\s*>/gi,
+    /<foreignObject\b[^>]*\/?\s*>/gi,
+    /<(iframe|object|embed|animate|animateTransform|animateMotion|set)\b[\s\S]*?>[\s\S]*?<\/\1\s*>/gi,
+    /<(iframe|object|embed|animate|animateTransform|animateMotion|set)\b[^>]*\/?\s*>/gi,
+  ];
+
+  let prev;
+  let current = svgText;
+  // Loop until stable to prevent nested bypasses like <scr<script>ipt>
+  do {
+    prev = current;
+    for (const pattern of dangerousTagPatterns) {
+      current = current.replace(pattern, '');
+    }
+    // Strip inline event handlers (e.g., onload=..., onmouseover=...)
+    current = current.replace(/\son[a-z]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '');
+    // Neutralize external <use href="https://..."> or <use xlink:href="...">
+    current = current.replace(
+      /(<use\b[^>]*?)\b(?:xlink:)?href\s*=\s*(?:"\s*(?:https?:)?\/\/[^"]*"|'\s*(?:https?:)?\/\/[^']*')/gi,
+      '$1'
+    );
+    // Decode basic numeric/named entities inside href/xlink:href attributes and strip javascript/vbscript/data:text/html
+    current = current.replace(
+      /\b(?:xlink:)?href\s*=\s*("([^"]*)"|'([^']*)')/gi,
+      (fullMatch, quoted, dq, sq) => {
+        const rawVal = dq !== undefined ? dq : (sq !== undefined ? sq : '');
+        const decoded = rawVal
+          .replace(/&#x([0-9a-f]+);?/gi, (_, hex) => {
+            const cp = parseInt(hex, 16);
+            return Number.isFinite(cp) && cp > 0 && cp <= 0x10ffff ? String.fromCodePoint(cp) : '';
+          })
+          .replace(/&#(\d+);?/g, (_, dec) => {
+            const cp = parseInt(dec, 10);
+            return Number.isFinite(cp) && cp > 0 && cp <= 0x10ffff ? String.fromCodePoint(cp) : '';
+          })
+          .replace(/&colon;/gi, ':')
+          .replace(/[\x00-\x20]/g, '');
+        if (/^(?:javascript|vbscript|data\s*:\s*text\/html)/i.test(decoded)) {
+          return 'href=""';
+        }
+        return fullMatch;
+      }
+    );
+  } while (current !== prev);
+
+  return current;
+}
+
+// Lazy-load native sharp only when /upload-image actually processes a raster image (cuts serverless cold starts)
+let _sharpInstance = null;
+async function getSharp() {
+  if (!_sharpInstance) {
+    _sharpInstance = (await import('sharp')).default;
+  }
+  return _sharpInstance;
+}
 
 const router = express.Router();
 
@@ -54,9 +119,9 @@ router.post('/conversations', async (req, res) => {
     // Check cloud chart limit (5 permanent Free + any active Cloud Credits packs)
     const saveCheck = await canSaveCloudChart(userId);
     if (!saveCheck.allowed) {
-      return res.status(403).json({
+      return res.status(saveCheck.unavailable ? 503 : 403).json({
         error: saveCheck.error,
-        code: 'CLOUD_SAVE_LIMIT_REACHED',
+        code: saveCheck.unavailable ? 'SERVICE_UNAVAILABLE' : 'CLOUD_SAVE_LIMIT_REACHED',
         subscription: saveCheck.subscription
       });
     }
@@ -386,6 +451,44 @@ router.post('/messages', async (req, res) => {
   }
 });
 
+// Add multiple messages to a conversation in one round-trip
+router.post('/messages/batch', async (req, res) => {
+  try {
+    const { conversationId, messages } = req.body || {};
+    const userId = req.user?.id || req.user?.user_id;
+
+    if (!conversationId || !Array.isArray(messages)) {
+      return res.status(400).json({ error: 'conversationId and messages array are required' });
+    }
+
+    if (messages.length === 0) {
+      return res.status(200).json([]);
+    }
+
+    if (messages.length > 100) {
+      return res.status(400).json({ error: 'Batch size cannot exceed 100 messages' });
+    }
+
+    for (const msg of messages) {
+      if (!msg || !['user', 'assistant'].includes(msg.role) || typeof msg.content !== 'string' || !msg.content) {
+        return res.status(400).json({ error: 'Each message must have a valid role and non-empty content' });
+      }
+    }
+
+    // Security: Verify user owns this conversation once for the whole batch
+    const isOwner = await verifyConversationOwner(conversationId, userId);
+    if (!isOwner) {
+      return res.status(403).json({ error: 'Unauthorized: conversation does not belong to user' });
+    }
+
+    const inserted = await chartDataService.addMessagesBatch(conversationId, messages);
+    res.status(201).json(inserted);
+  } catch (error) {
+    console.error('Error batch adding messages:', error);
+    res.status(500).json({ error: 'Failed to add messages' });
+  }
+});
+
 // =============================================
 // USER PREFERENCES ROUTES
 // =============================================
@@ -481,22 +584,22 @@ router.post('/upload-image', async (req, res) => {
     let buffer = Buffer.from(base64String, 'base64');
 
     const isSvg = contentType === 'image/svg+xml';
+    const isGif = contentType === 'image/gif';
     let finalExtension = isSvg ? 'svg' : (contentType.split('/')[1] || 'png');
+    if (finalExtension === 'jpeg') finalExtension = 'jpg';
     let processedBuffer = buffer;
 
     if (isSvg) {
-      const sanitizedSvg = buffer
-        .toString('utf8')
-        .replace(/<script[\s\S]*?>[\s\S]*?<\/script>/gi, '')
-        .replace(/<foreignObject[\s\S]*?>[\s\S]*?<\/foreignObject>/gi, '')
-        .replace(/<(iframe|object|embed)[\s\S]*?>/gi, '')
-        .replace(/\bon\w+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '')
-        .replace(/javascript\s*:/gi, '');
+      const sanitizedSvg = sanitizeSvgContent(buffer.toString('utf8'));
       processedBuffer = Buffer.from(sanitizedSvg, 'utf8');
     } else {
-      // Apply compression logic & verify valid raster image via sharp
+      // Apply compression logic & verify valid raster image via sharp (lazy-loaded)
       try {
-        const metadata = await sharp(buffer).metadata();
+        const sharp = await getSharp();
+        const sharpInputOpts = isGif
+          ? { animated: true, limitInputPixels: MAX_SHARP_UPLOAD_PIXELS }
+          : { limitInputPixels: MAX_SHARP_UPLOAD_PIXELS };
+        const metadata = await sharp(buffer, sharpInputOpts).metadata();
         const originalWidth = metadata.width || 0;
         const originalHeight = metadata.height || 0;
         const longestSide = Math.max(originalWidth, originalHeight);
@@ -504,7 +607,7 @@ router.post('/upload-image', async (req, res) => {
 
         // Compress if: file size > 150KB OR width/height > 2000px
         if (originalSizeKB > 150 || longestSide > 2000) {
-          let pipeline = sharp(buffer);
+          let pipeline = sharp(buffer, sharpInputOpts);
 
           // Proportional scaling
           if (longestSide > 2000) {
@@ -515,7 +618,7 @@ router.post('/upload-image', async (req, res) => {
             }
           }
 
-          // Transcode to WebP (85% quality)
+          // Transcode to WebP (85% quality; animated frames preserved when opened with animated: true)
           pipeline = pipeline.webp({ quality: 85 });
           processedBuffer = await pipeline.toBuffer();
           contentType = 'image/webp';
@@ -523,48 +626,52 @@ router.post('/upload-image', async (req, res) => {
           console.log(`[ImageUpload] Compressed image from ${originalSizeKB.toFixed(1)}KB to ${(processedBuffer.length / 1024).toFixed(1)}KB (webp)`);
         }
       } catch (sharpError) {
+        if (/Input image exceeds pixel limit/i.test(String(sharpError?.message || ''))) {
+          return res.status(413).json({ error: 'Image dimensions exceed processing limit' });
+        }
         console.warn('[ImageUpload] Sharp validation/compression failed:', sharpError);
         return res.status(400).json({ error: 'Invalid or corrupted image file' });
       }
     }
 
-    // Create a unique filename with correct extension
-    let name = filename || `format-image-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
-    // Strip original extension if name contains it
-    if (name.includes('.')) {
-      name = name.substring(0, name.lastIndexOf('.'));
+    // Create a guaranteed-unique filename so separate uploads never overwrite or collide on image_path
+    let baseName = (filename && typeof filename === 'string') ? filename : 'format-image';
+    if (baseName.includes('.')) {
+      baseName = baseName.substring(0, baseName.lastIndexOf('.'));
     }
-    const safeName = name.replace(/[^a-zA-Z0-9-]/g, '_');
-    const safeFilename = `${safeName}.${finalExtension}`;
+    const safeName = baseName.replace(/[^a-zA-Z0-9-]/g, '_').slice(0, 64) || 'format-image';
+    const uniqueSuffix = `${Date.now()}-${crypto.randomUUID().slice(0, 8)}`;
+    const safeFilename = `${safeName}-${uniqueSuffix}.${finalExtension}`;
     const userId = req.user.id;
-    const path = `presets/${userId}/${safeFilename}`;
+    const storagePath = `presets/${userId}/${safeFilename}`;
 
     const bucketName = 'format-assets';
+    const uploadOptions = {
+      contentType,
+      upsert: false,
+      cacheControl: '31536000',
+    };
 
-    // Verify/create bucket
-    // Note: service role client can create buckets directly
-    const { data: buckets } = await supabaseAdminClient.storage.listBuckets();
-    const bucketExists = buckets?.some(b => b.name === bucketName);
-    
-    if (!bucketExists) {
+    // Upload directly without paying for a storage.listBuckets() round-trip on every upload.
+    // Only create the bucket if Supabase reports it does not exist yet.
+    let { data, error } = await supabaseAdminClient.storage
+      .from(bucketName)
+      .upload(storagePath, processedBuffer, uploadOptions);
+
+    if (error && /bucket.*not\s*found|not\s*found/i.test(String(error.message || ''))) {
       const { error: createError } = await supabaseAdminClient.storage.createBucket(bucketName, {
         public: true,
         allowedMimeTypes: ['image/png', 'image/jpeg', 'image/jpg', 'image/webp', 'image/gif', 'image/svg+xml']
       });
-      if (createError) {
+      if (createError && !/already\s*exists/i.test(String(createError.message || ''))) {
         console.error(`Error creating storage bucket ${bucketName}:`, createError);
       } else {
         console.log(`Created public storage bucket: ${bucketName}`);
       }
+      ({ data, error } = await supabaseAdminClient.storage
+        .from(bucketName)
+        .upload(storagePath, processedBuffer, uploadOptions));
     }
-
-    // Upload buffer to Supabase Storage
-    const { data, error } = await supabaseAdminClient.storage
-      .from(bucketName)
-      .upload(path, processedBuffer, {
-        contentType,
-        upsert: true
-      });
 
     if (error) {
       throw error;
@@ -573,14 +680,14 @@ router.post('/upload-image', async (req, res) => {
     // Get public URL
     const { data: { publicUrl } } = supabaseAdminClient.storage
       .from(bucketName)
-      .getPublicUrl(path);
+      .getPublicUrl(storagePath);
 
     // Save tracking record to public.user_uploaded_images
     const { error: dbError } = await supabaseAdminClient
       .from('user_uploaded_images')
       .insert({
         user_id: userId,
-        image_path: path,
+        image_path: storagePath,
         image_url: publicUrl,
         filename: safeFilename
       });
@@ -606,27 +713,42 @@ router.get('/my-images', async (req, res) => {
   try {
     const userId = req.user.id;
 
-    // 1. Fetch user's uploaded images
-    const { data: images, error: imagesError } = await supabaseAdminClient
-      .from('user_uploaded_images')
-      .select('*')
-      .eq('user_id', userId)
-      .order('created_at', { ascending: false });
+    // 1. Run all 4 independent user-scoped queries in parallel instead of sequentially
+    const [
+      { data: images, error: imagesError },
+      { data: conversations, error: convsError },
+      { data: templates, error: templatesError },
+      { data: formats, error: formatsError }
+    ] = await Promise.all([
+      supabaseAdminClient
+        .from('user_uploaded_images')
+        .select('*')
+        .eq('user_id', userId)
+        .order('created_at', { ascending: false }),
+      supabaseAdminClient
+        .from('conversations')
+        .select('id, title')
+        .eq('user_id', userId)
+        .eq('is_active', true),
+      supabaseAdminClient
+        .from('user_templates')
+        .select('id, name, template_structure')
+        .eq('user_id', userId),
+      supabaseAdminClient
+        .from('format_blueprints')
+        .select('id, name, skeleton, thumbnail_url')
+        .eq('user_id', userId)
+    ]);
 
     if (imagesError) throw imagesError;
     if (!images || images.length === 0) {
       return res.json([]);
     }
-
-    // 2. Fetch user's active conversations and their current snapshots (charts)
-    const { data: conversations, error: convsError } = await supabaseAdminClient
-      .from('conversations')
-      .select('id, title')
-      .eq('user_id', userId)
-      .eq('is_active', true);
-
     if (convsError) throw convsError;
+    if (templatesError) throw templatesError;
+    if (formatsError) throw formatsError;
 
+    // 2. Fetch current snapshots only for the user's active conversations
     let snapshots = [];
     if (conversations && conversations.length > 0) {
       const convIds = conversations.map(c => c.id);
@@ -638,22 +760,6 @@ router.get('/my-images', async (req, res) => {
       if (snapsError) throw snapsError;
       snapshots = snaps || [];
     }
-
-    // 3. Fetch user's templates
-    const { data: templates, error: templatesError } = await supabaseAdminClient
-      .from('user_templates')
-      .select('id, name, template_structure')
-      .eq('user_id', userId);
-
-    if (templatesError) throw templatesError;
-
-    // 4. Fetch user's formats
-    const { data: formats, error: formatsError } = await supabaseAdminClient
-      .from('format_blueprints')
-      .select('id, name, skeleton, thumbnail_url')
-      .eq('user_id', userId);
-
-    if (formatsError) throw formatsError;
 
     // 5. Pre-stringify entities ONCE to avoid O(N×M) repeated serialization
     const snapSearchData = snapshots.map(snap => ({
@@ -841,7 +947,7 @@ router.delete('/my-images/:id', async (req, res) => {
     for (const tplId of templatesToDelete) {
       try {
         const tpl = templates.find(t => t.id === tplId);
-        await templateService.deleteTemplate(tplId, userId);
+        await templateService.deleteTemplate(tplId, userId, req.user?.is_admin === true);
         deletedTemplates.push(tpl ? tpl.name : tplId);
       } catch (err) {
         console.error(`Failed to cascade delete template ${tplId}:`, err);
@@ -853,7 +959,7 @@ router.delete('/my-images/:id', async (req, res) => {
     for (const fmtId of formatsToDelete) {
       try {
         const fmt = formats.find(f => f.id === fmtId);
-        await formatService.deleteFormat(fmtId, userId);
+        await formatService.deleteFormat(fmtId, userId, req.user?.is_admin === true);
         deletedFormats.push(fmt ? fmt.name : fmtId);
       } catch (err) {
         console.error(`Failed to cascade delete format ${fmtId}:`, err);

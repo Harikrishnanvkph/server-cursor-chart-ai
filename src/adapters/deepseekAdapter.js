@@ -1,4 +1,5 @@
 import { OpenAI } from 'openai';
+import { combineAbortSignals } from '../utils/abortUtils.js';
 
 /**
  * DeepSeek Adapter
@@ -22,13 +23,14 @@ export class DeepSeekAdapter {
     return this._client;
   }
 
-  async generateContent({ systemPrompt, userPrompt, model, maxTokens, temperature }) {
+  async generateContent({ systemPrompt, userPrompt, model, maxTokens, temperature, signal }) {
     const resolvedModel = model || 'deepseek-chat';
 
     const messages = [];
     if (systemPrompt) messages.push({ role: 'system', content: systemPrompt });
     messages.push({ role: 'user', content: userPrompt });
 
+    const { signal: combinedSignal, cleanup } = combineAbortSignals(signal, 120000);
     try {
       const response = await this.client.chat.completions.create({
         model: resolvedModel,
@@ -38,7 +40,7 @@ export class DeepSeekAdapter {
         response_format: { type: 'json_object' },
         stream: false
       }, {
-        signal: AbortSignal.timeout(120000) // 120-second timeout for large format responses
+        signal: combinedSignal
       });
 
       const content = response.choices[0]?.message?.content;
@@ -54,11 +56,18 @@ export class DeepSeekAdapter {
         rawResponse: response
       };
     } catch (error) {
+      if (signal?.aborted) {
+        const abortErr = new Error('Request cancelled');
+        abortErr.name = 'AbortError';
+        throw abortErr;
+      }
       if (error.name === 'AbortError' || error.name === 'TimeoutError') throw new Error('DeepSeek API request timed out after 120 seconds.');
       if (error.status === 401) throw new Error('Invalid DeepSeek API key');
       if (error.status === 429) throw new Error('DeepSeek API rate limit exceeded. Please try again.');
       if (error.status >= 500) throw new Error('DeepSeek API server error. Please try again later.');
       throw error;
+    } finally {
+      cleanup();
     }
   }
 

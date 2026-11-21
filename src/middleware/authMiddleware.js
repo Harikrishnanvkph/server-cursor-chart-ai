@@ -25,7 +25,7 @@ async function ensureUserProfile(userId, userEmail = null, userName = null, user
     const { data: existingProfile, error: profileCheckError } = await withTimeout(
       supabaseAdminClient
         .from('profiles')
-        .select('id, is_admin')
+        .select('id, is_admin, full_name, avatar_url')
         .eq('id', userId)
         .single(),
       5000,
@@ -69,7 +69,7 @@ async function ensureUserProfile(userId, userEmail = null, userName = null, user
       supabaseAdminClient
         .from('profiles')
         .insert([profileData])
-        .select('id, is_admin')
+        .select('id, is_admin, full_name, avatar_url')
         .single(),
       5000,
       'Profile creation timed out'
@@ -91,11 +91,23 @@ async function ensureUserProfile(userId, userEmail = null, userName = null, user
 // Simple in-memory auth cache (hashed token -> { user, expiresAt })
 // Tokens are SHA-256 hashed before storage so a memory dump doesn't expose raw tokens
 const authCache = new Map();
-const AUTH_CACHE_TTL_MS = 15 * 60 * 1000; // 15 minutes — reduced external Supabase calls by 3×
+const AUTH_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes ceiling, always clamped to token exp/expires_at
 const MAX_AUTH_CACHE_SIZE = 500;
 
 function hashToken(token) {
   return crypto.createHash('sha256').update(token).digest('hex');
+}
+
+// Safely extract JWT `exp` claim (in ms) without trusting it for auth — used only to clamp cache TTL
+function getJwtExpMs(token) {
+  if (!isJwtFormat(token)) return null;
+  try {
+    const payloadJson = Buffer.from(token.split('.')[1], 'base64url').toString('utf8');
+    const payload = JSON.parse(payloadJson);
+    return typeof payload?.exp === 'number' ? payload.exp * 1000 : null;
+  } catch {
+    return null;
+  }
 }
 
 function getCachedUser(token) {
@@ -110,15 +122,33 @@ function getCachedUser(token) {
   return entry.user;
 }
 
-function setCachedUser(token, user) {
+export function setCachedUser(token, user, explicitExpiresAtMs = null) {
   if (!token || !user) return;
+  const now = Date.now();
+  const maxExpiry = now + AUTH_CACHE_TTL_MS;
+  const tokenExpiry = explicitExpiresAtMs ?? getJwtExpMs(token);
+  const effectiveExpiry = tokenExpiry ? Math.min(maxExpiry, tokenExpiry) : maxExpiry;
+  // Never cache an already-expired token
+  if (effectiveExpiry <= now) return;
+
+  // Normalize top-level profile fields so cached JWT users always match OAuth user shape
+  if (!user.full_name) {
+    user.full_name = user.user_metadata?.full_name || user.user_metadata?.name || null;
+  }
+  if (!user.avatar_url) {
+    user.avatar_url = user.user_metadata?.avatar_url || user.user_metadata?.picture || null;
+  }
+  if (!user.provider) {
+    user.provider = user.app_metadata?.provider || 'email';
+  }
+
   const key = hashToken(token);
   // Evict oldest entry if cache is full to prevent unbounded memory growth
   if (authCache.size >= MAX_AUTH_CACHE_SIZE) {
     const oldestKey = authCache.keys().next().value;
     if (oldestKey) authCache.delete(oldestKey);
   }
-  authCache.set(key, { user, expiresAt: Date.now() + AUTH_CACHE_TTL_MS });
+  authCache.set(key, { user, expiresAt: effectiveExpiry });
 }
 
 export function invalidateCachedUser(token) {
@@ -134,16 +164,13 @@ const BLOCKED_IPS = new Set(); // IPs that are permanently blocked
 const SUSPICIOUS_IPS = new Map(); // IPs with suspicious activity
 
 // Helper function to get client IP
+// Rely on Express's proxy-aware req.ip (configured with `trust proxy: 1` in index.js)
+// instead of reading the leftmost client-spoofable X-Forwarded-For entry directly.
 function getClientIP(req) {
-  const forwarded = req.headers['x-forwarded-for'];
-  if (typeof forwarded === 'string' && forwarded.length > 0) {
-    return forwarded.split(',')[0].trim();
-  }
   return (
-    req.headers['x-real-ip'] ||
     req.ip ||
-    req.connection?.remoteAddress ||
     req.socket?.remoteAddress ||
+    req.connection?.remoteAddress ||
     'unknown'
   );
 }
@@ -200,6 +227,10 @@ setInterval(() => {
   for (const [ip, info] of SUSPICIOUS_IPS.entries()) {
     if (now > info.blockedUntil) SUSPICIOUS_IPS.delete(ip);
   }
+  // Clean up expired refresh-token grace cache entries
+  for (const [token, entry] of recentRefreshes.entries()) {
+    if (now > entry.expiresAt) recentRefreshes.delete(token);
+  }
 }, 15 * 60 * 1000).unref?.();
 
 function rateLimitMiddleware(req, res, next) {
@@ -247,6 +278,11 @@ function rateLimitMiddleware(req, res, next) {
 
 // In-flight refresh deduplication map to prevent Supabase Refresh Token Rotation race conditions
 const inFlightRefreshes = new Map();
+// Short-lived grace cache (refreshToken -> { refreshResult, expiresAt }) so slightly delayed
+// requests still carrying a just-rotated refresh_token (before Set-Cookie reached the browser)
+// reuse the new session instead of re-submitting the consumed refresh token to Supabase.
+const recentRefreshes = new Map();
+const RECENT_REFRESH_GRACE_MS = 15 * 1000; // 15 seconds
 
 // Helper to determine if a token is a standard JWT (e.g. Supabase) vs an opaque OAuth token (e.g. Google ya29.*)
 export function isJwtFormat(token) {
@@ -258,6 +294,12 @@ export function isJwtFormat(token) {
 // Authentication middleware
 export async function requireAuth(req, res, next) {
   try {
+    // Idempotency guard: if an earlier middleware in the chain already authenticated this request,
+    // never re-validate or re-trigger a rotating refresh token exchange.
+    if (req.user) {
+      return next();
+    }
+
     const accessToken = req.cookies?.access_token;
     const refreshToken = req.cookies?.refresh_token;
     const clientIP = getClientIP(req);
@@ -312,10 +354,13 @@ export async function requireAuth(req, res, next) {
 
             const enrichedUser = {
               ...user,
-              is_admin: profile?.is_admin || false
+              full_name: profile?.full_name || user.user_metadata?.full_name || user.user_metadata?.name || null,
+              avatar_url: profile?.avatar_url || user.user_metadata?.avatar_url || null,
+              provider: user.app_metadata?.provider || 'email',
+              is_admin: profile?.is_admin === true
             };
 
-            // Never cache a user whose profile lookup failed: we would pin is_admin=false for 15 minutes
+            // Never cache a user whose profile lookup failed: we would pin is_admin=false until TTL expiry
             if (profile) setCachedUser(accessToken, enrichedUser);
             req.user = enrichedUser;
             return next();
@@ -347,7 +392,8 @@ export async function requireAuth(req, res, next) {
               is_admin: oauthUser.is_admin === true
             };
 
-            setCachedUser(accessToken, normalizedUser);
+            const oauthExpiresAtMs = oauthUser.expires_at ? new Date(oauthUser.expires_at).getTime() : null;
+            setCachedUser(accessToken, normalizedUser, Number.isFinite(oauthExpiresAtMs) ? oauthExpiresAtMs : null);
             req.user = normalizedUser;
             return next();
           }
@@ -374,20 +420,33 @@ export async function requireAuth(req, res, next) {
     if (refreshToken) {
       console.log('Access token invalid/expired. Attempting to refresh session using refresh token...');
       try {
-        // Mutex: Deduplicate in-flight refresh requests for the same refresh token
-        // to prevent concurrent requests from failing under Supabase Refresh Token Rotation.
-        let refreshPromise = inFlightRefreshes.get(refreshToken);
-        if (!refreshPromise) {
-          refreshPromise = withTimeout(
-            supabaseUserClient.auth.refreshSession({ refresh_token: refreshToken }),
-            10000,
-            'Supabase session refresh timed out'
-          );
-          inFlightRefreshes.set(refreshToken, refreshPromise);
-          refreshPromise.finally(() => inFlightRefreshes.delete(refreshToken));
+        // Mutex + Grace Cache: Deduplicate concurrent AND slightly-delayed refresh requests
+        // for the same refresh token under Supabase Refresh Token Rotation (keyed by SHA-256 hash).
+        const refreshKey = hashToken(refreshToken);
+        const cachedRefresh = recentRefreshes.get(refreshKey);
+        let refreshResult;
+        if (cachedRefresh && Date.now() < cachedRefresh.expiresAt) {
+          refreshResult = cachedRefresh.result;
+        } else {
+          if (cachedRefresh) recentRefreshes.delete(refreshKey);
+          let refreshPromise = inFlightRefreshes.get(refreshKey);
+          if (!refreshPromise) {
+            refreshPromise = withTimeout(
+              supabaseUserClient.auth.refreshSession({ refresh_token: refreshToken }),
+              10000,
+              'Supabase session refresh timed out'
+            );
+            inFlightRefreshes.set(refreshKey, refreshPromise);
+            refreshPromise.finally(() => inFlightRefreshes.delete(refreshKey));
+          }
+          refreshResult = await refreshPromise;
+          if (refreshResult?.data?.session && refreshResult?.data?.user && !refreshResult?.error) {
+            recentRefreshes.set(refreshKey, {
+              result: refreshResult,
+              expiresAt: Date.now() + RECENT_REFRESH_GRACE_MS,
+            });
+          }
         }
-
-        const refreshResult = await refreshPromise;
         const { data: refreshData, error: refreshError } = refreshResult;
 
         if (refreshError || !refreshData?.session || !refreshData?.user) {
@@ -402,7 +461,10 @@ export async function requireAuth(req, res, next) {
 
         const enrichedUser = {
           ...user,
-          is_admin: profile?.is_admin || false
+          full_name: profile?.full_name || user.user_metadata?.full_name || user.user_metadata?.name || null,
+          avatar_url: profile?.avatar_url || user.user_metadata?.avatar_url || null,
+          provider: user.app_metadata?.provider || 'email',
+          is_admin: profile?.is_admin === true
         };
 
         // Update response cookies with the new session tokens
@@ -428,7 +490,15 @@ export async function requireAuth(req, res, next) {
           });
         }
 
-        setCachedUser(newSession.access_token, enrichedUser);
+        // Sync req.cookies in-place so downstream middleware/handlers see the rotated tokens
+        if (req.cookies) {
+          req.cookies.access_token = newSession.access_token;
+          if (newSession.refresh_token) {
+            req.cookies.refresh_token = newSession.refresh_token;
+          }
+        }
+
+        if (profile) setCachedUser(newSession.access_token, enrichedUser);
         req.user = enrichedUser;
         console.log(`Successfully refreshed session for user: ${user.email}`);
         return next();

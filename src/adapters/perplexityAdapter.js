@@ -1,4 +1,5 @@
 import { OpenAI } from 'openai';
+import { combineAbortSignals } from '../utils/abortUtils.js';
 
 /**
  * Perplexity AI Adapter
@@ -28,7 +29,7 @@ export class PerplexityAdapter {
    * @returns {Promise<Object>} - API response
    */
   async generateContent(params) {
-    const { systemPrompt, userPrompt, model, maxTokens, temperature, topP } = params;
+    const { systemPrompt, userPrompt, model, maxTokens, temperature, topP, signal } = params;
 
     const messages = [];
 
@@ -40,6 +41,7 @@ export class PerplexityAdapter {
     // Add user message
     messages.push({ role: "user", content: userPrompt });
 
+    const { signal: combinedSignal, cleanup } = combineAbortSignals(signal, 120000);
     try {
       // Determine optimal max_tokens based on request type and model
       let optimalMaxTokens = maxTokens;
@@ -68,7 +70,7 @@ export class PerplexityAdapter {
         top_p: topP || 0.9,
         stream: false  // Ensure we get complete responses
       }, {
-        signal: AbortSignal.timeout(120000) // 120-second timeout for large format responses
+        signal: combinedSignal
       });
 
       const content = response.choices[0]?.message?.content;
@@ -106,6 +108,11 @@ export class PerplexityAdapter {
       };
 
     } catch (error) {
+      if (signal?.aborted) {
+        const abortErr = new Error('Request cancelled');
+        abortErr.name = 'AbortError';
+        throw abortErr;
+      }
       // Handle API errors
       if (error.status === 401) {
         throw new Error('Invalid Perplexity API key');
@@ -121,6 +128,8 @@ export class PerplexityAdapter {
       } else {
         throw new Error(`Perplexity API error: ${error.message}`);
       }
+    } finally {
+      cleanup();
     }
   }
 

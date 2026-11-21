@@ -1,3 +1,5 @@
+import { combineAbortSignals } from '../utils/abortUtils.js';
+
 /**
  * Tavily Search Provider
  * Calls the Tavily Search API and returns formatted results
@@ -12,12 +14,13 @@ export class TavilyProvider {
    * @param {string} query - The search query string
    * @returns {Promise<string>} - Formatted search results
    */
-  async search(query) {
+  async search(query, options = {}) {
     const apiKey = process.env.TAVILY_API_KEY;
     if (!apiKey) {
       throw new Error('Tavily API key is not configured. Set TAVILY_API_KEY in .env');
     }
 
+    const { signal, cleanup } = combineAbortSignals(options?.signal, 15000);
     try {
       const response = await fetch('https://api.tavily.com/search', {
         method: 'POST',
@@ -31,7 +34,8 @@ export class TavilyProvider {
           search_depth: 'advanced',
           include_answer: true,
           include_images: true
-        })
+        }),
+        signal
       });
 
       if (!response.ok) {
@@ -70,8 +74,15 @@ Snippet: ${content}`;
 
       return answerSection + formattedResults + imageSection;
     } catch (error) {
+      if (options?.signal?.aborted) {
+        const abortErr = new Error('Search cancelled');
+        abortErr.name = 'AbortError';
+        throw abortErr;
+      }
       console.error('Tavily search provider error:', error);
       throw new Error(`Tavily search failed: ${error.message}`);
+    } finally {
+      cleanup();
     }
   }
 }

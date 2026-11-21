@@ -2,7 +2,6 @@ import { z } from 'zod'
 import { createRequire } from 'module'
 
 const require = createRequire(import.meta.url)
-const disposableDomainsList = require('disposable-email-domains')
 
 const EXTRA_BLOCKED_DOMAINS = [
   'example.com',
@@ -14,10 +13,18 @@ const EXTRA_BLOCKED_DOMAINS = [
 
 const BLOCKED_TLDS = ['.local', '.invalid', '.localhost', '.test', '.example']
 
-const DISPOSABLE_DOMAIN_SET = new Set([
-  ...disposableDomainsList.map((d) => String(d).toLowerCase()),
-  ...EXTRA_BLOCKED_DOMAINS,
-])
+// Lazy-load disposable-email-domains on first signup check to avoid cold-start overhead on signin/auth/me
+let _disposableDomainSet = null
+function getDisposableDomainSet() {
+  if (!_disposableDomainSet) {
+    const disposableDomainsList = require('disposable-email-domains')
+    _disposableDomainSet = new Set([
+      ...disposableDomainsList.map((d) => String(d).toLowerCase()),
+      ...EXTRA_BLOCKED_DOMAINS,
+    ])
+  }
+  return _disposableDomainSet
+}
 
 /**
  * Returns true if the email's domain (or parent domain) is a known disposable/temporary/test domain.
@@ -32,11 +39,12 @@ export function isDisposableEmail(email) {
     return true
   }
 
+  const domainSet = getDisposableDomainSet()
   // Check exact domain and parent domains (e.g. sub.mailinator.com -> mailinator.com)
   const parts = domain.split('.')
   for (let i = 0; i <= parts.length - 2; i++) {
     const candidate = parts.slice(i).join('.')
-    if (DISPOSABLE_DOMAIN_SET.has(candidate)) {
+    if (domainSet.has(candidate)) {
       return true
     }
   }

@@ -1,4 +1,5 @@
 import { GoogleGenerativeAI } from '@google/generative-ai';
+import { combineAbortSignals, raceWithAbort } from '../utils/abortUtils.js';
 
 const MODEL_MAP = {
     // Perplexity names → Gemini equivalents
@@ -38,7 +39,7 @@ export class GeminiAdapter {
         return this._genAI;
     }
 
-    async generateContent({ systemPrompt, userPrompt, model, webSearch, maxTokens }) {
+    async generateContent({ systemPrompt, userPrompt, model, webSearch, maxTokens, signal }) {
         const modelName = MODEL_MAP[model] ?? model ?? DEFAULT_MODEL;
 
         if (webSearch) {
@@ -66,10 +67,8 @@ export class GeminiAdapter {
                 };
             }
 
+            const { signal: combinedSignal, cleanup } = combineAbortSignals(signal, 120000);
             try {
-                const controller = new AbortController();
-                const timeoutId = setTimeout(() => controller.abort(), 120000); // 120s timeout for large format generations
-
                 const response = await fetch(url, {
                     method: 'POST',
                     headers: {
@@ -77,10 +76,8 @@ export class GeminiAdapter {
                         'x-goog-api-key': apiKey
                     },
                     body: JSON.stringify(payload),
-                    signal: controller.signal
+                    signal: combinedSignal
                 });
-
-                clearTimeout(timeoutId);
 
                 if (!response.ok) {
                     let errorMessage = `Gemini API returned error ${response.status}`;
@@ -120,7 +117,9 @@ export class GeminiAdapter {
                     groundingMetadata: candidate?.groundingMetadata || null
                 };
             } catch (error) {
-                throw this.handleApiError(error);
+                throw this.handleApiError(error, signal);
+            } finally {
+                cleanup();
             }
         }
 
@@ -137,43 +136,41 @@ export class GeminiAdapter {
             ? `${systemPrompt}\n\nUser request: ${userPrompt}`
             : userPrompt;
 
+        const { signal: combinedSignal, cleanup } = combineAbortSignals(signal, 120000);
         try {
-            const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 120000); // 120s timeout for large format generations
+            // Race against combinedSignal because @google/generative-ai@0.2.x ignores { signal } on generateContent
+            const result = await raceWithAbort(genModel.generateContent(combinedPrompt), combinedSignal);
+            const response = await result.response;
+            const content = response.text();
 
-            try {
-                const result = await genModel.generateContent(combinedPrompt, {
-                    signal: controller.signal
-                });
-                clearTimeout(timeoutId);
-                const response = await result.response;
-                const content = response.text();
-
-                if (!content?.trim()) {
-                    throw new Error('Empty response from Gemini AI service');
-                }
-
-                const u = result.response?.usageMetadata;
-                const usage = u ? { sent: u.promptTokenCount || 0, received: u.candidatesTokenCount || 0, total: u.totalTokenCount || 0 } : null;
-
-                return {
-                    content,
-                    tokensUsed: usage?.total || null,
-                    usage,
-                    rawResponse: result,
-                };
-            } catch (innerError) {
-                clearTimeout(timeoutId);
-                throw innerError;
+            if (!content?.trim()) {
+                throw new Error('Empty response from Gemini AI service');
             }
+
+            const u = result.response?.usageMetadata;
+            const usage = u ? { sent: u.promptTokenCount || 0, received: u.candidatesTokenCount || 0, total: u.totalTokenCount || 0 } : null;
+
+            return {
+                content,
+                tokensUsed: usage?.total || null,
+                usage,
+                rawResponse: result,
+            };
         } catch (error) {
-            throw this.handleApiError(error);
+            throw this.handleApiError(error, signal);
+        } finally {
+            cleanup();
         }
     }
 
-    handleApiError(error) {
-        if (error.name === 'AbortError') {
-            return new Error('Gemini API request timed out after 60 seconds.');
+    handleApiError(error, parentSignal = null) {
+        if (parentSignal?.aborted) {
+            const abortErr = new Error('Request cancelled');
+            abortErr.name = 'AbortError';
+            return abortErr;
+        }
+        if (error.name === 'AbortError' || error.name === 'TimeoutError') {
+            return new Error('Gemini API request timed out after 120 seconds.');
         }
         const msg = error.message || '';
         if (error.status === 401 || msg.includes('API key') || msg.includes('API_KEY_INVALID')) {

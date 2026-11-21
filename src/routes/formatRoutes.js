@@ -96,7 +96,7 @@ router.patch('/formats/:id', requireAuth, async (req, res) => {
   try {
     const { id } = req.params;
     const userId = req.user.id;
-    const format = await formatService.updateFormat(id, userId, req.body);
+    const format = await formatService.updateFormat(id, userId, req.body, req.user?.is_admin === true);
     res.json(format);
   } catch (error) {
     console.error('Error updating format:', error);
@@ -117,7 +117,7 @@ router.delete('/formats/:id', requireAuth, async (req, res) => {
       return res.status(401).json({ error: 'User not authenticated' });
     }
 
-    await formatService.deleteFormat(id, userId);
+    await formatService.deleteFormat(id, userId, req.user?.is_admin === true);
     res.json({ success: true });
   } catch (error) {
     console.error('Error deleting format:', error);

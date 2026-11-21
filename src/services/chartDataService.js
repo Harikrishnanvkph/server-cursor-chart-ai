@@ -9,20 +9,6 @@ class ChartDataService {
 
   async createConversation(userId, title, description = null) {
     try {
-      // First, ensure user has a profile (fix for missing profiles)
-      const { data: existingProfile, error: profileCheckError } = await supabaseAdminClient
-        .from('profiles')
-        .select('id')
-        .eq('id', userId)
-        .single();
-
-      if (profileCheckError || !existingProfile) {
-        console.log('Profile not found for user:', userId, '. Profile should have been created by middleware.');
-        // NOTE: Profile should be created by middleware, but if it's still missing,
-        // we'll attempt conversation creation anyway and let it fail with a clearer error
-        console.warn('WARNING: User profile missing for user:', userId);
-      }
-
       const { data, error } = await supabaseAdminClient
         .from('conversations')
         .insert({
@@ -178,6 +164,66 @@ class ChartDataService {
     }
   }
 
+  async _cleanupOrphanedStorageAssets(snapshots, userId) {
+    if (!snapshots || snapshots.length === 0 || !userId) return;
+
+    const paths = [];
+    const bucketUrlPart = '/format-assets/';
+    const userPrefix = `presets/${userId}/`;
+
+    const checkShapes = (shapes) => {
+      if (!Array.isArray(shapes)) return;
+      for (const shape of shapes) {
+        if (shape?.type === 'deco-image' && shape.imageUrl && shape.imageUrl.includes(bucketUrlPart)) {
+          const idx = shape.imageUrl.indexOf(bucketUrlPart);
+          if (idx !== -1) {
+            const rawSubPath = shape.imageUrl.substring(idx + bucketUrlPart.length).split('?')[0];
+            if (rawSubPath && rawSubPath.startsWith(userPrefix) && !paths.includes(rawSubPath)) {
+              paths.push(rawSubPath);
+            }
+          }
+        }
+      }
+    };
+
+    for (const snap of snapshots) {
+      if (snap.chart_config?.decorationShapes) {
+        checkShapes(snap.chart_config.decorationShapes);
+      }
+      if (snap.template_structure?.decorations) {
+        checkShapes(snap.template_structure.decorations);
+      }
+    }
+
+    if (paths.length === 0) return;
+
+    try {
+      const { error: storageError } = await supabaseAdminClient.storage
+        .from('format-assets')
+        .remove(paths);
+      if (storageError) {
+        console.error('[StorageCleanup] Failed to delete orphaned files:', storageError);
+      } else {
+        console.log('[StorageCleanup] Deleted orphaned files from storage:', paths);
+      }
+    } catch (err) {
+      console.error('[StorageCleanup] Error during storage cleanup:', err);
+    }
+
+    try {
+      const { error: dbImgError } = await supabaseAdminClient
+        .from('user_uploaded_images')
+        .delete()
+        .eq('user_id', userId)
+        .in('image_path', paths);
+      if (dbImgError) {
+        console.error('[StorageCleanup] Failed to remove tracking rows:', dbImgError);
+      }
+    } catch (err) {
+      console.error('[StorageCleanup] Error cleaning tracking rows:', err);
+    }
+  }
+
   async deleteConversation(conversationId, userId) {
     try {
       // 0. Verify conversation ownership before reading snapshots or deleting storage assets
@@ -199,56 +245,10 @@ class ChartDataService {
         .select('chart_config, template_structure')
         .eq('conversation_id', conversationId);
 
-      // 2. Extract image paths owned by this user
-      if (snapshots && snapshots.length > 0) {
-        const paths = [];
-        const bucketUrlPart = '/format-assets/';
-        const userPrefix = `presets/${userId}/`;
-        
-        snapshots.forEach(snap => {
-          const checkShapes = (shapes) => {
-            if (Array.isArray(shapes)) {
-              shapes.forEach(shape => {
-                if (shape.type === 'deco-image' && shape.imageUrl && shape.imageUrl.includes(bucketUrlPart)) {
-                  const idx = shape.imageUrl.indexOf(bucketUrlPart);
-                  if (idx !== -1) {
-                    const path = shape.imageUrl.substring(idx + bucketUrlPart.length);
-                    if (path && path.startsWith(userPrefix) && !paths.includes(path)) {
-                      paths.push(path);
-                    }
-                  }
-                }
-              });
-            }
-          };
+      // 2. Delete owned storage assets & tracking rows cleanly before DB deletion
+      await this._cleanupOrphanedStorageAssets(snapshots, userId);
 
-          if (snap.chart_config && snap.chart_config.decorationShapes) {
-            checkShapes(snap.chart_config.decorationShapes);
-          }
-          if (snap.template_structure && snap.template_structure.decorations) {
-            checkShapes(snap.template_structure.decorations);
-          }
-        });
-
-        // 3. Delete files from Supabase Storage (Asynchronously in background)
-        if (paths.length > 0) {
-          supabaseAdminClient.storage
-            .from('format-assets')
-            .remove(paths)
-            .then(({ error: storageError }) => {
-              if (storageError) {
-                console.error('[StorageCleanup] Failed to delete orphaned files:', storageError);
-              } else {
-                console.log('[StorageCleanup] Deleted files from storage asynchronously:', paths);
-              }
-            })
-            .catch(err => {
-              console.error('[StorageCleanup] Error during async delete:', err);
-            });
-        }
-      }
-
-      // 4. Delete the conversation (will cascade delete snapshots/messages)
+      // 3. Delete the conversation (will cascade delete snapshots/messages)
       const { error } = await supabaseAdminClient
         .from('conversations')
         .delete()
@@ -271,55 +271,10 @@ class ChartDataService {
         .select('chart_config, template_structure, conversations!inner(user_id)')
         .eq('conversations.user_id', userId);
 
-      // 2. Extract image paths
-      if (snapshots && snapshots.length > 0) {
-        const paths = [];
-        const bucketUrlPart = '/format-assets/';
+      // 2. Delete strictly user-owned storage assets & tracking rows cleanly
+      await this._cleanupOrphanedStorageAssets(snapshots, userId);
 
-        snapshots.forEach(snap => {
-          const checkShapes = (shapes) => {
-            if (Array.isArray(shapes)) {
-              shapes.forEach(shape => {
-                if (shape.type === 'deco-image' && shape.imageUrl && shape.imageUrl.includes(bucketUrlPart)) {
-                  const idx = shape.imageUrl.indexOf(bucketUrlPart);
-                  if (idx !== -1) {
-                    const path = shape.imageUrl.substring(idx + bucketUrlPart.length);
-                    if (path && !paths.includes(path)) {
-                      paths.push(path);
-                    }
-                  }
-                }
-              });
-            }
-          };
-
-          if (snap.chart_config && snap.chart_config.decorationShapes) {
-            checkShapes(snap.chart_config.decorationShapes);
-          }
-          if (snap.template_structure && snap.template_structure.decorations) {
-            checkShapes(snap.template_structure.decorations);
-          }
-        });
-
-        // 3. Delete files from Supabase Storage (Asynchronously in background)
-        if (paths.length > 0) {
-          supabaseAdminClient.storage
-            .from('format-assets')
-            .remove(paths)
-            .then(({ error: storageError }) => {
-              if (storageError) {
-                console.error('[StorageCleanup] Failed to delete orphaned files:', storageError);
-              } else {
-                console.log('[StorageCleanup] Deleted files from storage asynchronously:', paths);
-              }
-            })
-            .catch(err => {
-              console.error('[StorageCleanup] Error during async delete:', err);
-            });
-        }
-      }
-
-      // 4. Delete all conversations for the user (will cascade delete snapshots/messages)
+      // 3. Delete all conversations for the user (will cascade delete snapshots/messages)
       const { error } = await supabaseAdminClient
         .from('conversations')
         .delete()
@@ -576,27 +531,34 @@ class ChartDataService {
         throw new Error('Shared chart not found');
       }
 
-      // Query the snapshot explicitly by share_id. No user authentication required.
+      // Query the snapshot explicitly by share_id (plus conversation owner to scope format access). No user auth required.
       const { data, error } = await supabaseAdminClient
         .from('chart_snapshots')
-        .select('chart_data, chart_config, chart_type, created_at, template_structure, template_content')
+        .select('chart_data, chart_config, chart_type, created_at, template_structure, template_content, conversations(user_id)')
         .eq('share_id', String(shareId).trim())
         .single();
 
       if (error && error.code !== 'PGRST116') throw error;
       if (!data) throw new Error('Shared chart not found');
 
-      // Resolve format blueprint skeleton server-side when template_structure lacks zones
-      // so public viewers never have to hit authenticated /api/data/formats/:id.
+      const ownerId = data.conversations?.user_id || null;
+      delete data.conversations;
+
+      // Resolve format blueprint skeleton server-side when template_structure lacks zones,
+      // strictly restricted to official, public, or owner-owned blueprints.
       const formatData = data.chart_config?.formatData;
       if (formatData?.formatId && !data.template_structure?.zones) {
         if (formatData.formatSnapshot?.skeleton?.zones) {
           data.template_structure = formatData.formatSnapshot.skeleton;
         } else {
+          const visibilityFilter = ownerId
+            ? `is_official.eq.true,is_public.eq.true,user_id.eq.${ownerId}`
+            : 'is_official.eq.true,is_public.eq.true';
           const { data: fmt, error: fmtError } = await supabaseAdminClient
             .from('format_blueprints')
             .select('skeleton')
             .eq('id', formatData.formatId)
+            .or(visibilityFilter)
             .maybeSingle();
 
           if (!fmtError && fmt?.skeleton) {
@@ -677,6 +639,58 @@ class ChartDataService {
       .eq('id', conversationId);
 
     return data;
+  }
+
+  async addMessagesBatch(conversationId, messages = []) {
+    try {
+      if (!Array.isArray(messages) || messages.length === 0) {
+        return [];
+      }
+
+      // Compute starting message_order in a single lightweight query
+      const { data: latest, error: orderErr } = await supabaseAdminClient
+        .from('chat_messages')
+        .select('message_order')
+        .eq('conversation_id', conversationId)
+        .order('message_order', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (orderErr) throw orderErr;
+
+      const startOrder = (latest?.message_order || 0) + 1;
+      const rows = messages.map((m, idx) => ({
+        conversation_id: conversationId,
+        chart_snapshot_id: m.chartSnapshotId || null,
+        role: m.role,
+        content: m.content,
+        action: m.action || null,
+        changes: m.changes ?? null,
+        message_order: startOrder + idx
+      }));
+
+      const { data, error } = await supabaseAdminClient
+        .from('chat_messages')
+        .insert(rows)
+        .select('*');
+
+      if (error) throw error;
+
+      // Update conversation activity timestamps once for the entire batch
+      const nowIso = new Date().toISOString();
+      await supabaseAdminClient
+        .from('conversations')
+        .update({
+          last_activity: nowIso,
+          updated_at: nowIso
+        })
+        .eq('id', conversationId);
+
+      return data || [];
+    } catch (error) {
+      console.error('Error batch adding messages:', error);
+      throw error;
+    }
   }
 
   async getConversationMessages(conversationId, limit = 100) {

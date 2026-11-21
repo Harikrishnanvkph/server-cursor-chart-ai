@@ -1,4 +1,5 @@
 import { OpenAI } from 'openai';
+import { combineAbortSignals } from '../utils/abortUtils.js';
 
 /**
  * OpenRouter AI Adapter
@@ -31,7 +32,7 @@ export class OpenRouterAdapter {
    * @returns {Promise<Object>} - API response
    */
   async generateContent(params) {
-    const { systemPrompt, userPrompt, model, maxTokens, temperature, topP } = params;
+    const { systemPrompt, userPrompt, model, maxTokens, temperature, topP, signal } = params;
 
     const messages = [];
 
@@ -43,25 +44,37 @@ export class OpenRouterAdapter {
     // Add user message
     messages.push({ role: "user", content: userPrompt });
 
-    const response = await this.client.chat.completions.create({
-      model: model || 'openai/gpt-4o-mini',
-      messages: messages,
-      max_tokens: maxTokens || 8192,
-      temperature: temperature || 0.3,
-      top_p: topP || 0.9
-    }, {
-      signal: AbortSignal.timeout(120000) // 120-second timeout for large format responses
-    });
+    const { signal: combinedSignal, cleanup } = combineAbortSignals(signal, 120000);
+    try {
+      const response = await this.client.chat.completions.create({
+        model: model || 'openai/gpt-4o-mini',
+        messages: messages,
+        max_tokens: maxTokens || 8192,
+        temperature: temperature || 0.3,
+        top_p: topP || 0.9
+      }, {
+        signal: combinedSignal
+      });
 
-    const u = response.usage;
-    const usage = u ? { sent: u.prompt_tokens || 0, received: u.completion_tokens || 0, total: u.total_tokens || 0 } : null;
+      const u = response.usage;
+      const usage = u ? { sent: u.prompt_tokens || 0, received: u.completion_tokens || 0, total: u.total_tokens || 0 } : null;
 
-    return {
-      content: response.choices[0].message.content,
-      tokensUsed: usage?.total || null,
-      usage,
-      rawResponse: response
-    };
+      return {
+        content: response.choices[0].message.content,
+        tokensUsed: usage?.total || null,
+        usage,
+        rawResponse: response
+      };
+    } catch (error) {
+      if (signal?.aborted) {
+        const abortErr = new Error('Request cancelled');
+        abortErr.name = 'AbortError';
+        throw abortErr;
+      }
+      throw error;
+    } finally {
+      cleanup();
+    }
   }
 
   /**

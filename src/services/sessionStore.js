@@ -89,16 +89,21 @@ class SecureSessionStore {
    */
   async createSession(accessToken, userData, provider) {
     try {
+      const normalizedEmail = String(userData?.email || '').trim().toLowerCase();
+      if (!normalizedEmail) {
+        throw new Error('OAuth provider did not return an email address');
+      }
+
       const tokenHash = this.hashToken(accessToken);
       const expiresAt = new Date(Date.now() + 15 * 24 * 60 * 60 * 1000); // 15 days
 
       // First, create or get user via Supabase Auth (this triggers profile creation via trigger)
-      let user = await this.getUserByEmail(userData.email);
+      let user = await this.getUserByEmail(normalizedEmail);
 
       if (!user) {
         // Create user in Supabase Auth first (this will auto-create profile via trigger)
         const { data: authData, error: authError } = await supabaseAdminClient.auth.admin.createUser({
-          email: userData.email,
+          email: normalizedEmail,
           email_confirm: true, // Auto-confirm email for OAuth users
           user_metadata: {
             full_name: userData.name || userData.full_name,
@@ -120,7 +125,7 @@ class SecureSessionStore {
         await new Promise(resolve => setTimeout(resolve, 100));
 
         // Get the newly created profile
-        user = await this.getUserByEmail(userData.email);
+        user = await this.getUserByEmail(normalizedEmail);
 
         if (!user) {
           console.error('Profile not created by trigger for user:', authData.user.id);
@@ -185,7 +190,7 @@ class SecureSessionStore {
         await this.logSecurityEvent('new_oauth_user_created', null, null, {
           user_id: user.id,
           provider: provider,
-          email: userData.email
+          email: normalizedEmail
         });
       }
 
@@ -217,6 +222,7 @@ class SecureSessionStore {
         full_name: user.full_name,
         avatar_url: user.avatar_url,
         provider: provider,
+        is_admin: user.is_admin === true,
         expires_at: session.expires_at
       };
 
@@ -333,11 +339,14 @@ class SecureSessionStore {
    */
   async getUserByEmail(email) {
     try {
+      const normalizedEmail = String(email || '').trim().toLowerCase();
+      if (!normalizedEmail) return null;
+
       const { data, error } = await supabaseAdminClient
         .from('profiles')
         .select('*')
-        .eq('email', email)
-        .single();
+        .eq('email', normalizedEmail)
+        .maybeSingle();
 
       if (error) return null;
       return data;

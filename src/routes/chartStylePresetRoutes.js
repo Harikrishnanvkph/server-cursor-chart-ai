@@ -98,7 +98,7 @@ router.patch('/chart-style-presets/:id', requireAuth, async (req, res) => {
   try {
     const { id } = req.params;
     const userId = req.user.id;
-    const preset = await chartStylePresetService.updatePreset(id, userId, req.body);
+    const preset = await chartStylePresetService.updatePreset(id, userId, req.body, req.user?.is_admin === true);
     res.json(preset);
   } catch (error) {
     console.error('Error updating chart style preset:', error);
@@ -119,7 +119,7 @@ router.delete('/chart-style-presets/:id', requireAuth, async (req, res) => {
       return res.status(401).json({ error: 'User not authenticated' });
     }
 
-    await chartStylePresetService.deletePreset(id, userId);
+    await chartStylePresetService.deletePreset(id, userId, req.user?.is_admin === true);
     res.json({ success: true });
   } catch (error) {
     console.error('Error deleting chart style preset:', error);

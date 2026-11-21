@@ -1,11 +1,10 @@
 import express from 'express';
-import { requireAuth, requireAdmin } from '../middleware/authMiddleware.js';
+import { requireAdmin } from '../middleware/authMiddleware.js';
 import templateService from '../services/templateService.js';
 
 const router = express.Router();
 
-// Apply auth middleware to all routes
-router.use(requireAuth);
+// Note: requireAuth is already applied at the /api/data mount in server/src/index.js
 
 // =============================================
 // TEMPLATE ROUTES (Blueprint Templates)
@@ -112,7 +111,7 @@ router.delete('/templates/:id', async (req, res) => {
       return res.status(401).json({ error: 'User not authenticated' });
     }
     
-    await templateService.deleteTemplate(id, userId);
+    await templateService.deleteTemplate(id, userId, req.user?.is_admin === true);
     res.json({ success: true });
   } catch (error) {
     console.error('Error deleting template:', error);
@@ -146,19 +145,6 @@ router.patch('/templates/:id/visibility', async (req, res) => {
 // Set template official status (Admin only)
 router.patch('/templates/:id/official', requireAdmin, async (req, res) => {
   try {
-    // Note: In authController.js `me()` we attach is_admin to the frontend, 
-    // but the JWT itself may not have it. Let's verify they are admin:
-    // (Assuming req.user is populated by JWT middleware, we can just enforce it 
-    // strictly or check against the DB if needed. If req.user doesn't have 
-    // is_admin, we might need to fetch it or assume frontend guard is enough 
-    // for this demo. We'll check req.user properties first.)
-    
-    // For ultimate safety, we can just check it, or assume the client is an admin 
-    // since the UI is hidden, but let's implement basic protection:
-    // If your JWT doesn't have is_admin right now, we can skip strict backend  
-    // enforcement for this specific demo or query the DB to be sure.
-    // Given the current scope, we will allow it and recommend a JWT claim later.
-
     const { id } = req.params;
     const { isOfficial } = req.body;
     

@@ -5,18 +5,26 @@ import cors from 'cors';
 import helmet from 'helmet';
 import cookieParser from 'cookie-parser';
 import rateLimit from 'express-rate-limit';
-import { generateChartDataWithGemini, modifyChartDataWithGemini } from './services/geminiService.js';
-import { generateChartDataWithOpenRouter, modifyChartDataWithOpenRouter } from './services/openrouterService.js';
-import { generateChartDataWithDeepSeek, modifyChartDataWithDeepSeek } from './services/deepseekService.js';
-import { generateChartDataWithPerplexity, modifyChartDataWithPerplexity } from './services/perplexityService.js';
-import perplexityRoutes from './routes/perplexityRoutes.js';
-import openrouterRoutes from './routes/openrouterRoutes.js';
-import deepseekRoutes from './routes/deepseekRoutes.js';
-import geminiRoutes from './routes/geminiRoutes.js';
-import imageProxyRoutes from './routes/imageProxyRoutes.js';
 import { requireAuth, requireAdmin, rateLimitMiddleware, getSecurityStats, blockIP, unblockIP } from './middleware/authMiddleware.js';
 import { canConsumeAiCredit, deductAiCredit, refundAiCredit } from './services/subscriptionService.js';
 import { supabaseAdminClient } from './supabase/client.js';
+
+// Lazy-load heavy routers (AI SDKs, sharp, payment SDKs) on first request to cut serverless cold starts
+function lazyRouter(loader) {
+  let routerPromise = null;
+  return async (req, res, next) => {
+    try {
+      if (!routerPromise) {
+        routerPromise = loader().then((mod) => mod.default);
+      }
+      const router = await routerPromise;
+      return router(req, res, next);
+    } catch (err) {
+      routerPromise = null;
+      return next(err);
+    }
+  };
+}
 
 // Check required environment variables
 const requiredEnvVars = [
@@ -67,9 +75,12 @@ app.use(compression({ threshold: '1kb' }));
 app.use(express.json({
   limit: '10mb',
   verify: (req, res, buf) => {
-    req.rawBody = buf.toString('utf8');
+    // Only capture verbatim rawBody string on webhook routes that need HMAC/signature verification
+    if (req.originalUrl && req.originalUrl.includes('/webhook')) {
+      req.rawBody = buf.toString('utf8');
+    }
   }
-})); // Capture verbatim raw body for payment webhook verification
+})); // Capture verbatim raw body only for payment webhook verification
 
 const allowedOrigins = [
   'http://localhost:3000',
@@ -112,7 +123,7 @@ const globalLimiter = rateLimit({
   handler: (req, res) => {
     res.status(429).json({
       error: 'Too many requests',
-      retryAfter: Math.ceil(15 * 60 / 1000), // 15 minutes in seconds
+      retryAfter: 15 * 60, // 15 minutes in seconds
       message: 'Rate limit exceeded. Please try again later.'
     });
   }
@@ -134,7 +145,13 @@ app.use((req, res, next) => {
   }
 
   // Webhooks from third-party payment providers (Razorpay, Dodo) don't send browser Origin/Referer
-  if (req.path.includes('/webhook')) {
+  const webhookPaths = new Set([
+    '/payments/razorpay/webhook',
+    '/payments/dodo/webhook',
+    '/api/payments/razorpay/webhook',
+    '/api/payments/dodo/webhook',
+  ]);
+  if (webhookPaths.has(req.path)) {
     return next();
   }
 
@@ -193,28 +210,29 @@ import templateRoutes from './routes/templateRoutes.js'
 import formatRoutes from './routes/formatRoutes.js'
 import chartStylePresetRoutes from './routes/chartStylePresetRoutes.js'
 import sharedChartRoutes from './routes/sharedChartRoutes.js'
-import paymentRoutes from './routes/paymentRoutes.js'
+
+const lazyPaymentRoutes = lazyRouter(() => import('./routes/paymentRoutes.js'));
+
 app.use('/auth', authRoutes)
-app.use('/payments', paymentRoutes)
-app.use('/api/payments', paymentRoutes)
+app.use('/payments', lazyPaymentRoutes)
+app.use('/api/payments', lazyPaymentRoutes)
 
 // Chart processing endpoints (require auth + stricter AI rate limit)
-app.use('/api/gemini', requireAuth, aiLimiter, geminiRoutes);
-app.use('/api/perplexity', requireAuth, aiLimiter, perplexityRoutes);
-app.use('/api/openrouter', requireAuth, aiLimiter, openrouterRoutes);
-app.use('/api/deepseek', requireAuth, aiLimiter, deepseekRoutes);
+app.use('/api/gemini', requireAuth, aiLimiter, lazyRouter(() => import('./routes/geminiRoutes.js')));
+app.use('/api/perplexity', requireAuth, aiLimiter, lazyRouter(() => import('./routes/perplexityRoutes.js')));
+app.use('/api/openrouter', requireAuth, aiLimiter, lazyRouter(() => import('./routes/openrouterRoutes.js')));
+app.use('/api/deepseek', requireAuth, aiLimiter, lazyRouter(() => import('./routes/deepseekRoutes.js')));
 
 // Format and chart style preset routes (have both public and authenticated endpoints - must be BEFORE auth-protected routes)
 app.use('/api/data', formatRoutes);
 app.use('/api/data', chartStylePresetRoutes);
 app.use('/api/data', sharedChartRoutes);
 
-// Protected API endpoints (require authentication)
-app.use('/api/data', requireAuth, dataRoutes);
-app.use('/api/data', requireAuth, templateRoutes);
+// Protected API endpoints (require authentication — mounted once so requireAuth never runs twice on fallthrough)
+app.use('/api/data', requireAuth, dataRoutes, templateRoutes);
 
 // Utilities (no requireAuth because img tags cannot send Auth headers, protected via ALLOWED_PROXY_DOMAINS whitelist)
-app.use('/api/proxy', imageProxyRoutes);
+app.use('/api/proxy', lazyRouter(() => import('./routes/imageProxyRoutes.js')));
 
 // Security monitoring endpoints (admin only)
 app.get('/admin/security/stats', requireAuth, requireAdmin, (req, res) => {
@@ -278,11 +296,11 @@ app.post('/api/process-chart-enhanced', requireAuth, aiLimiter, async (req, res)
     Boolean(formatStructure && Object.keys(formatStructure).length > 0);
   const requiredCredits = isTemplateMode ? 2 : 1;
 
-  // Listen for early client abort / disconnect to kill downstream LLM operations
-  req.on('close', () => {
+  // Listen on response close (fires only when socket disconnects before response finishes)
+  res.on('close', () => {
     if (!res.writableEnded) {
       console.log('Client aborted connection to /api/process-chart-enhanced. Cancelling generation.');
-      abortController.abort();
+      abortController.abort(new DOMException('Client disconnected', 'AbortError'));
     }
   });
 
@@ -340,29 +358,44 @@ app.post('/api/process-chart-enhanced', requireAuth, aiLimiter, async (req, res)
       }
     }
 
-    // Service registry — add new services here, no if/else needed
+    // Service registry — lazy-loads only the requested AI provider SDK/processor on demand
+    const geminiSvc = { load: () => import('./services/geminiService.js').then((m) => ({ generate: m.generateChartDataWithGemini, modify: m.modifyChartDataWithGemini })), apiKey: 'GEMINI_API_KEY' };
     const SERVICE_REGISTRY = {
-      perplexity: { generate: generateChartDataWithPerplexity, modify: modifyChartDataWithPerplexity, apiKey: 'PERPLEXITY_API_KEY' },
-      gemini: { generate: generateChartDataWithGemini, modify: modifyChartDataWithGemini, apiKey: 'GEMINI_API_KEY' },
-      openrouter: { generate: generateChartDataWithOpenRouter, modify: modifyChartDataWithOpenRouter, apiKey: 'OPENROUTER_API_KEY' },
-      deepseek: { generate: generateChartDataWithDeepSeek, modify: modifyChartDataWithDeepSeek, apiKey: 'DEEPSEEK_API_KEY' },
-      google: { generate: generateChartDataWithGemini, modify: modifyChartDataWithGemini, apiKey: 'GEMINI_API_KEY' },
+      perplexity: { load: () => import('./services/perplexityService.js').then((m) => ({ generate: m.generateChartDataWithPerplexity, modify: m.modifyChartDataWithPerplexity })), apiKey: 'PERPLEXITY_API_KEY' },
+      gemini: geminiSvc,
+      openrouter: { load: () => import('./services/openrouterService.js').then((m) => ({ generate: m.generateChartDataWithOpenRouter, modify: m.modifyChartDataWithOpenRouter })), apiKey: 'OPENROUTER_API_KEY' },
+      deepseek: { load: () => import('./services/deepseekService.js').then((m) => ({ generate: m.generateChartDataWithDeepSeek, modify: m.modifyChartDataWithDeepSeek })), apiKey: 'DEEPSEEK_API_KEY' },
+      google: geminiSvc,
     };
 
-    const svc = SERVICE_REGISTRY[service] ?? SERVICE_REGISTRY.gemini;
+    const svcEntry = SERVICE_REGISTRY[service] ?? SERVICE_REGISTRY.gemini;
 
-    const apiKeyValue = process.env[svc.apiKey];
+    const apiKeyValue = process.env[svcEntry.apiKey];
     const isPlaceholder = !apiKeyValue || apiKeyValue.startsWith('your_') || apiKeyValue === '';
 
     if (isPlaceholder) {
-      throw new Error(`API key for '${service}' is not configured. Set ${svc.apiKey} in .env`);
+      throw new Error(`API key for '${service}' is not configured. Set ${svcEntry.apiKey} in .env`);
     }
+
+    const svc = await svcEntry.load();
 
     console.log(`🤖 Processing chart request using: ${service.toUpperCase()} (Model: ${model || 'default'})`);
 
     const aiResponse = (currentChartState && conversationId)
-      ? await svc.modify(finalInput, currentChartState, messageHistory || [], model, templateStructure, formatStructure, webSearch, searchProvider)
-      : await svc.generate(finalInput, model, templateStructure, formatStructure, webSearch, searchProvider);
+      ? await svc.modify(finalInput, currentChartState, messageHistory || [], model, templateStructure, formatStructure, webSearch, searchProvider, { signal: abortController.signal })
+      : await svc.generate(finalInput, model, templateStructure, formatStructure, webSearch, searchProvider, { signal: abortController.signal });
+
+    if (abortController.signal.aborted || res.writableEnded) {
+      if (creditDeducted && userId) {
+        creditDeducted = false;
+        try {
+          await refundAiCredit(userId, deductDetails || 'free');
+        } catch (refundErr) {
+          console.error('Failed to refund AI credit after client abort:', refundErr.message);
+        }
+      }
+      return;
+    }
 
     // Validate that we received chart data
     if (!aiResponse || (!aiResponse.chartType && !aiResponse.chartData && !aiResponse.data)) {
@@ -412,13 +445,18 @@ app.post('/api/process-chart-enhanced', requireAuth, aiLimiter, async (req, res)
       }
     }
 
-    if (abortController.signal.aborted) {
-      return res.status(499).json({ error: 'Client cancelled request' });
+    if (abortController.signal.aborted || error?.name === 'AbortError') {
+      if (!res.writableEnded) {
+        return res.status(499).json({ error: 'Client cancelled request' });
+      }
+      return;
     }
 
-    res.status(500).json({
-      error: error.message || 'Failed to process chart request'
-    });
+    if (!res.writableEnded) {
+      res.status(500).json({
+        error: error.message || 'Failed to process chart request'
+      });
+    }
   }
 });
 

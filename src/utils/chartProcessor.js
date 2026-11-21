@@ -4,9 +4,91 @@ import { fileURLToPath } from 'node:url';
 import fetch from 'node-fetch';
 import { searchService } from '../search/searchService.js';
 import { validateAndSanitizeChartData } from './validators.js';
+import { combineAbortSignals, throwIfAborted } from './abortUtils.js';
+
+export function extractDataUrisForPrompt(chartData) {
+  const placeholderToDataUri = new Map();
+  const labelToDataUri = new Map();
+  if (!chartData || !Array.isArray(chartData.datasets)) {
+    return { sanitizedChartData: chartData, store: { placeholderToDataUri, labelToDataUri } };
+  }
+
+  const labels = Array.isArray(chartData.labels) ? chartData.labels : [];
+  const sanitizedDatasets = chartData.datasets.map((ds, dsIdx) => {
+    if (!ds || !Array.isArray(ds.pointImages)) return ds;
+    let changed = false;
+    const nextPointImages = ds.pointImages.map((img, ptIdx) => {
+      if (typeof img === 'string' && img.startsWith('data:')) {
+        changed = true;
+        const placeholder = `__UPLOADED_IMAGE_${dsIdx}_${ptIdx}__`;
+        placeholderToDataUri.set(placeholder, img);
+        const lbl = labels[ptIdx];
+        if (lbl !== undefined && lbl !== null) {
+          const normLabel = String(lbl).trim().toLowerCase();
+          if (normLabel && !labelToDataUri.has(normLabel)) {
+            labelToDataUri.set(normLabel, img);
+          }
+        }
+        return placeholder;
+      }
+      return img;
+    });
+    return changed ? { ...ds, pointImages: nextPointImages } : ds;
+  });
+
+  return {
+    sanitizedChartData: { ...chartData, datasets: sanitizedDatasets },
+    store: { placeholderToDataUri, labelToDataUri },
+  };
+}
+
+export function restoreDataUrisFromPrompt(aiResult, store) {
+  if (!aiResult || !store || (store.placeholderToDataUri.size === 0 && store.labelToDataUri.size === 0)) {
+    return aiResult;
+  }
+  const container = aiResult.chartData || aiResult.data || (aiResult.datasets ? aiResult : null);
+  if (!container || !Array.isArray(container.datasets)) return aiResult;
+
+  const labels = Array.isArray(container.labels) ? container.labels : [];
+  for (const ds of container.datasets) {
+    if (!ds || !Array.isArray(ds.pointImages)) continue;
+    ds.pointImages = ds.pointImages.map((img, ptIdx) => {
+      if (typeof img === 'string' && store.placeholderToDataUri.has(img)) {
+        return store.placeholderToDataUri.get(img);
+      }
+      if (typeof img === 'string' && img.startsWith('__UPLOADED_IMAGE_')) {
+        const lbl = labels[ptIdx];
+        const normLabel = lbl !== undefined && lbl !== null ? String(lbl).trim().toLowerCase() : '';
+        if (normLabel && store.labelToDataUri.has(normLabel)) {
+          return store.labelToDataUri.get(normLabel);
+        }
+        return null;
+      }
+      return img;
+    });
+  }
+  return aiResult;
+}
+
+async function runWithConcurrency(tasks, concurrency = 5, signal = null) {
+  if (!tasks.length) return;
+  let nextIndex = 0;
+  const workerCount = Math.min(concurrency, tasks.length);
+
+  const workers = Array.from({ length: workerCount }, async () => {
+    while (nextIndex < tasks.length) {
+      if (signal?.aborted) break;
+      const currentIdx = nextIndex++;
+      await tasks[currentIdx]();
+    }
+  });
+
+  await Promise.all(workers);
+}
 
 // Fast in-memory cache for resolved entity and Wikipedia images to eliminate redundant network calls
 const imageResolutionCache = new Map();
+const inFlightImageLookups = new Map();
 const MAX_IMAGE_CACHE_SIZE = 500;
 
 function getCachedImage(key) {
@@ -50,11 +132,14 @@ export class ChartProcessor {
    * @param {Object} templateStructure - Template structure metadata for generating template text content
    * @returns {Promise<Object>} - Generated chart configuration
    */
-  async generateChart(inputText, model, templateStructure = null, formatStructure = null, webSearch = false, searchProvider = null) {
+  async generateChart(inputText, model, templateStructure = null, formatStructure = null, webSearch = false, searchProvider = null, options = {}) {
+    const signal = options?.signal;
     try {
+      throwIfAborted(signal);
       // Get AI context (lightweight chart schema or rich format/contentBank schema)
       const isFormat = Boolean(formatStructure);
       const aiContext = await this.getAIContext(isFormat);
+      throwIfAborted(signal);
 
       let searchResults = null;
       let searchWarning = null;
@@ -68,7 +153,7 @@ export class ChartProcessor {
       if (webSearch && !this.adapter.hasNativeSearch) {
         let searchQuery = inputText;
         try {
-          const queryDecision = await searchService.determineSearchQuery(inputText, [], this.adapter.serviceName);
+          const queryDecision = await searchService.determineSearchQuery(inputText, [], this.adapter.serviceName, { signal });
           if (queryDecision && queryDecision !== 'NO_SEARCH') {
             searchQuery = queryDecision;
           } else {
@@ -76,6 +161,7 @@ export class ChartProcessor {
             searchQuery = inputText;
           }
         } catch (queryErr) {
+          if (signal?.aborted || queryErr?.name === 'AbortError') throw queryErr;
           console.warn('⚠️ [WebSearch] Query optimizer error, falling back to user input:', queryErr.message);
         }
 
@@ -90,14 +176,17 @@ export class ChartProcessor {
 
           try {
             searchResults = providerToUse
-              ? await searchService.searchWithProvider(searchQuery, providerToUse)
-              : await searchService.search(searchQuery);
+              ? await searchService.searchWithProvider(searchQuery, providerToUse, { signal })
+              : await searchService.search(searchQuery, { signal });
           } catch (searchError) {
+            if (signal?.aborted || searchError?.name === 'AbortError') throw searchError;
             console.error('❌ [WebSearch] Search failed:', searchError.message);
             searchWarning = 'Live search was temporarily unavailable. Generated using available knowledge base.';
           }
         }
       }
+
+      throwIfAborted(signal);
 
       // Construct prompts
       const systemPrompt = this.buildSystemPrompt(aiContext, templateStructure, formatStructure, searchResults);
@@ -113,8 +202,11 @@ export class ChartProcessor {
         maxTokens,
         temperature: 0.2,
         topP: 0.85,
-        webSearch
+        webSearch,
+        signal
       });
+
+      throwIfAborted(signal);
 
       // Process response
       const cleanedResponse = this.cleanResponse(response.content);
@@ -136,8 +228,9 @@ export class ChartProcessor {
 
       // Automatically resolve country flags or famous people photos programmatically
       try {
-        await this.resolvePointImages(chartData, inputText);
+        await this.resolvePointImages(chartData, inputText, signal);
       } catch (err) {
+        if (signal?.aborted || err?.name === 'AbortError') throw err;
         console.error('Error resolving point images in generateChart:', err);
       }
 
@@ -186,10 +279,13 @@ export class ChartProcessor {
    * @param {Object} templateStructure - Template structure metadata for generating template text content
    * @returns {Promise<Object>} - Modified chart configuration
    */
-  async modifyChart(inputText, currentChartState, messageHistory = [], model, templateStructure = null, formatStructure = null, webSearch = false, searchProvider = null) {
+  async modifyChart(inputText, currentChartState, messageHistory = [], model, templateStructure = null, formatStructure = null, webSearch = false, searchProvider = null, options = {}) {
+    const signal = options?.signal;
     try {
+      throwIfAborted(signal);
       // Get modification context (with caching)
       const modificationContext = await this.getModificationContext();
+      throwIfAborted(signal);
 
       let searchResults = null;
       let searchWarning = null;
@@ -203,7 +299,7 @@ export class ChartProcessor {
       if (webSearch && !this.adapter.hasNativeSearch) {
         let searchQuery = inputText;
         try {
-          const queryDecision = await searchService.determineSearchQuery(inputText, messageHistory, this.adapter.serviceName);
+          const queryDecision = await searchService.determineSearchQuery(inputText, messageHistory, this.adapter.serviceName, { signal });
           if (queryDecision === 'NO_SEARCH') {
             searchQuery = null;
             console.log('ℹ️ [WebSearch] Query optimizer determined NO_SEARCH is needed for modification.');
@@ -211,6 +307,7 @@ export class ChartProcessor {
             searchQuery = queryDecision;
           }
         } catch (queryErr) {
+          if (signal?.aborted || queryErr?.name === 'AbortError') throw queryErr;
           console.warn('⚠️ [WebSearch] Query optimizer error, falling back to user input:', queryErr.message);
         }
 
@@ -225,19 +322,28 @@ export class ChartProcessor {
 
           try {
             searchResults = providerToUse
-              ? await searchService.searchWithProvider(searchQuery, providerToUse)
-              : await searchService.search(searchQuery);
+              ? await searchService.searchWithProvider(searchQuery, providerToUse, { signal })
+              : await searchService.search(searchQuery, { signal });
           } catch (searchError) {
+            if (signal?.aborted || searchError?.name === 'AbortError') throw searchError;
             console.error('❌ [WebSearch] Search failed:', searchError.message);
             searchWarning = 'Live search was temporarily unavailable. Modified using available knowledge base.';
           }
         }
       }
 
+      throwIfAborted(signal);
+
+      // Extract any base64 data URIs from currentChartState before constructing LLM prompt
+      const { sanitizedChartData, store: dataUriStore } = extractDataUrisForPrompt(currentChartState?.chartData);
+      const sanitizedStateForPrompt = currentChartState
+        ? { ...currentChartState, chartData: sanitizedChartData }
+        : currentChartState;
+
       // Build modification prompt
       const contextPrompt = this.buildModificationPrompt(
         modificationContext,
-        currentChartState,
+        sanitizedStateForPrompt,
         messageHistory,
         inputText,
         templateStructure,
@@ -252,8 +358,11 @@ export class ChartProcessor {
         model,
         maxTokens,
         temperature: 0.2,
-        webSearch
+        webSearch,
+        signal
       });
+
+      throwIfAborted(signal);
 
       // Process response
       const cleanedResponse = this.cleanResponse(response.content);
@@ -264,14 +373,18 @@ export class ChartProcessor {
         validateAndSanitizeChartData(chartData, Boolean(formatStructure));
       }
 
+      // Restore original data: URIs swapped out for placeholders prior to prompt construction
+      restoreDataUrisFromPrompt(chartData, dataUriStore);
+
       if (searchWarning) {
         chartData.searchWarning = searchWarning;
       }
 
       // Automatically resolve country flags or famous people photos programmatically
       try {
-        await this.resolvePointImages(chartData, inputText);
+        await this.resolvePointImages(chartData, inputText, signal);
       } catch (err) {
+        if (signal?.aborted || err?.name === 'AbortError') throw err;
         console.error('Error resolving point images in modifyChart:', err);
       }
 
@@ -964,6 +1077,9 @@ The user explicitly requested a "grouped chart" or multiple comparative metrics 
    * @returns {Error} - Enhanced error
    */
   enhanceError(error) {
+    if (error?.name === 'AbortError') {
+      return error;
+    }
     // Check for common error patterns
     if (error.message?.includes('JSON')) {
       return new Error(`Failed to parse ${this.adapter.serviceName} response as valid JSON`);
@@ -1040,8 +1156,12 @@ The user explicitly requested a "grouped chart" or multiple comparative metrics 
         if (ds.borderColor) slim.borderColor = ds.borderColor;
         if (ds.mode) slim.mode = ds.mode;
         if (ds.stack) slim.stack = ds.stack;
-        // Preserve pointImages so LLM doesn't drop them during modifications
-        if (ds.pointImages) slim.pointImages = ds.pointImages;
+        // Preserve pointImages (never raw base64 data URIs) so LLM doesn't drop them during modifications
+        if (ds.pointImages) {
+          slim.pointImages = ds.pointImages.map(img =>
+            typeof img === 'string' && img.startsWith('data:') ? '__UPLOADED_IMAGE__' : img
+          );
+        }
         if (ds.pointImageSearchQueries) slim.pointImageSearchQueries = ds.pointImageSearchQueries;
         if (ds.pointImageConfig) slim.pointImageConfig = ds.pointImageConfig;
         return slim;
@@ -1117,8 +1237,8 @@ The user explicitly requested a "grouped chart" or multiple comparative metrics 
    * Automatically resolve context-accurate images across multiple web & encyclopedia sources
    * (Brave Image Search, Tavily Image Search with descriptions, Brand Logo CDNs, FlagCDN, Unsplash, and Wikipedia).
    */
-  async resolvePointImages(chartData, userPrompt) {
-    if (!chartData) return;
+  async resolvePointImages(chartData, userPrompt, signal = null) {
+    if (!chartData || signal?.aborted) return;
 
     // Resolve target data container
     let chartDataContainer = chartData.chartData || chartData.data || (chartData.datasets ? chartData : null);
@@ -1146,7 +1266,7 @@ The user explicitly requested a "grouped chart" or multiple comparative metrics 
       return;
     }
 
-    const fetchPromises = [];
+    const fetchTasks = [];
 
     datasets.forEach(ds => {
       // Ensure pointImages array exists and matches the labels length
@@ -1178,10 +1298,15 @@ The user explicitly requested a "grouped chart" or multiple comparative metrics 
       }
 
       labels.forEach((label, idx) => {
+        const currentImg = ds.pointImages[idx];
+        // Preserve uploaded inline data: URIs untouched
+        if (typeof currentImg === 'string' && currentImg.startsWith('data:')) {
+          return;
+        }
+
         const cleanLabel = String(label || '').trim();
         if (!cleanLabel) return;
 
-        const currentImg = ds.pointImages[idx];
         const rawQueryMeta = ds.pointImageSearchQueries ? ds.pointImageSearchQueries[idx] : null;
         const meta = parsePointImageMeta(rawQueryMeta, cleanLabel, userPrompt, chartTitle, wantsFlags);
 
@@ -1200,32 +1325,33 @@ The user explicitly requested a "grouped chart" or multiple comparative metrics 
         const isUrl = (url) => typeof url === 'string' && (url.startsWith('http://') || url.startsWith('https://'));
         const isDuplicate = currentImg && ds.pointImages.filter(img => img === currentImg).length > 1;
 
-        const promise = (async () => {
-          // If a non-duplicate URL was already provided (e.g., user-preserved or search-grounded), verify it first
+        fetchTasks.push(async () => {
+          if (signal?.aborted) return;
           if (isUrl(currentImg) && !isDuplicate && !isPlaceholderImageUrl(currentImg)) {
             const normalizedExisting = normalizeWikimediaUrl(currentImg);
-            if (await validateImageUrl(normalizedExisting)) {
+            if (await validateImageUrl(normalizedExisting, 2500, signal)) {
               ds.pointImages[idx] = normalizedExisting;
               return;
             }
           }
 
-          const resolvedUrl = await resolveEntityImage(meta, cleanLabel, userPrompt, chartTitle);
+          if (signal?.aborted) return;
+          const resolvedUrl = await resolveEntityImage(meta, cleanLabel, userPrompt, chartTitle, signal);
           ds.pointImages[idx] = resolvedUrl ? normalizeWikimediaUrl(resolvedUrl) : null;
-        })();
-
-        fetchPromises.push(promise);
+        });
       });
     });
 
-    if (fetchPromises.length > 0) {
-      await Promise.all(fetchPromises);
+    if (fetchTasks.length > 0) {
+      await runWithConcurrency(fetchTasks, 5, signal);
     }
 
-    // Final pass: normalize all Wikimedia/Wikipedia image URLs to official Special:FilePath format
+    // Final pass: normalize all Wikimedia/Wikipedia image URLs to official Special:FilePath format (skip data: URIs)
     datasets.forEach(ds => {
       if (ds.pointImages && Array.isArray(ds.pointImages)) {
-        ds.pointImages = ds.pointImages.map(img => normalizeWikimediaUrl(img));
+        ds.pointImages = ds.pointImages.map(img =>
+          (typeof img === 'string' && img.startsWith('data:')) ? img : normalizeWikimediaUrl(img)
+        );
       }
     });
   }
@@ -1405,43 +1531,39 @@ function normalizeWikimediaUrl(url) {
  * Multi-Source Context-Aware Image Resolver
  * Routes each entity to the highest-reliability sources for its category and scores candidates against prompt context.
  */
-async function resolveEntityImage(meta, cleanLabel, userPrompt = '', chartTitle = '') {
+async function resolveEntityImage(meta, cleanLabel, userPrompt = '', chartTitle = '', parentSignal = null) {
+  if (parentSignal?.aborted) return null;
   const cacheKey = `${meta.type}:${cleanLabel.toLowerCase()}:${(meta.wikiTitle || meta.domain || meta.context || '').toLowerCase().substring(0, 60)}`;
   const cached = getCachedImage(cacheKey);
   if (cached) return cached;
+  if (inFlightImageLookups.has(cacheKey)) return inFlightImageLookups.get(cacheKey);
 
-  const resolveWithNetwork = async () => {
+  const resolveWithNetwork = async (entitySignal) => {
     // 1. COMPANY / BRAND / STARTUP / CRYPTO PIPELINE
     if (meta.type === 'company') {
-      // 1a. Free source: Wikimedia Commons / Wikipedia official vector/PNG logo file
-      const wikiLogo = await fetchWikimediaLogo(meta, cleanLabel);
-      if (wikiLogo && await validateImageUrl(wikiLogo, 2000)) {
+      const wikiLogo = await fetchWikimediaLogo(meta, cleanLabel, entitySignal);
+      if (wikiLogo && await validateImageUrl(wikiLogo, 2000, entitySignal)) {
         return wikiLogo;
       }
 
-      // 1b. Free source: Official domain logo CDN (Clearbit) if domain is known
       if (meta.domain) {
         const clearbitUrl = `https://logo.clearbit.com/${meta.domain}`;
-        if (await validateImageUrl(clearbitUrl, 1800)) {
+        if (await validateImageUrl(clearbitUrl, 1800, entitySignal)) {
           return clearbitUrl;
         }
       }
 
-      // 1c. Free source: Context-scored Wikipedia article image
-      const wikiPageImg = await fetchContextScoredWikiImage(meta, cleanLabel);
-      if (wikiPageImg && await validateImageUrl(wikiPageImg, 2000)) {
+      const wikiPageImg = await fetchContextScoredWikiImage(meta, cleanLabel, entitySignal);
+      if (wikiPageImg && await validateImageUrl(wikiPageImg, 2000, entitySignal)) {
         return wikiPageImg;
       }
 
-      // 1d. LIVE WEB IMAGE SEARCH (Brave Images + Tavily Images)
-      // Triggered ONLY if free sources were missing or returned a 404 / broken URL.
-      const webLogo = await fetchWebImageWithContext(meta, cleanLabel);
+      const webLogo = await fetchWebImageWithContext(meta, cleanLabel, entitySignal);
       if (webLogo) return webLogo;
 
-      // 1e. Final fallback to high-res Google Favicon CDN if domain is known
       if (meta.domain) {
         const gIconUrl = `https://t2.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://${meta.domain}&size=128`;
-        if (await validateImageUrl(gIconUrl, 1800)) {
+        if (await validateImageUrl(gIconUrl, 1800, entitySignal)) {
           return gIconUrl;
         }
       }
@@ -1451,15 +1573,12 @@ async function resolveEntityImage(meta, cleanLabel, userPrompt = '', chartTitle 
 
     // 2. MEDIA (MOVIES, SONGS, BOOKS, GAMES) & PRODUCTS (PHONES, CARS, GADGETS) PIPELINE
     if (meta.type === 'media' || meta.type === 'product') {
-      // 2a. Free source: exact/context-scored Wikipedia (supports /wikipedia/en/ fair-use movie posters & album art)
-      const wikiMediaUrl = await fetchContextScoredWikiImage(meta, cleanLabel);
-      if (wikiMediaUrl && await validateImageUrl(wikiMediaUrl, 2000)) {
+      const wikiMediaUrl = await fetchContextScoredWikiImage(meta, cleanLabel, entitySignal);
+      if (wikiMediaUrl && await validateImageUrl(wikiMediaUrl, 2000, entitySignal)) {
         return wikiMediaUrl;
       }
 
-      // 2b. Live Web Image Search (Brave Image Search + Tavily with image descriptions)
-      // Triggered ONLY if Wikipedia article had no image or returned a 404
-      const webMediaUrl = await fetchWebImageWithContext(meta, cleanLabel);
+      const webMediaUrl = await fetchWebImageWithContext(meta, cleanLabel, entitySignal);
       if (webMediaUrl) return webMediaUrl;
 
       return null;
@@ -1467,39 +1586,32 @@ async function resolveEntityImage(meta, cleanLabel, userPrompt = '', chartTitle 
 
     // 3. GENERIC OBJECT / FOOD / ANIMAL / CONCEPT PIPELINE
     if (meta.type === 'object') {
-      // 3a. Free source: Unsplash high-res photography if configured
-      const unsplashResult = await fetchUnsplashEntityImage(meta.query || cleanLabel);
-      if (unsplashResult?.url && await validateImageUrl(unsplashResult.url, 2000)) {
+      const unsplashResult = await fetchUnsplashEntityImage(meta.query || cleanLabel, entitySignal);
+      if (unsplashResult?.url && await validateImageUrl(unsplashResult.url, 2000, entitySignal)) {
         triggerUnsplashDownload(unsplashResult.downloadLocation);
         return unsplashResult.url;
       }
 
-      // 3b. Free source: Context-Scored Wikipedia
-      const wikiObjUrl = await fetchContextScoredWikiImage(meta, cleanLabel);
-      if (wikiObjUrl && await validateImageUrl(wikiObjUrl, 2000)) {
+      const wikiObjUrl = await fetchContextScoredWikiImage(meta, cleanLabel, entitySignal);
+      if (wikiObjUrl && await validateImageUrl(wikiObjUrl, 2000, entitySignal)) {
         return wikiObjUrl;
       }
 
-      // 3c. Live Web Image Search only if Unsplash & Wikipedia both failed or 404'd
-      const webObjUrl = await fetchWebImageWithContext(meta, cleanLabel);
+      const webObjUrl = await fetchWebImageWithContext(meta, cleanLabel, entitySignal);
       if (webObjUrl) return webObjUrl;
 
       return null;
     }
 
     // 4. PERSON / PLACE / GENERAL ENTITY PIPELINE
-    // 4a. Free source: Context-Scored Wikipedia lookup (Exact wikiTitle + Top-5 candidate scoring)
-    const wikiUrl = await fetchContextScoredWikiImage(meta, cleanLabel);
-    if (wikiUrl && await validateImageUrl(wikiUrl, 2000)) {
+    const wikiUrl = await fetchContextScoredWikiImage(meta, cleanLabel, entitySignal);
+    if (wikiUrl && await validateImageUrl(wikiUrl, 2000, entitySignal)) {
       return wikiUrl;
     }
 
-    // 4b. Live Web Image Search (Brave Image Search + Tavily Image Search with descriptions)
-    // Triggered ONLY when entity has no photo on Wikipedia or Wikipedia returns a 404
-    const webUrl = await fetchWebImageWithContext(meta, cleanLabel);
+    const webUrl = await fetchWebImageWithContext(meta, cleanLabel, entitySignal);
     if (webUrl) return webUrl;
 
-    // 4c. Manual Wikimedia Commons filename check fallback (only when no web search API keys are configured)
     if (!process.env.BRAVE_SEARCH_API_KEY && !process.env.TAVILY_API_KEY) {
       const cleanPersonName = cleanLabel.replace(/\s+(&|and)?\s*[Ff]amily\s*$/i, '').trim();
       const formattedName = cleanPersonName
@@ -1508,8 +1620,9 @@ async function resolveEntityImage(meta, cleanLabel, userPrompt = '', chartTitle 
         .join('_');
 
       for (const ext of ['jpg', 'png', 'jpeg']) {
+        if (entitySignal.aborted) break;
         const candidateFile = `${formattedName}.${ext}`;
-        if (await checkWikipediaFile(candidateFile)) {
+        if (await checkWikipediaFile(candidateFile, entitySignal)) {
           return `https://commons.wikimedia.org/wiki/Special:FilePath/${candidateFile}?width=500`;
         }
       }
@@ -1518,26 +1631,37 @@ async function resolveEntityImage(meta, cleanLabel, userPrompt = '', chartTitle 
     return null;
   };
 
-  try {
-    const resultUrl = await Promise.race([
-      resolveWithNetwork(),
-      new Promise(resolve => setTimeout(() => resolve(null), 9500))
-    ]);
-
-    if (resultUrl) {
-      setCachedImage(cacheKey, resultUrl);
+  const lookupPromise = (async () => {
+    const { signal: entitySignal, controller, cleanup } = combineAbortSignals(parentSignal, 9500);
+    try {
+      const resultUrl = await Promise.race([
+        resolveWithNetwork(entitySignal),
+        new Promise((resolve) => {
+          if (entitySignal.aborted) return resolve(null);
+          entitySignal.addEventListener('abort', () => resolve(null), { once: true });
+        })
+      ]);
+      // Ensure any slower remaining sub-requests abort once entity lookup completes or times out
+      controller.abort();
+      if (resultUrl) setCachedImage(cacheKey, resultUrl);
+      return resultUrl;
+    } catch {
+      return null;
+    } finally {
+      cleanup();
+      inFlightImageLookups.delete(cacheKey);
     }
-    return resultUrl;
-  } catch (err) {
-    return null;
-  }
+  })();
+
+  inFlightImageLookups.set(cacheKey, lookupPromise);
+  return lookupPromise;
 }
 
 /**
  * Search Wikipedia and Wikimedia Commons File namespace (gsrnamespace=6) for official vector/PNG logos
  * using the LLM-supplied wikiTitle, query, and label — no hardcoded brand lists.
  */
-async function fetchWikimediaLogo(meta, rawLabel) {
+async function fetchWikimediaLogo(meta, rawLabel, signal = null) {
   const cleanTerm = (str) => String(str || '')
     .replace(/_/g, ' ')
     .replace(/\s*\([^)]*\)\s*/g, ' ')
@@ -1560,15 +1684,18 @@ async function fetchWikimediaLogo(meta, rawLabel) {
   ];
 
   for (const term of searchTerms) {
+    if (signal?.aborted) return null;
     const searchVariants = [`${term} logo`, `${term} icon`];
     const entityWords = term.toLowerCase().split(/\W+/).filter(w => w.length > 1);
 
     for (const endpoint of endpoints) {
       for (const searchQuery of searchVariants) {
+        if (signal?.aborted) return null;
         try {
           const url = `${endpoint}?action=query&generator=search&gsrsearch=${encodeURIComponent(searchQuery)}&gsrnamespace=6&gsrlimit=6&prop=imageinfo&iiprop=url&iiurlwidth=500&format=json`;
           const res = await fetch(url, {
-            headers: { 'User-Agent': 'ChartGeneratorBot/1.0 (https://chartgenerator.app; support@chartgenerator.app)' }
+            headers: { 'User-Agent': 'ChartGeneratorBot/1.0 (https://chartgenerator.app; support@chartgenerator.app)' },
+            signal
           });
 
           if (!res.ok) continue;
@@ -1615,7 +1742,7 @@ async function fetchWikimediaLogo(meta, rawLabel) {
  * 2. Searches top 5 Wikipedia candidates (`gsrlimit=5&prop=pageimages|description|extracts`)
  *    and scores each candidate against the prompt context and entity type to avoid wrong homonyms.
  */
-async function fetchContextScoredWikiImage(meta, cleanLabel) {
+async function fetchContextScoredWikiImage(meta, cleanLabel, signal = null) {
   const headers = { 'User-Agent': 'ChartGeneratorBot/1.0 (https://chartgenerator.app; support@chartgenerator.app)' };
   const isUnsuitableImage = (sourceUrl, pageDesc = '') => {
     const lower = decodeURIComponent(String(sourceUrl || '')).toLowerCase();
@@ -1641,7 +1768,7 @@ async function fetchContextScoredWikiImage(meta, cleanLabel) {
     // 1. Explicit canonical Wikipedia Title lookup ONLY when wikiTitle is explicitly provided by the LLM
     if (meta.wikiTitle) {
       const directUrl = `https://en.wikipedia.org/w/api.php?action=query&titles=${encodeURIComponent(meta.wikiTitle)}&prop=pageimages|description&format=json&pithumbsize=500&pilicense=any&redirects=1`;
-      const directRes = await fetch(directUrl, { headers });
+      const directRes = await fetch(directUrl, { headers, signal });
       if (directRes.ok) {
         const directData = await directRes.json();
         const pages = directData.query?.pages ? Object.values(directData.query.pages) : [];
@@ -1680,8 +1807,9 @@ async function fetchContextScoredWikiImage(meta, cleanLabel) {
     }
 
     for (const sQuery of [...new Set(searchQueries)].filter(Boolean)) {
+      if (signal?.aborted) return null;
       const searchUrl = `https://en.wikipedia.org/w/api.php?action=query&generator=search&gsrsearch=${encodeURIComponent(sQuery)}&gsrlimit=5&prop=pageimages|description&format=json&pithumbsize=500&pilicense=any`;
-      const res = await fetch(searchUrl, { headers });
+      const res = await fetch(searchUrl, { headers, signal });
       if (!res.ok) continue;
 
       const data = await res.json();
@@ -1727,9 +1855,9 @@ async function fetchContextScoredWikiImage(meta, cleanLabel) {
     }
 
     // 3. MediaWiki REST API Summary fallback ONLY when wikiTitle is explicitly provided
-    if (meta.wikiTitle) {
+    if (meta.wikiTitle && !signal?.aborted) {
       const restUrl = `https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(meta.wikiTitle)}`;
-      const restRes = await fetch(restUrl, { headers });
+      const restRes = await fetch(restUrl, { headers, signal });
       if (restRes.ok) {
         const restData = await restRes.json();
         if (restData.type !== 'disambiguation') {
@@ -1837,7 +1965,8 @@ function scoreWikiCandidate(page, meta, cleanLabel) {
  * 1. Brave Image Search API (`/res/v1/images/search`)
  * 2. Tavily Search API (`include_images: true`, `include_image_descriptions: true`)
  */
-async function fetchWebImageWithContext(meta, cleanLabel) {
+async function fetchWebImageWithContext(meta, cleanLabel, signal = null) {
+  if (signal?.aborted) return null;
   let searchQuery = meta.query || cleanLabel;
   // Construct clean, high-precision targeted web image query by entity type to avoid query dilution
   if (meta.type === 'person') {
@@ -1851,22 +1980,26 @@ async function fetchWebImageWithContext(meta, cleanLabel) {
   }
 
   // 1. Try Brave Dedicated Image Search API first if BRAVE_SEARCH_API_KEY is configured
-  if (process.env.BRAVE_SEARCH_API_KEY) {
+  if (process.env.BRAVE_SEARCH_API_KEY && !signal?.aborted) {
     try {
-      const braveUrl = await fetchBraveImageSearch(searchQuery, meta, cleanLabel);
+      const braveUrl = await fetchBraveImageSearch(searchQuery, meta, cleanLabel, signal);
       if (braveUrl) return braveUrl;
     } catch (e) {
-      console.warn(`[WebImageResolver] Brave image search error for "${searchQuery}":`, e.message);
+      if (!signal?.aborted) {
+        console.warn(`[WebImageResolver] Brave image search error for "${searchQuery}":`, e.message);
+      }
     }
   }
 
   // 2. Try Tavily Search API with include_image_descriptions
-  if (process.env.TAVILY_API_KEY) {
+  if (process.env.TAVILY_API_KEY && !signal?.aborted) {
     try {
-      const tavilyUrl = await fetchTavilyImageWithContext(searchQuery, meta, cleanLabel);
+      const tavilyUrl = await fetchTavilyImageWithContext(searchQuery, meta, cleanLabel, signal);
       if (tavilyUrl) return tavilyUrl;
     } catch (e) {
-      console.warn(`[WebImageResolver] Tavily image search error for "${searchQuery}":`, e.message);
+      if (!signal?.aborted) {
+        console.warn(`[WebImageResolver] Tavily image search error for "${searchQuery}":`, e.message);
+      }
     }
   }
 
@@ -1877,9 +2010,9 @@ async function fetchWebImageWithContext(meta, cleanLabel) {
  * Brave Image Search API (`/res/v1/images/search`)
  * Searches across the entire web (IMDb, Forbes, company sites, product pages, news) and scores results against context.
  */
-async function fetchBraveImageSearch(query, meta, cleanLabel) {
+async function fetchBraveImageSearch(query, meta, cleanLabel, signal = null) {
   const apiKey = process.env.BRAVE_SEARCH_API_KEY;
-  if (!apiKey) return null;
+  if (!apiKey || signal?.aborted) return null;
 
   const params = new URLSearchParams({
     q: query,
@@ -1894,7 +2027,8 @@ async function fetchBraveImageSearch(query, meta, cleanLabel) {
       'Accept': 'application/json',
       'Accept-Encoding': 'gzip',
       'X-Subscription-Token': apiKey
-    }
+    },
+    signal
   });
 
   if (!response.ok) return null;
@@ -1938,10 +2072,12 @@ async function fetchBraveImageSearch(query, meta, cleanLabel) {
   }).sort((a, b) => b.score - a.score);
 
   for (const candidate of scored) {
-    if (candidate.directUrl && !isBadCandidateUrl(candidate.directUrl, candidate.titleLower) && await validateImageUrl(candidate.directUrl, 2200)) {
+    if (signal?.aborted) break;
+    if (candidate.directUrl && !isBadCandidateUrl(candidate.directUrl, candidate.titleLower) && await validateImageUrl(candidate.directUrl, 2200, signal)) {
       return candidate.directUrl;
     }
-    if (candidate.thumbUrl && !isBadCandidateUrl(candidate.thumbUrl, candidate.titleLower) && await validateImageUrl(candidate.thumbUrl, 2000)) {
+    if (signal?.aborted) break;
+    if (candidate.thumbUrl && !isBadCandidateUrl(candidate.thumbUrl, candidate.titleLower) && await validateImageUrl(candidate.thumbUrl, 2000, signal)) {
       return candidate.thumbUrl;
     }
   }
@@ -1953,9 +2089,9 @@ async function fetchBraveImageSearch(query, meta, cleanLabel) {
  * Tavily Image Search with AI Image Descriptions (`include_image_descriptions: true`)
  * Scores each returned web image's description & URL against the entity name and prompt context.
  */
-async function fetchTavilyImageWithContext(query, meta, cleanLabel) {
+async function fetchTavilyImageWithContext(query, meta, cleanLabel, signal = null) {
   const apiKey = process.env.TAVILY_API_KEY;
-  if (!apiKey) return null;
+  if (!apiKey || signal?.aborted) return null;
 
   const response = await fetch('https://api.tavily.com/search', {
     method: 'POST',
@@ -1967,7 +2103,8 @@ async function fetchTavilyImageWithContext(query, meta, cleanLabel) {
       search_depth: 'basic',
       include_images: true,
       include_image_descriptions: true
-    })
+    }),
+    signal
   });
 
   if (!response.ok) return null;
@@ -2023,7 +2160,8 @@ async function fetchTavilyImageWithContext(query, meta, cleanLabel) {
     .sort((a, b) => b.score - a.score);
 
   for (const candidate of candidates) {
-    if (await validateImageUrl(candidate.url, 2500)) {
+    if (signal?.aborted) break;
+    if (await validateImageUrl(candidate.url, 2500, signal)) {
       return candidate.url;
     }
   }
@@ -2034,16 +2172,17 @@ async function fetchTavilyImageWithContext(query, meta, cleanLabel) {
 /**
  * Unsplash Photo Search for generic objects, food, animals, lifestyle, or concepts
  */
-async function fetchUnsplashEntityImage(query) {
+async function fetchUnsplashEntityImage(query, signal = null) {
   const accessKey = process.env.UNSPLASH_ACCESS_KEY;
-  if (!accessKey || !query) return null;
+  if (!accessKey || !query || signal?.aborted) return null;
 
   try {
     const res = await fetch(`https://api.unsplash.com/search/photos?query=${encodeURIComponent(query)}&per_page=3&orientation=squarish&content_filter=high`, {
       headers: {
         Authorization: `Client-ID ${accessKey}`,
         'Accept-Version': 'v1',
-      }
+      },
+      signal
     });
     if (!res.ok) return null;
     const data = await res.json();
@@ -2122,13 +2261,13 @@ function isPlaceholderImageUrl(url) {
   return false;
 }
 
-async function checkWikipediaFile(name) {
+async function checkWikipediaFile(name, signal = null) {
   const url = `https://commons.wikimedia.org/wiki/Special:FilePath/${encodeURIComponent(name)}?width=500`;
-  return await validateImageUrl(url, 2000);
+  return await validateImageUrl(url, 2000, signal);
 }
 
-async function validateImageUrl(url, timeoutMs = 2500) {
-  if (!url || typeof url !== 'string' || !url.startsWith('http')) return false;
+async function validateImageUrl(url, timeoutMs = 2500, parentSignal = null) {
+  if (!url || typeof url !== 'string' || !url.startsWith('http') || parentSignal?.aborted) return false;
 
   try {
     const parsed = new URL(url);
@@ -2168,22 +2307,20 @@ async function validateImageUrl(url, timeoutMs = 2500) {
     return urlValidationCache.get(url);
   }
 
+  const { signal: combinedSignal, cleanup } = combineAbortSignals(parentSignal, timeoutMs);
   try {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
-
     let res = await fetch(url, {
       method: 'HEAD',
       headers: {
         'User-Agent': 'ChartGeneratorBot/1.0 (https://chartgenerator.app; support@chartgenerator.app)',
         'Accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8'
       },
-      signal: controller.signal,
+      signal: combinedSignal,
       redirect: 'follow'
     });
 
     // Fall back to GET with byte range if server rejects HEAD with 405 Method Not Allowed
-    if (res.status === 405) {
+    if (res.status === 405 && !combinedSignal.aborted) {
       res = await fetch(url, {
         method: 'GET',
         headers: {
@@ -2191,12 +2328,13 @@ async function validateImageUrl(url, timeoutMs = 2500) {
           'Accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
           'Range': 'bytes=0-1024'
         },
-        signal: controller.signal,
+        signal: combinedSignal,
         redirect: 'follow'
       });
     }
 
-    clearTimeout(timeoutId);
+    // Drain unused stream if GET fallback ran
+    try { res.body?.destroy(); } catch {}
 
     // If redirected to a placeholder (e.g. Wikimedia redirecting Special:FilePath/thumbnail.jpg to Name.jpg)
     if (res.url && isPlaceholderImageUrl(res.url)) {
@@ -2219,6 +2357,8 @@ async function validateImageUrl(url, timeoutMs = 2500) {
   } catch (e) {
     cacheValidation(url, false);
     return false;
+  } finally {
+    cleanup();
   }
 }
 

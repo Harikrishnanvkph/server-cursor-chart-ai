@@ -112,23 +112,36 @@ function addMonths(date, months) {
  */
 let hasExtendedProfileColumns = null;
 
-async function readUserWalletState(userId, profile) {
+async function readUserWalletState(userId, preloadedProfile = null, preloadedGrants = null) {
   // 1. Try native columns if not known to be missing
   if (hasExtendedProfileColumns !== false) {
-    const { data: extProfile, error: extErr } = await supabaseAdminClient
-      .from('profiles')
-      .select('purchased_ai_credits, permanent_cloud_credits, first_ai_bonus_claimed')
-      .eq('id', userId)
-      .maybeSingle();
+    let extProfile = preloadedProfile && preloadedProfile.purchased_ai_credits !== undefined
+      ? preloadedProfile
+      : null;
+    let extErr = null;
+
+    if (!extProfile) {
+      const res = await supabaseAdminClient
+        .from('profiles')
+        .select('purchased_ai_credits, permanent_cloud_credits, first_ai_bonus_claimed')
+        .eq('id', userId)
+        .maybeSingle();
+      extProfile = res.data;
+      extErr = res.error;
+    }
 
     if (!extErr && extProfile) {
       hasExtendedProfileColumns = true;
-      const { data: grants } = await supabaseAdminClient
-        .from('cloud_credit_grants')
-        .select('id, pack_id, credits_amount, purchased_at, expires_at, transaction_id')
-        .eq('user_id', userId)
-        .gt('expires_at', new Date().toISOString())
-        .order('expires_at', { ascending: true });
+      let grants = preloadedGrants;
+      if (!Array.isArray(grants)) {
+        const { data } = await supabaseAdminClient
+          .from('cloud_credit_grants')
+          .select('id, pack_id, credits_amount, purchased_at, expires_at, transaction_id')
+          .eq('user_id', userId)
+          .gt('expires_at', new Date().toISOString())
+          .order('expires_at', { ascending: true });
+        grants = data;
+      }
 
       return {
         mode: 'native',
@@ -189,7 +202,7 @@ async function writeUserWalletState(userId, walletState) {
   const effectiveCloudLimit = walletState.permanent_cloud_credits + bonusCloudSum;
 
   if (walletState.mode === 'native') {
-    await supabaseAdminClient
+    const { error } = await supabaseAdminClient
       .from('profiles')
       .update({
         purchased_ai_credits: walletState.purchased_ai_credits,
@@ -198,6 +211,9 @@ async function writeUserWalletState(userId, walletState) {
         cloud_charts_limit: effectiveCloudLimit,
       })
       .eq('id', userId);
+    if (error) {
+      throw new Error(`Failed to persist native wallet state: ${error.message}`);
+    }
     return;
   }
 
@@ -244,37 +260,51 @@ async function writeUserWalletState(userId, walletState) {
 /**
  * Get subscription and credit breakdown for a user with auto-monthly-reset for free AI credits
  */
-export async function getUserSubscription(userId) {
+export async function getUserSubscription(userId, options = {}) {
   if (!userId) return null;
+  const { throwOnError = false } = options;
 
   try {
-    // Run profile query, saved-chart count, wallet state lookup, and completed orders concurrently
-    const [
+    const baseCols = 'is_admin, subscription_tier, ai_credits_used, ai_credits_limit, cloud_charts_limit, credits_reset_at';
+    const profileCols = hasExtendedProfileColumns !== false
+      ? `${baseCols}, purchased_ai_credits, permanent_cloud_credits, first_ai_bonus_claimed`
+      : baseCols;
+
+    // Run single profile query, saved-chart count, active grants, and completed orders concurrently
+    let [
       { data: profile, error: profileErr },
-      { count: savedCount },
-      walletState,
+      { count: savedCount, error: savedCountErr },
+      { data: activeGrants },
       { data: completedTx }
     ] = await Promise.all([
-      supabaseAdminClient
-        .from('profiles')
-        .select('is_admin, subscription_tier, ai_credits_used, ai_credits_limit, cloud_charts_limit, credits_reset_at')
-        .eq('id', userId)
-        .single(),
-      supabaseAdminClient
-        .from('conversations')
-        .select('id', { count: 'exact', head: true })
-        .eq('user_id', userId)
-        .eq('is_active', true),
-      readUserWalletState(userId),
-      supabaseAdminClient
-        .from('payment_transactions')
-        .select('pack_id, metadata, created_at')
-        .eq('user_id', userId)
-        .eq('status', 'completed')
+      supabaseAdminClient.from('profiles').select(profileCols).eq('id', userId).single(),
+      supabaseAdminClient.from('conversations').select('id', { count: 'exact', head: true }).eq('user_id', userId).eq('is_active', true),
+      hasExtendedProfileColumns !== false
+        ? supabaseAdminClient.from('cloud_credit_grants').select('id, pack_id, credits_amount, purchased_at, expires_at, transaction_id').eq('user_id', userId).gt('expires_at', new Date().toISOString()).order('expires_at', { ascending: true })
+        : Promise.resolve({ data: null }),
+      supabaseAdminClient.from('payment_transactions').select('pack_id, metadata, created_at').eq('user_id', userId).eq('status', 'completed')
     ]);
 
-    if (profileErr || !profile) {
-      console.warn('Could not fetch profile for subscription info, using defaults:', profileErr?.message);
+    if (profileErr && (profileErr.code === '42703' || String(profileErr.message).includes('does not exist'))) {
+      hasExtendedProfileColumns = false;
+      ({ data: profile, error: profileErr } = await supabaseAdminClient.from('profiles').select(baseCols).eq('id', userId).single());
+    }
+
+    // Fail closed on transient DB/network errors instead of synthesizing free baseline quotas
+    if ((profileErr && profileErr.code !== 'PGRST116') || savedCountErr) {
+      const dbErr = profileErr || savedCountErr;
+      console.error('Database error fetching subscription/quota state:', dbErr?.message);
+      if (throwOnError) {
+        throw new Error(dbErr?.message || 'Database error verifying subscription');
+      }
+      return null;
+    }
+
+    const walletState = await readUserWalletState(userId, profile, activeGrants);
+
+    if (profileErr?.code === 'PGRST116' || !profile) {
+      if (throwOnError) return null;
+      console.warn('Profile row not found for subscription info, returning baseline state');
       return {
         subscription_tier: 'free',
         free_ai_credits_used: 0,
@@ -396,24 +426,8 @@ export async function getUserSubscription(userId) {
     };
   } catch (error) {
     console.error('Error in getUserSubscription:', error);
-    return {
-      subscription_tier: 'free',
-      free_ai_credits_used: 0,
-      free_ai_credits_limit: FREE_BASELINE.monthlyFreeAiCredits,
-      free_ai_credits_remaining: FREE_BASELINE.monthlyFreeAiCredits,
-      purchased_ai_credits: 0,
-      ai_credits_used: 0,
-      ai_credits_limit: FREE_BASELINE.monthlyFreeAiCredits,
-      ai_credits_remaining: FREE_BASELINE.monthlyFreeAiCredits,
-      permanent_cloud_credits: FREE_BASELINE.permanentCloudCredits,
-      bonus_cloud_credits: 0,
-      active_cloud_grants: [],
-      cloud_charts_limit: FREE_BASELINE.permanentCloudCredits,
-      saved_charts_count: 0,
-      cloud_charts_remaining: FREE_BASELINE.permanentCloudCredits,
-      first_ai_bonus_claimed: false,
-      credits_reset_at: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
-    };
+    if (throwOnError) throw error;
+    return null;
   }
 }
 
@@ -423,7 +437,13 @@ export async function getUserSubscription(userId) {
  * @param {number} requiredCredits - 1 for chart mode, 2 for template mode
  */
 export async function canConsumeAiCredit(userId, requiredCredits = 1) {
-  const sub = await getUserSubscription(userId);
+  let sub;
+  try {
+    sub = await getUserSubscription(userId, { throwOnError: true });
+  } catch {
+    return { allowed: false, unavailable: true, error: 'Credit verification temporarily unavailable. Please try again.' };
+  }
+
   if (!sub) {
     return { allowed: false, error: 'User not found' };
   }
@@ -435,7 +455,7 @@ export async function canConsumeAiCredit(userId, requiredCredits = 1) {
       requiredCredits,
       error: requiredCredits > 1
         ? `Template mode requires ${requiredCredits} AI credits, but you have ${sub.ai_credits_remaining} remaining. Top up your AI credits to continue.`
-        : 'You have used all your AI credits. Purchase an AI Credits pack ($2 Lite or $5 Pro) to continue generating charts.',
+        : 'You have used all your AI credits. Purchase an AI Credits pack (Lite or Pro) to continue generating charts.',
     };
   }
 
@@ -446,108 +466,200 @@ export async function canConsumeAiCredit(userId, requiredCredits = 1) {
  * Deduct AI credits (1 for chart mode, 2 for template mode):
  * Priority 1: Monthly Free AI Credits (10/month)
  * Priority 2: Purchased AI Credits (Never Expire)
- * Supports multi-credit deductions across free and purchased pools.
- * Returns the updated subscription state along with `deducted_amount`, `deducted_free`, `deducted_purchased`, and `deducted_bucket`.
- * @param {string} userId
- * @param {number} amount - Credits to deduct (default 1)
+ * Uses atomic row-locked SQL RPC `deduct_ai_credits(uuid, int)`.
  */
 export async function deductAiCredit(userId, amount = 1) {
-  try {
-    const sub = await getUserSubscription(userId);
-    if (!sub) return null;
+  if (!userId || !Number.isInteger(amount) || amount <= 0) return null;
 
-    if (sub.ai_credits_remaining < amount) {
+  try {
+    // Attempt atomic Postgres deduction first (requires migration 20261121000000)
+    const { data: rpcRows, error: rpcErr } = await supabaseAdminClient.rpc('deduct_ai_credits', {
+      p_user_id: userId,
+      p_amount: amount,
+    });
+
+    if (!rpcErr && Array.isArray(rpcRows) && rpcRows[0]) {
+      const row = rpcRows[0];
+      const freeUsed = Math.max(0, Number(row.out_free_used) || 0);
+      const freeLimit = FREE_BASELINE.monthlyFreeAiCredits;
+      const freeRemaining = Math.max(0, freeLimit - freeUsed);
+      const purchasedRemaining = Math.max(0, Number(row.out_purchased_remaining) || 0);
+      const totalRemaining = freeRemaining + purchasedRemaining;
+
+      const sub = await getUserSubscription(userId);
+      const baseState = sub || {
+        subscription_tier: 'free',
+        free_ai_credits_limit: freeLimit,
+        ai_credits_limit: freeLimit + purchasedRemaining,
+        permanent_cloud_credits: FREE_BASELINE.permanentCloudCredits,
+        bonus_cloud_credits: 0,
+        active_cloud_grants: [],
+        cloud_charts_limit: FREE_BASELINE.permanentCloudCredits,
+        saved_charts_count: 0,
+        cloud_charts_remaining: FREE_BASELINE.permanentCloudCredits,
+        first_ai_bonus_claimed: false,
+        credits_reset_at: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
+      };
+
+      const merged = {
+        ...baseState,
+        free_ai_credits_used: freeUsed,
+        free_ai_credits_limit: freeLimit,
+        free_ai_credits_remaining: freeRemaining,
+        purchased_ai_credits: purchasedRemaining,
+        ai_credits_used: freeUsed,
+        ai_credits_remaining: totalRemaining,
+      };
+
+      if (!row.success) {
+        return {
+          ...merged,
+          success: false,
+          exhausted: true,
+          requiredCredits: amount,
+          deducted_bucket: 'none',
+        };
+      }
+
       return {
-        ...sub,
-        success: false,
-        exhausted: true,
-        requiredCredits: amount,
-        deducted_bucket: 'none',
+        ...merged,
+        success: true,
+        deducted_amount: amount,
+        deducted_free: Number(row.out_deducted_free) || 0,
+        deducted_purchased: Number(row.out_deducted_purchased) || 0,
+        deducted_bucket: row.out_deducted_bucket || 'free',
       };
     }
 
-    const freeAvailable = sub.free_ai_credits_remaining || 0;
-    const freeToDeduct = Math.min(amount, freeAvailable);
-    const purchasedToDeduct = amount - freeToDeduct;
+    const isMissingRpc =
+      rpcErr &&
+      (rpcErr.code === '42883' ||
+        rpcErr.code === 'PGRST202' ||
+        rpcErr.code === '42703' ||
+        /could not find the function|does not exist/i.test(String(rpcErr.message || '')));
 
-    // Deduct free credits from profile if any (with optimistic concurrency check against concurrent requests)
-    let finalFreeUsed = sub.free_ai_credits_used;
-    if (freeToDeduct > 0) {
-      let nextUsed = sub.free_ai_credits_used + freeToDeduct;
-      let { data: updatedRows, error } = await supabaseAdminClient
-        .from('profiles')
-        .update({ ai_credits_used: nextUsed })
-        .eq('id', userId)
-        .eq('ai_credits_used', sub.free_ai_credits_used)
-        .select('id, ai_credits_used');
+    if (rpcErr && !isMissingRpc) {
+      console.error('Atomic deduct_ai_credits RPC error:', rpcErr.message);
+      return null;
+    }
 
-      // If a concurrent request updated ai_credits_used simultaneously, re-read once and retry
-      if (!error && (!updatedRows || updatedRows.length === 0)) {
-        const freshSub = await getUserSubscription(userId);
-        if (!freshSub || freshSub.ai_credits_remaining < amount) {
-          return {
-            ...(freshSub || sub),
-            success: false,
-            exhausted: true,
-            requiredCredits: amount,
-            deducted_bucket: 'none',
-          };
+    // Fallback when SQL RPC migration hasn't been applied yet:
+    // Perform bounded optimistic retry loop with full state recomputation.
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const sub = await getUserSubscription(userId, { throwOnError: true });
+      if (!sub) return null;
+
+      if (sub.ai_credits_remaining < amount) {
+        return {
+          ...sub,
+          success: false,
+          exhausted: true,
+          requiredCredits: amount,
+          deducted_bucket: 'none',
+        };
+      }
+
+      const freeAvailable = sub.free_ai_credits_remaining || 0;
+      const freeToDeduct = Math.min(amount, freeAvailable);
+      const purchasedToDeduct = amount - freeToDeduct;
+
+      if (hasExtendedProfileColumns === true) {
+        const nextUsed = sub.free_ai_credits_used + freeToDeduct;
+        const nextPurchased = Math.max(0, (sub.purchased_ai_credits || 0) - purchasedToDeduct);
+        const { data: updatedRows, error: updateErr } = await supabaseAdminClient
+          .from('profiles')
+          .update({
+            ai_credits_used: nextUsed,
+            purchased_ai_credits: nextPurchased,
+          })
+          .eq('id', userId)
+          .eq('ai_credits_used', sub.free_ai_credits_used)
+          .eq('purchased_ai_credits', sub.purchased_ai_credits || 0)
+          .select('id, ai_credits_used, purchased_ai_credits');
+
+        if (updateErr) {
+          console.error('Failed to deduct AI credit (fallback native):', updateErr.message);
+          return null;
         }
-        nextUsed = freshSub.free_ai_credits_used + freeToDeduct;
-        const retryRes = await supabaseAdminClient
+        if (!updatedRows || updatedRows.length === 0) {
+          continue; // Concurrent mutation detected; retry once with freshly read pool
+        }
+
+        const nextFreeRemaining = Math.max(0, sub.free_ai_credits_limit - nextUsed);
+        const bucket =
+          freeToDeduct > 0 && purchasedToDeduct > 0
+            ? 'split'
+            : freeToDeduct > 0
+            ? 'free'
+            : 'purchased';
+
+        return {
+          ...sub,
+          free_ai_credits_used: nextUsed,
+          free_ai_credits_remaining: nextFreeRemaining,
+          purchased_ai_credits: nextPurchased,
+          ai_credits_used: nextUsed,
+          ai_credits_remaining: nextFreeRemaining + nextPurchased,
+          success: true,
+          deducted_amount: amount,
+          deducted_free: freeToDeduct,
+          deducted_purchased: purchasedToDeduct,
+          deducted_bucket: bucket,
+        };
+      }
+
+      // Legacy non-native wallet fallback
+      let finalFreeUsed = sub.free_ai_credits_used;
+      if (freeToDeduct > 0) {
+        const nextUsed = sub.free_ai_credits_used + freeToDeduct;
+        const { data: updatedRows, error } = await supabaseAdminClient
           .from('profiles')
           .update({ ai_credits_used: nextUsed })
           .eq('id', userId)
-          .eq('ai_credits_used', freshSub.free_ai_credits_used)
+          .eq('ai_credits_used', sub.free_ai_credits_used)
           .select('id, ai_credits_used');
-        error = retryRes.error;
-        updatedRows = retryRes.data;
-        if (!error && (!updatedRows || updatedRows.length === 0)) {
+
+        if (error) {
+          console.error('Failed to deduct free AI credit:', error.message);
           return null;
         }
+        if (!updatedRows || updatedRows.length === 0) {
+          continue;
+        }
+        finalFreeUsed = nextUsed;
       }
 
-      if (error) {
-        console.error('Failed to deduct free AI credit:', error.message);
-        return null;
+      if (purchasedToDeduct > 0) {
+        const walletState = await readUserWalletState(userId);
+        walletState.purchased_ai_credits = Math.max(0, (walletState.purchased_ai_credits || 0) - purchasedToDeduct);
+        await writeUserWalletState(userId, walletState);
       }
-      finalFreeUsed = nextUsed;
+
+      const nextFreeRemaining = Math.max(0, sub.free_ai_credits_limit - finalFreeUsed);
+      const nextPurchasedRemaining = Math.max(0, sub.purchased_ai_credits - purchasedToDeduct);
+      const bucket =
+        freeToDeduct > 0 && purchasedToDeduct > 0
+          ? 'split'
+          : freeToDeduct > 0
+          ? 'free'
+          : 'purchased';
+
+      return {
+        ...sub,
+        free_ai_credits_used: finalFreeUsed,
+        free_ai_credits_remaining: nextFreeRemaining,
+        purchased_ai_credits: nextPurchasedRemaining,
+        ai_credits_used: finalFreeUsed,
+        ai_credits_remaining: nextFreeRemaining + nextPurchasedRemaining,
+        success: true,
+        deducted_amount: amount,
+        deducted_free: freeToDeduct,
+        deducted_purchased: purchasedToDeduct,
+        deducted_bucket: bucket,
+      };
     }
 
-    // Deduct purchased credits from wallet state if any
-    if (purchasedToDeduct > 0) {
-      const walletState = await readUserWalletState(userId);
-      walletState.purchased_ai_credits = Math.max(0, (walletState.purchased_ai_credits || 0) - purchasedToDeduct);
-      await writeUserWalletState(userId, walletState);
-    }
-
-    const nextFreeUsed = finalFreeUsed;
-    const nextFreeRemaining = Math.max(0, sub.free_ai_credits_limit - nextFreeUsed);
-    const nextPurchasedRemaining = Math.max(0, sub.purchased_ai_credits - purchasedToDeduct);
-    const nextTotalRemaining = nextFreeRemaining + nextPurchasedRemaining;
-    const updated = {
-      ...sub,
-      free_ai_credits_used: nextFreeUsed,
-      free_ai_credits_remaining: nextFreeRemaining,
-      purchased_ai_credits: nextPurchasedRemaining,
-      ai_credits_used: nextFreeUsed,
-      ai_credits_remaining: nextTotalRemaining,
-    };
-    const bucket =
-      freeToDeduct > 0 && purchasedToDeduct > 0
-        ? 'split'
-        : freeToDeduct > 0
-        ? 'free'
-        : 'purchased';
-
-    return {
-      ...updated,
-      success: true,
-      deducted_amount: amount,
-      deducted_free: freeToDeduct,
-      deducted_purchased: purchasedToDeduct,
-      deducted_bucket: bucket,
-    };
+    return null;
   } catch (error) {
     console.error('Error deducting AI credit:', error);
     return null;
@@ -556,8 +668,7 @@ export async function deductAiCredit(userId, amount = 1) {
 
 /**
  * Refund AI credits when an upstream AI generation fails or is aborted.
- * Refunds back to the exact bucket ('free' or 'purchased') that was deducted.
- * Supports refunding breakdown object { free, purchased } or legacy bucket string.
+ * Refunds back to the exact bucket ('free', 'purchased', or split) that was deducted.
  * @param {string} userId
  * @param {string | { free?: number, purchased?: number, amount?: number, bucket?: string }} details
  */
@@ -574,15 +685,41 @@ export async function refundAiCredit(userId, details = 'free') {
         freeToRefund = 1;
       }
     } else if (typeof details === 'object' && details !== null) {
-      freeToRefund = Number(details.free) || 0;
-      purchasedToRefund = Number(details.purchased) || 0;
+      freeToRefund = Math.max(0, Number(details.free) || 0);
+      purchasedToRefund = Math.max(0, Number(details.purchased) || 0);
       if (freeToRefund === 0 && purchasedToRefund === 0) {
         if (details.bucket === 'purchased') {
-          purchasedToRefund = Number(details.amount) || 1;
+          purchasedToRefund = Math.max(1, Number(details.amount) || 1);
         } else {
-          freeToRefund = Number(details.amount) || 1;
+          freeToRefund = Math.max(1, Number(details.amount) || 1);
         }
       }
+    }
+
+    const { data: rpcRows, error: rpcErr } = await supabaseAdminClient.rpc('refund_ai_credits', {
+      p_user_id: userId,
+      p_free: freeToRefund,
+      p_purchased: purchasedToRefund,
+    });
+
+    if (!rpcErr && Array.isArray(rpcRows) && rpcRows[0]) {
+      return {
+        success: Boolean(rpcRows[0].success),
+        free_ai_credits_used: rpcRows[0].out_free_used,
+        purchased_ai_credits: rpcRows[0].out_purchased_remaining,
+      };
+    }
+
+    const isMissingRpc =
+      rpcErr &&
+      (rpcErr.code === '42883' ||
+        rpcErr.code === 'PGRST202' ||
+        rpcErr.code === '42703' ||
+        /could not find the function|does not exist/i.test(String(rpcErr.message || '')));
+
+    if (rpcErr && !isMissingRpc) {
+      console.error('Atomic refund_ai_credits RPC error:', rpcErr.message);
+      return null;
     }
 
     if (purchasedToRefund > 0) {
@@ -618,7 +755,17 @@ export async function refundAiCredit(userId, details = 'free') {
  * Check whether user can save another cloud chart conversation
  */
 export async function canSaveCloudChart(userId) {
-  const sub = await getUserSubscription(userId);
+  let sub;
+  try {
+    sub = await getUserSubscription(userId, { throwOnError: true });
+  } catch {
+    return {
+      allowed: false,
+      unavailable: true,
+      error: 'Unable to verify cloud storage quota right now. Please try again.',
+    };
+  }
+
   if (!sub) {
     return { allowed: false, error: 'User not found' };
   }
@@ -627,7 +774,7 @@ export async function canSaveCloudChart(userId) {
     return {
       allowed: false,
       subscription: sub,
-      error: `Cloud save limit reached (${sub.saved_charts_count}/${sub.cloud_charts_limit} saved charts). Purchase a Cloud Credits pack ($2 for +10 saves or $5 for +15 saves) or delete unused charts in your Board.`,
+      error: `Cloud save limit reached (${sub.saved_charts_count}/${sub.cloud_charts_limit} saved charts). Purchase a Cloud Credits pack (+10 or +15 saves) or delete unused charts in your Board.`,
     };
   }
 
@@ -636,7 +783,8 @@ export async function canSaveCloudChart(userId) {
 
 /**
  * Fulfill a one-time Credit Pack purchase ('ai_lite' | 'ai_pro' | 'cloud_lite' | 'cloud_pro')
- * Idempotent by orderId / paymentId so webhook + client verification never double-grant.
+ * Atomically claims `payment_transactions.fulfilled = true` before mutating balances
+ * so concurrent webhook + client return verification can never double-grant credits.
  */
 export async function fulfillCreditPackPurchase({
   userId,
@@ -651,38 +799,66 @@ export async function fulfillCreditPackPurchase({
   const normalizedPackId = CREDIT_PACKS[packId] ? packId : 'ai_pro';
   const pack = CREDIT_PACKS[normalizedPackId];
   const idempotencyKey = orderId || paymentId || transactionId || `tx_${Date.now()}`;
+  const nowIso = new Date().toISOString();
 
-  const walletState = await readUserWalletState(userId);
+  // 1. Atomic conditional claim on payment_transactions BEFORE mutating wallet/credits
+  let dbClaimed = false;
+  let claimedTxId = transactionId || null;
 
-  // Check database transaction table for native/cross-mode idempotency
-  let alreadyFulfilledInDb = false;
   if (transactionId || orderId || paymentId) {
-    let txCheckQuery = supabaseAdminClient
+    let claimQuery = supabaseAdminClient
       .from('payment_transactions')
-      .select('id, fulfilled, metadata')
-      .eq('user_id', userId);
+      .update({
+        fulfilled: true,
+        status: 'completed',
+        updated_at: nowIso,
+      })
+      .eq('user_id', userId)
+      .or('fulfilled.is.null,fulfilled.eq.false');
 
     if (transactionId) {
-      txCheckQuery = txCheckQuery.eq('id', transactionId);
+      claimQuery = claimQuery.eq('id', transactionId);
     } else if (orderId) {
-      txCheckQuery = txCheckQuery.eq('gateway_order_id', orderId);
+      claimQuery = claimQuery.eq('gateway_order_id', orderId);
     } else if (paymentId) {
-      txCheckQuery = txCheckQuery.eq('gateway_payment_id', paymentId);
+      claimQuery = claimQuery.eq('gateway_payment_id', paymentId);
     }
 
-    const { data: existingTxRows } = await txCheckQuery.limit(5);
-    if (Array.isArray(existingTxRows)) {
-      alreadyFulfilledInDb = existingTxRows.some(
-        (row) => row.fulfilled === true || row.metadata?.fulfilled === true
-      );
+    const { data: claimedRows, error: claimErr } = await claimQuery.select('id');
+
+    if (!claimErr) {
+      if (Array.isArray(claimedRows) && claimedRows.length > 0) {
+        dbClaimed = true;
+        claimedTxId = claimedTxId || claimedRows[0].id;
+      } else {
+        // 0 rows updated: check whether matching row exists and was already fulfilled
+        let existingCheck = supabaseAdminClient
+          .from('payment_transactions')
+          .select('id, fulfilled, metadata')
+          .eq('user_id', userId);
+        if (transactionId) existingCheck = existingCheck.eq('id', transactionId);
+        else if (orderId) existingCheck = existingCheck.eq('gateway_order_id', orderId);
+        else if (paymentId) existingCheck = existingCheck.eq('gateway_payment_id', paymentId);
+
+        const { data: existingRows } = await existingCheck.limit(5);
+        if (Array.isArray(existingRows) && existingRows.length > 0) {
+          const existingSub = await getUserSubscription(userId);
+          return {
+            ...existingSub,
+            alreadyFulfilled: true,
+            packId: normalizedPackId,
+          };
+        }
+      }
+    } else if (claimErr.code !== '42703' && !String(claimErr.message).includes('does not exist')) {
+      throw new Error(`Failed to claim payment transaction: ${claimErr.message}`);
     }
   }
 
-  // Idempotency guard: if this order was already fulfilled, return current subscription without double-adding
-  if (
-    alreadyFulfilledInDb ||
-    (idempotencyKey && walletState.fulfilled_orders?.includes(idempotencyKey))
-  ) {
+  const walletState = await readUserWalletState(userId);
+
+  // Secondary idempotency check for wallet_state / non-DB simulation orders
+  if (!dbClaimed && idempotencyKey && walletState.fulfilled_orders?.includes(idempotencyKey)) {
     const existingSub = await getUserSubscription(userId);
     return {
       ...existingSub,
@@ -696,64 +872,74 @@ export async function fulfillCreditPackPurchase({
   let temporaryCloudCreditsAdded = 0;
   let expiresAtIso = null;
 
-  if (pack.category === 'ai') {
-    // 1. Add never-expiring AI credits (+30 for Lite, +100 for Pro)
-    aiCreditsAdded = pack.aiCredits;
-    walletState.purchased_ai_credits = (walletState.purchased_ai_credits || 0) + aiCreditsAdded;
-    walletState.total_purchased_ai_credits = (walletState.total_purchased_ai_credits || 0) + aiCreditsAdded;
+  try {
+    if (pack.category === 'ai') {
+      aiCreditsAdded = pack.aiCredits;
+      walletState.purchased_ai_credits = (walletState.purchased_ai_credits || 0) + aiCreditsAdded;
+      walletState.total_purchased_ai_credits = (walletState.total_purchased_ai_credits || 0) + aiCreditsAdded;
 
-    // 2. Grant +5 permanent cloud save credits ONLY on the user's very first AI pack purchase
-    if (!walletState.first_ai_bonus_claimed) {
-      permanentCloudBonusAdded = FREE_BASELINE.firstAiPurchaseCloudBonus; // +5
-      walletState.permanent_cloud_credits =
-        FREE_BASELINE.permanentCloudCredits + permanentCloudBonusAdded; // 5 + 5 = 10
-      walletState.first_ai_bonus_claimed = true;
-    }
-  } else if (pack.category === 'cloud') {
-    // Time-limited cloud save credits (+10 for 2 months, +15 for 6 months)
-    temporaryCloudCreditsAdded = pack.cloudCredits;
-    const now = new Date();
-    const expiresAt = addMonths(now, pack.validityMonths || 2);
-    expiresAtIso = expiresAt.toISOString();
-
-    const newGrant = {
-      id: crypto.randomUUID(),
-      pack_id: normalizedPackId,
-      credits_amount: temporaryCloudCreditsAdded,
-      purchased_at: now.toISOString(),
-      expires_at: expiresAtIso,
-      transaction_id: transactionId || null,
-    };
-
-    if (walletState.mode === 'native') {
-      const { error: grantErr } = await supabaseAdminClient
-        .from('cloud_credit_grants')
-        .insert({
-          user_id: userId,
-          pack_id: normalizedPackId,
-          credits_amount: temporaryCloudCreditsAdded,
-          purchased_at: newGrant.purchased_at,
-          expires_at: newGrant.expires_at,
-          transaction_id: transactionId || null,
-        });
-      if (grantErr) {
-        console.warn('Could not insert into cloud_credit_grants, falling back:', grantErr.message);
+      if (!walletState.first_ai_bonus_claimed) {
+        permanentCloudBonusAdded = FREE_BASELINE.firstAiPurchaseCloudBonus; // +5
+        walletState.permanent_cloud_credits =
+          FREE_BASELINE.permanentCloudCredits + permanentCloudBonusAdded; // 5 + 5 = 10
+        walletState.first_ai_bonus_claimed = true;
       }
+    } else if (pack.category === 'cloud') {
+      temporaryCloudCreditsAdded = pack.cloudCredits;
+      const now = new Date();
+      const expiresAt = addMonths(now, pack.validityMonths || 2);
+      expiresAtIso = expiresAt.toISOString();
+
+      const newGrant = {
+        id: crypto.randomUUID(),
+        pack_id: normalizedPackId,
+        credits_amount: temporaryCloudCreditsAdded,
+        purchased_at: now.toISOString(),
+        expires_at: expiresAtIso,
+        transaction_id: claimedTxId,
+      };
+
+      if (walletState.mode === 'native') {
+        const { error: grantErr } = await supabaseAdminClient
+          .from('cloud_credit_grants')
+          .insert({
+            user_id: userId,
+            pack_id: normalizedPackId,
+            credits_amount: temporaryCloudCreditsAdded,
+            purchased_at: newGrant.purchased_at,
+            expires_at: newGrant.expires_at,
+            transaction_id: claimedTxId,
+          });
+        if (grantErr) {
+          throw new Error(`Failed to insert cloud_credit_grants: ${grantErr.message}`);
+        }
+      }
+
+      walletState.cloud_grants = [...(walletState.cloud_grants || []), newGrant];
     }
 
-    walletState.cloud_grants = [...(walletState.cloud_grants || []), newGrant];
+    walletState.fulfilled_orders = [
+      ...(walletState.fulfilled_orders || []).slice(-49),
+      idempotencyKey,
+    ];
+
+    await writeUserWalletState(userId, walletState);
+  } catch (fulfillErr) {
+    // Best-effort revert claim if mutating wallet/grants failed so webhook retries can recover
+    if (dbClaimed && claimedTxId) {
+      try {
+        await supabaseAdminClient
+          .from('payment_transactions')
+          .update({ fulfilled: false, updated_at: new Date().toISOString() })
+          .eq('id', claimedTxId)
+          .eq('user_id', userId);
+      } catch {}
+    }
+    throw fulfillErr;
   }
 
-  // Record idempotency key (keep last 50 order IDs)
-  walletState.fulfilled_orders = [
-    ...(walletState.fulfilled_orders || []).slice(-49),
-    idempotencyKey,
-  ];
-
-  await writeUserWalletState(userId, walletState);
-
-  // Mark payment_transactions row as fulfilled for native-mode idempotency
-  if (transactionId || orderId || paymentId) {
+  // Fallback marker when payment_transactions existed without fulfilled column support above
+  if (!dbClaimed && (transactionId || orderId || paymentId)) {
     let markQuery = supabaseAdminClient
       .from('payment_transactions')
       .update({
@@ -762,13 +948,9 @@ export async function fulfillCreditPackPurchase({
       })
       .eq('user_id', userId);
 
-    if (transactionId) {
-      markQuery = markQuery.eq('id', transactionId);
-    } else if (orderId) {
-      markQuery = markQuery.eq('gateway_order_id', orderId);
-    } else if (paymentId) {
-      markQuery = markQuery.eq('gateway_payment_id', paymentId);
-    }
+    if (transactionId) markQuery = markQuery.eq('id', transactionId);
+    else if (orderId) markQuery = markQuery.eq('gateway_order_id', orderId);
+    else if (paymentId) markQuery = markQuery.eq('gateway_payment_id', paymentId);
 
     const { error: markErr } = await markQuery;
     if (markErr) {

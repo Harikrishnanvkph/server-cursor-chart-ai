@@ -2,84 +2,23 @@ import { supabaseAdminClient } from '../supabase/client.js';
 import { resolveLocationContext } from './geoService.js';
 import { CREDIT_PACKS, fulfillCreditPackPurchase } from './subscriptionService.js';
 
-export const PAYMENT_PLANS = {
-  ai_lite: {
-    id: 'ai_lite',
-    category: 'ai',
-    name: 'AI Lite',
-    displayName: 'Lite User',
-    description: '+30 AI credits (Never Expire) + 5 Cloud Save credits on first AI payment.',
-    pricing: {
-      USD: {
-        currency: 'USD',
-        symbol: '$',
-        oneTime: 2,
-      },
-      INR: {
-        currency: 'INR',
-        symbol: '₹',
-        oneTime: 99,
+// Derived from CREDIT_PACKS single source of truth for backward compatibility
+export const PAYMENT_PLANS = Object.fromEntries(
+  Object.entries(CREDIT_PACKS).map(([id, pack]) => [
+    id,
+    {
+      id: pack.id,
+      category: pack.category,
+      name: pack.name,
+      displayName: pack.displayName,
+      description: pack.description,
+      pricing: {
+        USD: { currency: 'USD', symbol: '$', oneTime: pack.priceUsd },
+        INR: { currency: 'INR', symbol: '₹', oneTime: pack.priceInr },
       },
     },
-  },
-  ai_pro: {
-    id: 'ai_pro',
-    category: 'ai',
-    name: 'AI Pro',
-    displayName: 'Pro User',
-    description: '+100 AI credits (Never Expire) + 5 Cloud Save credits on first AI payment.',
-    pricing: {
-      USD: {
-        currency: 'USD',
-        symbol: '$',
-        oneTime: 5,
-      },
-      INR: {
-        currency: 'INR',
-        symbol: '₹',
-        oneTime: 249,
-      },
-    },
-  },
-  cloud_lite: {
-    id: 'cloud_lite',
-    category: 'cloud',
-    name: 'Cloud Lite',
-    displayName: 'Lite User',
-    description: '+10 Cloud Save credits valid for 2 months.',
-    pricing: {
-      USD: {
-        currency: 'USD',
-        symbol: '$',
-        oneTime: 2,
-      },
-      INR: {
-        currency: 'INR',
-        symbol: '₹',
-        oneTime: 99,
-      },
-    },
-  },
-  cloud_pro: {
-    id: 'cloud_pro',
-    category: 'cloud',
-    name: 'Cloud Pro',
-    displayName: 'Pro User',
-    description: '+15 Cloud Save credits valid for 6 months.',
-    pricing: {
-      USD: {
-        currency: 'USD',
-        symbol: '$',
-        oneTime: 5,
-      },
-      INR: {
-        currency: 'INR',
-        symbol: '₹',
-        oneTime: 249,
-      },
-    },
-  },
-};
+  ])
+);
 
 /**
  * Normalize packId from either explicit packId or legacy planTier
